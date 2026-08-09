@@ -2,3 +2,5 @@
 Task 1: complete (commits e81f116..c3e91f7, review clean)
 Task 2: minor (deferred): commit a2ca013 swept in an unrelated leftover file (review-e81f116..c3e91f7.diff, 702 lines) alongside src/errors.ts, src/errors.test.ts, tsconfig.json — controller `git add`/`git commit` staged everything already staged by `taskferry accept` instead of only the intended paths. Harmless (file belongs in the tracked SDD workspace anyway), just pollutes the commit boundary. No fix needed.
 Task 2: complete (commits bc9f3ab..a2ca013, review clean, 1 minor deferred — see above)
+Task 3: minor (deferred): src/output.ts truncate() with limit<=0 silently drops chars via slice(0,-1) instead of returning "" (brief-mandated code, brief line 93); collapseHomeDirectory has a sibling-directory prefix collision (e.g. /home/user2 under homeDir=/home/user) (brief-mandated, brief line 77); task-3-report.md cites a stale pre-accept commit hash (728f475 vs actual b357da6) — expected artifact of taskferry accept flattening sandbox commits, not a real defect. None block the task.
+Task 3: complete (commits b4a65a3..b357da6, review clean, 3 minor deferred — see above)
