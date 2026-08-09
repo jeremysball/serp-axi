@@ -1,0 +1,113 @@
+import { SerperAxiError } from "./errors.ts";
+
+export interface SearchParams {
+  q: string;
+  gl: string;
+  hl: string;
+  num: number;
+}
+
+export interface OrganicResult {
+  position: number;
+  title: string;
+  link: string;
+  snippet: string;
+  date?: string;
+  sitelinks?: unknown;
+}
+
+export interface SearchResponse {
+  organic: OrganicResult[];
+}
+
+export interface ScrapeResponse {
+  text: string;
+  metadata: { title?: string; [key: string]: unknown };
+}
+
+interface SerperErrorBody {
+  message?: string;
+  statusCode?: number;
+}
+
+async function serperRequest(url: string, apiKey: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "X-API-KEY": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    throw new SerperAxiError(
+      `network error calling Serper: ${(cause as Error).message}`,
+      "runtime",
+      "check network connectivity and retry",
+    );
+  }
+
+  if (response.ok) {
+    return response.json();
+  }
+
+  let parsed: SerperErrorBody = {};
+  try {
+    parsed = (await response.json()) as SerperErrorBody;
+  } catch {
+    // body wasn't JSON; fall through with an empty parsed body
+  }
+
+  if (response.status === 403) {
+    throw new SerperAxiError(
+      "Serper rejected the API key (403)",
+      "runtime",
+      "check that SERPER_API_KEY is set to a valid key",
+    );
+  }
+  if (response.status === 429) {
+    throw new SerperAxiError("Serper rate-limited this request (429)", "runtime", "wait and retry later");
+  }
+  if (response.status === 404) {
+    throw new SerperAxiError(
+      "Serper could not find the requested page (404)",
+      "runtime",
+      "verify the URL is correct and reachable",
+    );
+  }
+  if (response.status >= 500) {
+    throw new SerperAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
+  }
+
+  const excerpt = JSON.stringify(parsed).slice(0, 300);
+  throw new SerperAxiError(
+    `Serper returned an unexpected status ${response.status}: ${excerpt}`,
+    "runtime",
+    "this is not a status serper-axi maps explicitly; report it if it persists",
+  );
+}
+
+export async function searchSerper(
+  apiKey: string,
+  params: SearchParams,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SearchResponse> {
+  const body = await serperRequest(
+    "https://google.serper.dev/search",
+    apiKey,
+    { q: params.q, gl: params.gl, hl: params.hl, num: params.num },
+    fetchImpl,
+  );
+  return body as SearchResponse;
+}
+
+export async function scrapeSerper(
+  apiKey: string,
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ScrapeResponse> {
+  const body = await serperRequest("https://scrape.serper.dev", apiKey, { url }, fetchImpl);
+  return body as ScrapeResponse;
+}
