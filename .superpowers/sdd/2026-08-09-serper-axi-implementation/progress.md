@@ -4,3 +4,6 @@ Task 2: minor (deferred): commit a2ca013 swept in an unrelated leftover file (re
 Task 2: complete (commits bc9f3ab..a2ca013, review clean, 1 minor deferred — see above)
 Task 3: minor (deferred): src/output.ts truncate() with limit<=0 silently drops chars via slice(0,-1) instead of returning "" (brief-mandated code, brief line 93); collapseHomeDirectory has a sibling-directory prefix collision (e.g. /home/user2 under homeDir=/home/user) (brief-mandated, brief line 77); task-3-report.md cites a stale pre-accept commit hash (728f475 vs actual b357da6) — expected artifact of taskferry accept flattening sandbox commits, not a real defect. None block the task.
 Task 3: complete (commits b4a65a3..b357da6, review clean, 3 minor deferred — see above)
+Task 4: fix round 1/5 (2 addressed, 0 open — raw-HTTP-body leak in unmapped-status error message; raw SyntaxError escaping the success path instead of SerperAxiError; both plan-mandated, human ruled fix-wins-over-plan-text; commits 6eba7a5..9a8e5b5)
+Task 4: minor (deferred): task-4-report.md's fix-round entry cites a stale pre-accept commit hash (b0f5177 vs actual 9a8e5b5) — same taskferry-accept-flattening artifact as Task 3's stale-hash note, not a real defect.
+Task 4: complete (commits e4e24b4..9a8e5b5, 1 fix round, 1 minor deferred — see above)
