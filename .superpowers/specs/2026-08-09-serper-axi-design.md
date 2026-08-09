@@ -1,7 +1,7 @@
 # serper-axi design
 
 Date: 2026-08-09
-Revision: 2 (rewritten after a ferried plan review; see "Revision history")
+Revision: 3 (dropped the `axi-sdk-js` dependency; see "Revision history")
 
 ## Purpose
 
@@ -19,25 +19,29 @@ is located by whatever directory it is cloned into.
 serper-axi/
   src/
     serper.ts          <- HTTPS client for the two Serper endpoints
+    cli.ts              <- command dispatch, help, home header
+    errors.ts           <- SerperAxiError + exit-code mapping
+    output.ts           <- TOON encode boundary, truncation helpers
     commands/
       search.ts
       scrape.ts
       update.ts
     bin/
-      serper-axi.ts     <- runAxiCli() entrypoint
+      serper-axi.ts     <- entrypoint; calls runCli() from cli.ts
   .mise.toml            <- pinned Node runtime
   package.json
   SKILL.md              <- hand-written; discovery path for agents
 ```
 
-- `src/bin/serper-axi.ts` wires everything through `axi-sdk-js`'s
-  `runAxiCli()`, which supplies command-first dispatch, bare
-  `--help`/`--version`, TOON serialization, and structured `AxiError`
-  handling.
+- `src/cli.ts` owns command-first dispatch, bare `--help`/`--version`, and
+  the home view (`bin:` path with `~` collapsed, plus description). This is
+  hand-rolled rather than delegated to a framework; see "Why not
+  `axi-sdk-js`" below.
 - `src/serper.ts` calls Serper's HTTPS API directly with the runtime's
   global `fetch`. No MCP layer, no subprocess, no code generation.
-- Sole runtime dependency: `axi-sdk-js`, pinned to an exact version. Node
-  is pinned in `.mise.toml`.
+- Sole runtime dependency: `@toon-format/toon`, pinned to an exact version
+  — the TOON encoder itself, with no CLI-framework layer on top. Node is
+  pinned in `.mise.toml`.
 - Install: `npm run build && npm install -g .`, which places `serper-axi`
   on `PATH` via whatever prefix npm is configured with.
 
@@ -63,6 +67,47 @@ subprocess, the protocol, the unpinned `npx -y` fetch, and the generated
 file — and returns real HTTP status codes, which is what the error design
 below needs. mcporter remains useful at the terminal for inspecting MCP
 servers; it is not part of this product.
+
+### Why not `axi-sdk-js`
+
+Revision 2 depended on `axi-sdk-js` (`npm view axi-sdk-js`: version
+`0.1.10`, single maintainer, `github.com/kunchenguid/axi`, pre-1.0) for
+`runAxiCli()`. Verified live against the published package rather than its
+docs: it is ESM-only (`"type": "module"`, `import`-only export condition,
+so a CJS consumer gets `ERR_PACKAGE_PATH_NOT_EXPORTED`), and its compiled
+`dist/` is 1282 lines across `cli.js` (171), `errors.js` (16), `output.js`
+(39, and not re-exported from the package's `.` entry point — unreachable),
+`hooks.js` (429), `update.js` (584), and `fast-path.js` (43).
+
+Of that, `hooks.js` (session-hook installation) and `update.js` (registry
+lookups, install-method detection, self-upgrade) together are 1013 lines —
+79% of the package — and serper-axi uses neither: session hooks are
+explicitly out of scope for v1, and the spec already registers its own
+`update` command to shadow the SDK's built-in rather than use it. What
+remains reachable and wanted is `cli.js`'s dispatch/help/home-header logic
+(171 lines) and `errors.js`'s `AxiError` (16 lines) — under 15% of the
+package, in exchange for a pre-1.0 single-maintainer dependency, plus the
+whole tool having to be ESM-only to consume it.
+
+Separately, `axi-sdk-js` never provided flag parsing. Every AXI rule-6
+requirement in this spec — `--region`/`--lang`/`--num` mapping, the 1..100
+clamp, `--fields` validation, unknown-flag rejection by name with valid
+flags listed inline, exit 2 before any network call — was always ours to
+write regardless of which framework sat underneath it. Dropping the
+dependency removes the fraction of the SDK we weren't using without
+changing the fraction of the work that was already ours.
+
+serper-axi depends on `@toon-format/toon` directly instead — the same TOON
+encoder `axi-sdk-js` wraps, and the library `taskferry` already builds its
+own AXI-compliant output on (`taskferry/src/output.js`). `src/cli.ts`,
+`src/errors.ts`, and `src/output.ts` hand-roll the ~190 lines of dispatch,
+error, and home-header logic that were the only part of `axi-sdk-js`
+actually in use — a similar shape and size to `taskferry/src/output.js`
+(354 lines, doing a superset of the same job), which is worth reading as a
+pattern reference while implementing these files even though the two tools
+share no dependency. A future shared internal package extracted from
+taskferry once a second tool needs the same plumbing is a reasonable next
+step, but not before this one, and not by depending on `axi-sdk-js`.
 
 ## Serper API surface
 
@@ -129,12 +174,12 @@ Flag mapping to the API, stated explicitly so no handler has to guess:
 
 ### `serper-axi update`
 
-Registered explicitly, which prevents `axi-sdk-js`'s reserved built-in
-`update` from taking the name. The built-in resolves the package against
-the npm registry and errors `not published to the npm registry` for a
-private package, so shipping it would mean an advertised command that can
-only fail. Ours instead reports that this is a local install and prints the
-upgrade path (`git pull && npm run build && npm install -g .`), exit 0.
+Reports that this is a local, unpublished install and prints the upgrade
+path (`git pull && npm run build && npm install -g .`), exit 0. Since v1 no
+longer depends on a CLI framework with a reserved built-in `update`, there
+is no name collision to avoid — this command exists because an agent will
+reasonably try it, and a private package genuinely has no registry to check
+against.
 
 ### No-args home view
 
@@ -145,7 +190,8 @@ commands as usage examples with placeholder arguments.
 ## Errors
 
 Every failure surfaces on stdout as a structured `error:`/`help:` pair via
-`AxiError` — never a stack trace, raw body, or dependency name. Because the
+`SerperAxiError` (`src/errors.ts`) — never a stack trace, raw body, or
+dependency name. Because the
 API returns `{ message, statusCode }` uniformly, translation is a single
 mapping rather than per-call guesswork:
 
@@ -170,9 +216,10 @@ The tool is built against the ten AXI rules, and each is satisfied
 somewhere above. Restated here so nothing is left implicit, and so the two
 deliberate deviations are visible rather than accidental:
 
-1. **Token-efficient output** — TOON on stdout, converted at the output
-   boundary; internal logic stays on plain objects. The TOON spec is
-   required reading before the first line of output code is written.
+1. **Token-efficient output** — TOON on stdout via `@toon-format/toon`,
+   converted at the output boundary in `src/output.ts`; internal logic
+   stays on plain objects. The TOON spec is required reading before the
+   first line of output code is written.
 2. **Minimal default schemas** — 4 fields on search results, with
    `--fields` as the explicit escape hatch.
 3. **Content truncation** — snippets at 200 characters, scrape text at
@@ -204,10 +251,10 @@ deliberate deviations are visible rather than accidental:
    the exact command or variable that fixes it. The scrape detail view is
    self-contained and carries no suggestions.
 10. **Consistent help** — the home view leads with `bin` (absolute path,
-    home collapsed to `~`) and a one-line description. Every subcommand
-    supports `--help` with its own flags, defaults, required arguments, and
-    2-3 examples, scoped to that subcommand rather than dumping the whole
-    CLI.
+    home collapsed to `~`) and a one-line description, built in
+    `src/cli.ts`'s home handler. Every subcommand supports `--help` with
+    its own flags, defaults, required arguments, and 2-3 examples, scoped
+    to that subcommand rather than dumping the whole CLI.
 
 ## Testing
 
@@ -241,3 +288,12 @@ Fifteen confirmed findings were folded in; the architecture changed from
 MCP-via-mcporter to a direct HTTPS client, and every factual claim about
 the Serper API in this revision was verified against the live API rather
 than restated from documentation.
+
+Revision 3 dropped `axi-sdk-js` as a dependency after live verification
+showed 79% of the package (session hooks, self-update) goes unused by this
+tool, the reachable remainder never included flag parsing (which was
+always hand-written regardless), and the package is a pre-1.0
+single-maintainer dependency that also forces the whole tool to be
+ESM-only. serper-axi now depends only on `@toon-format/toon` and
+hand-rolls its own dispatch/error/home-header logic in `src/cli.ts`,
+`src/errors.ts`, and `src/output.ts`. See "Why not `axi-sdk-js`" above.
