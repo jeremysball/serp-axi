@@ -45,3 +45,49 @@
 ## Commit
 
 `feat: add direct HTTPS client for Serper search and scrape`
+
+---
+
+# Task 4 Fix Report (review round 1)
+
+## Status: DONE
+
+## Findings addressed
+
+- **Finding 1 (unmapped-status fallback):** dropped the raw 300-char body
+  excerpt from the error message; now uses only `parsed.message ?? "no
+  details"`. No raw HTTP body can reach stdout via this branch.
+- **Finding 2 (success-path `response.json()`):** wrapped in a try/catch
+  that throws a `SerperAxiError` (`runtime`, "Serper returned a non-JSON
+  response (<status>)") instead of leaking a raw `SyntaxError`.
+
+## Tests added (`src/serper.test.ts`)
+
+- Unmapped status (400) with a JSON body containing `message`: asserts the
+  thrown `SerperAxiError.message` matches `/400/` and `/Bad request/` and
+  does NOT contain the raw JSON body text.
+- 200 response with a non-JSON body: asserts a `SerperAxiError` (kind
+  `runtime`) is thrown, not a raw `SyntaxError`.
+
+## Verification
+
+- `node --test src/serper.test.ts` (9 tests, 7 original + 2 new) — output:
+
+```
+✔ searchSerper on an unmapped status uses the parsed message and not the raw body (0.904298ms)
+✔ searchSerper wraps a non-JSON 200 body as a runtime error, not a SyntaxError (0.908663ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 169.573883
+```
+
+- `npm run typecheck` — clean (no output beyond the `tsc --noEmit` banner).
+
+## Commit
+
+`b0f5177 fix: stop SerperAxiError leaking raw HTTP bodies and raw SyntaxErrors`

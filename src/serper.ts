@@ -50,7 +50,15 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
   }
 
   if (response.ok) {
-    return response.json();
+    try {
+      return await response.json();
+    } catch {
+      throw new SerperAxiError(
+        `Serper returned a non-JSON response (${response.status})`,
+        "runtime",
+        "this may be a transient upstream issue; retry",
+      );
+    }
   }
 
   let parsed: SerperErrorBody = {};
@@ -81,9 +89,8 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     throw new SerperAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
   }
 
-  const excerpt = JSON.stringify(parsed).slice(0, 300);
   throw new SerperAxiError(
-    `Serper returned an unexpected status ${response.status}: ${excerpt}`,
+    `Serper returned an unexpected status ${response.status}: ${parsed.message ?? "no details"}`,
     "runtime",
     "this is not a status serper-axi maps explicitly; report it if it persists",
   );
