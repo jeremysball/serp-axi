@@ -106,6 +106,10 @@ Flag mapping to the API, stated explicitly so no handler has to guess:
   `position,title,link,snippet`, snippet truncated to 200 characters.
   Snippet stays in the default schema — without it an agent cannot judge
   relevance without a follow-up scrape.
+- `--fields <a,b,c>` adds fields beyond the default schema, per AXI's
+  minimal-default-schema rule. v1 accepts `date` and `sitelinks`, which
+  `organic[i]` carries on some results; an unknown field name is a usage
+  error listing the accepted set.
 - Zero results: `results: 0 results found for query "<query>"`, exit 0.
 - Contextual disclosure: suggest `serper-axi scrape "<link>"` using a
   placeholder, not a guessed concrete URL.
@@ -159,6 +163,51 @@ exit code 2, listing that subcommand's valid flags inline.
 
 Exit codes: 0 success (including a zero-result search and a no-op
 `update`), 1 error, 2 usage error.
+
+## AXI compliance
+
+The tool is built against the ten AXI rules, and each is satisfied
+somewhere above. Restated here so nothing is left implicit, and so the two
+deliberate deviations are visible rather than accidental:
+
+1. **Token-efficient output** — TOON on stdout, converted at the output
+   boundary; internal logic stays on plain objects. The TOON spec is
+   required reading before the first line of output code is written.
+2. **Minimal default schemas** — 4 fields on search results, with
+   `--fields` as the explicit escape hatch.
+3. **Content truncation** — snippets at 200 characters, scrape text at
+   1200, both reporting the full size, with `--full` offered only when
+   content was actually cut.
+4. **Pre-computed aggregates** — `count` is emitted on every search. A
+   total-matches figure is *not*, because the API does not return one;
+   stating a total we cannot know would be a fabricated aggregate, which is
+   worse than an absent one.
+5. **Definitive empty states** — a zero-result search says so in words and
+   exits 0.
+6. **Structured errors, channels, exit codes** — errors are TOON
+   `error:`/`help:` pairs on **stdout**; **stderr** carries only diagnostics
+   and progress, never data. No command ever prompts: every operation
+   completes from flags alone, and a missing required value fails
+   immediately instead of asking. Unknown flags and arguments are rejected
+   by name with exit 2 before any network call, listing that subcommand's
+   valid flags inline so the agent self-corrects in one turn.
+7. **Session integration** — a hand-written `SKILL.md` ships as the
+   discovery path, with trigger-shaped frontmatter and command examples
+   that work for a local install (this package is not on npm, so an
+   `npx -y serper-axi ...` example would be a lie). The SessionStart hook is
+   deliberately skipped; see out of scope.
+8. **Content first** — *deliberate deviation.* A stateless search tool has
+   no live state to show, so the no-args view gives identity plus runnable
+   examples. There is no manufactured "state" and no full usage manual.
+9. **Contextual disclosure** — a search suggests scraping a result; an
+   empty search suggests a different query; every error's help line names
+   the exact command or variable that fixes it. The scrape detail view is
+   self-contained and carries no suggestions.
+10. **Consistent help** — the home view leads with `bin` (absolute path,
+    home collapsed to `~`) and a one-line description. Every subcommand
+    supports `--help` with its own flags, defaults, required arguments, and
+    2-3 examples, scoped to that subcommand rather than dumping the whole
+    CLI.
 
 ## Testing
 
