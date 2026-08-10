@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerperAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
@@ -21,7 +22,62 @@ Examples:
   serper-axi scrape https://example.com/article
   serper-axi scrape https://example.com/article --full`;
 
-const PRIVATE_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
+  [0x00000000, 0x00ffffff],
+  [0x0a000000, 0x0affffff],
+  [0x64400000, 0x647fffff],
+  [0x7f000000, 0x7fffffff],
+  [0xa9fe0000, 0xa9feffff],
+  [0xac100000, 0xac1fffff],
+  [0xc0000000, 0xc00000ff],
+  [0xc0000200, 0xc00002ff],
+  [0xc0a80000, 0xc0a8ffff],
+  [0xc6120000, 0xc633ffff],
+  [0xc6336400, 0xc63364ff],
+  [0xcb007100, 0xcb0071ff],
+];
+
+function ipv4ToInt(address: string): number | undefined {
+  const parts = address.split(".");
+  if (parts.length !== 4) return undefined;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return undefined;
+    const byte = Number(part);
+    if (byte > 255) return undefined;
+    value = (value << 8) | byte;
+  }
+  return value >>> 0;
+}
+
+function ipv4InRanges(address: string): boolean {
+  const value = ipv4ToInt(address);
+  if (value === undefined) return false;
+  return IPV4_BLOCKED_RANGES.some(([start, end]) => value >= start && value <= end);
+}
+
+function ipv4FromMappedIpv6(hostname: string): string | undefined {
+  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(hostname);
+  if (!match) return undefined;
+  const bytes = [match[1], match[2]].map((hex) => Number.parseInt(hex, 16));
+  if (bytes.some((byte) => Number.isNaN(byte) || byte > 0xffff)) return undefined;
+  return [bytes[0] >> 8, bytes[0] & 0xff, bytes[1] >> 8, bytes[1] & 0xff].join(".");
+}
+
+function blockedHost(hostname: string): boolean {
+  const family = isIP(hostname);
+  if (family === 0) return false;
+  if (family === 4) return ipv4InRanges(hostname);
+  if (hostname === "::1") return true;
+  const mapped = ipv4FromMappedIpv6(hostname);
+  if (mapped !== undefined) return ipv4InRanges(mapped);
+  const firstSegment = /^[0-9a-f]{1,4}/i.exec(hostname)?.[0] ?? "";
+  const firstGroup = Number.parseInt(firstSegment, 16);
+  if (Number.isNaN(firstGroup)) return false;
+  if (firstGroup >= 0xfc00 && firstGroup <= 0xfdff) return true;
+  if (firstGroup >= 0xfe80 && firstGroup <= 0xfebf) return true;
+  return false;
+}
 
 function validateUrl(raw: string): URL {
   let url: URL;
@@ -38,12 +94,8 @@ function validateUrl(raw: string): URL {
     );
   }
   const hostname = url.hostname.toLowerCase();
-  if (
-    PRIVATE_HOSTS.has(hostname) ||
-    hostname.startsWith("10.") ||
-    hostname.startsWith("192.168.") ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
-  ) {
+  const bareHost = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+  if (hostname === "localhost" || blockedHost(bareHost)) {
     throw new SerperAxiError(
       `"${hostname}" is a loopback or private-range host`,
       "usage",
@@ -59,6 +111,14 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
   const raw = positionals[0];
   if (!raw) {
     throw new SerperAxiError("scrape requires a URL", "usage", "example: serper-axi scrape https://example.com/article");
+  }
+  if (positionals.length > 1) {
+    const extras = positionals.slice(1).map((p) => `"${p}"`).join(", ");
+    throw new SerperAxiError(
+      `unexpected argument${positionals.length > 2 ? "s" : ""} ${extras} for \`scrape\``,
+      "usage",
+      "usage: serper-axi scrape <url> [--full]",
+    );
   }
   const url = validateUrl(raw);
 
