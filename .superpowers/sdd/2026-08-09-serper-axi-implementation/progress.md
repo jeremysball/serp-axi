@@ -13,3 +13,5 @@ Task 5: minor (deferred): initial commit f31f8ff also included task-5-report.md 
 Task 5: complete (commits 1977860..a78c617, 1 fix round, 2 minor deferred — see above)
 Task 6: minor (deferred): --fields "" or --fields "," silently yields no extra fields instead of a usage error (brief-mandated); Number("1e2")/Number("0x10") accepted as --num (brief-mandated, range/integer checks still gate it); no test for lowercase-ASCII --region/--lang validation or sitelinks extra field (brief-complete coverage); commit swept in task-6-report.md and cites a stale pre-accept hash (fce7bd2 vs actual b40ed81) — same known taskferry-accept artifacts as Tasks 2/3/4/5.
 Task 6: complete (commits f649ffb..b40ed81, review clean, 1 minor deferred — see above)
+Task 7: fix round 1/5 (2 addressed, 0 open — extra positional arguments silently ignored; loopback/private-range SSRF gaps (127.0.0.0/8, IPv4-mapped IPv6, link-local, unique-local IPv6); both plan-mandated, human ruled fix-wins-over-plan-text; commits daddc56..86e64bb)
+Task 7: complete (commits 1e562e5..86e64bb, 1 fix round, review clean)
