@@ -1,0 +1,44 @@
+#!/bin/sh
+# serper-axi pre-commit hook: typecheck the staged TypeScript tree.
+#
+# No ESLint step here (unlike dewey/taskferry's Node hooks) -- typescript-
+# eslint hard-refuses to run against TypeScript 7.x as of this writing
+# ("typescript-eslint does not support TS 7.0"; tracked upstream in
+# typescript-eslint/typescript-eslint#10940, still open). serper-axi pins
+# typescript@7.0.2, so ESLint is deferred until that support ships rather
+# than shipping a lint step that hard-crashes on every run. `tsc --noEmit`
+# (strict mode, see tsconfig.json) is the real static-analysis gate in the
+# meantime.
+#
+# tsc runs against a checkout of the STAGED content, not the working tree,
+# so a partially-staged file is checked as it will actually be committed.
+#
+# Tests are deliberately NOT run here -- that's CI's job, and a slow hook is
+# a hook people bypass.
+#
+# Bypass in a pinch with `git commit --no-verify`.
+
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.ts')
+[ -z "$files" ] && exit 0
+
+fail=0
+
+repo="$(git rev-parse --show-toplevel)"
+if [ -x "$repo/node_modules/.bin/tsc" ]; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  git checkout-index --all --prefix="$tmp/"
+  ln -s "$repo/node_modules" "$tmp/node_modules"
+  if ! (cd "$tmp" && ./node_modules/.bin/tsc --noEmit); then
+    fail=1
+  fi
+else
+  echo "⚠ typescript is not installed — run 'npm install' to enable quality checks."
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  echo "Commit blocked by pre-commit: fix the error(s) above."
+  echo "(Run \`npm run check\` for the full repo; \`git commit --no-verify\` to bypass.)"
+  exit 1
+fi
