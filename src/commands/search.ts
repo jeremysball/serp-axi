@@ -90,7 +90,7 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
   const response = await searchSerper(apiKey, params, fetchImpl);
 
   const results = response.organic.map((r) => {
-    const snippetInfo = truncate(r.snippet, SNIPPET_LIMIT);
+    const snippetInfo = truncate(r.snippet, SNIPPET_LIMIT - 3);
     const row: Record<string, unknown> = {
       position: r.position,
       title: r.title,

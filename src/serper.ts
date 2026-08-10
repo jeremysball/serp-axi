@@ -30,6 +30,12 @@ interface SerperErrorBody {
   statusCode?: number;
 }
 
+const MAX_ERROR_DETAIL = 200;
+
+function boundedDetail(message: string): string {
+  return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
+}
+
 async function serperRequest(url: string, apiKey: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
   let response: Response;
   try {
@@ -43,7 +49,7 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     });
   } catch (cause) {
     throw new SerperAxiError(
-      `network error calling Serper: ${(cause as Error).message}`,
+      `network error calling Serper: ${boundedDetail((cause as Error).message)}`,
       "runtime",
       "check network connectivity and retry",
     );

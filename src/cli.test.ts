@@ -58,6 +58,18 @@ test("parseFlags rejects a value-flag with a missing value", () => {
   );
 });
 
+test("parseFlags rejects inherited Object.prototype names as unknown flags", () => {
+  assert.throws(
+    () => parseFlags(["--constructor"], {}, "update"),
+    (error: unknown) => {
+      assert.ok(error instanceof SerperAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /unknown flag --constructor/);
+      return true;
+    },
+  );
+});
+
 test("runCli with no args renders the home view", async () => {
   const stdout = fakeStdout();
   const code = await runCli([], { ...baseOptions([]), stdout });

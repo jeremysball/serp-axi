@@ -23,7 +23,7 @@ export function parseFlags(args: string[], spec: FlagSpec, commandName: string):
     }
     if (arg.startsWith("--")) {
       const name = arg.slice(2);
-      if (!(name in spec)) {
+      if (!Object.hasOwn(spec, name)) {
         throw new SerperAxiError(
           `unknown flag --${name} for \`${commandName}\``,
           "usage",

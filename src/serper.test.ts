@@ -83,6 +83,24 @@ test("searchSerper wraps a network failure as a runtime error", async () => {
   await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerperAxiError);
 });
 
+test("searchSerper bounds a verbose network error message", async () => {
+  const longMessage = "x".repeat(5000);
+  const fetchImpl = (async () => {
+    throw new Error(longMessage);
+  }) as typeof fetch;
+  await assert.rejects(
+    () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
+    (error: unknown) => {
+      assert.ok(error instanceof SerperAxiError);
+      assert.equal(error.kind, "runtime");
+      assert.ok(error.message.length <= 200 + "network error calling Serper: ".length + 3);
+      assert.match(error.message, /\.\.\.$/);
+      assert.ok(!error.message.includes("x".repeat(5000)));
+      return true;
+    },
+  );
+});
+
 test("searchSerper on an unmapped status uses the parsed message and not the raw body", async () => {
   const rawBody = JSON.stringify({ message: "Bad request", statusCode: 400 });
   const fetchImpl = (async () => new Response(rawBody, { status: 400 })) as typeof fetch;

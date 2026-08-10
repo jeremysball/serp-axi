@@ -64,7 +64,7 @@ test("runSearch applies defaults and truncates a long snippet", async () => {
     const output = await runSearch(["hello world"], fetchImpl);
     assert.equal(output.count, 1);
     const results = output.results as Array<Record<string, unknown>>;
-    assert.equal((results[0].snippet as string).length, 203);
+    assert.equal((results[0].snippet as string).length, 200);
   });
 });
 
