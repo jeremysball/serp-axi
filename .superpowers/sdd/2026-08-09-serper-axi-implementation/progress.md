@@ -15,3 +15,5 @@ Task 6: minor (deferred): --fields "" or --fields "," silently yields no extra f
 Task 6: complete (commits f649ffb..b40ed81, review clean, 1 minor deferred — see above)
 Task 7: fix round 1/5 (2 addressed, 0 open — extra positional arguments silently ignored; loopback/private-range SSRF gaps (127.0.0.0/8, IPv4-mapped IPv6, link-local, unique-local IPv6); both plan-mandated, human ruled fix-wins-over-plan-text; commits daddc56..86e64bb)
 Task 7: complete (commits 1e562e5..86e64bb, 1 fix round, review clean)
+Task 8: minor (deferred): task-8-report.md cites a stale pre-accept commit hash (4b76576 vs actual c031ecb) — same taskferry-accept-flattening artifact as Tasks 3/4/5/6.
+Task 8: complete (commits 81921c6..c031ecb, review clean, 1 minor deferred — see above)
