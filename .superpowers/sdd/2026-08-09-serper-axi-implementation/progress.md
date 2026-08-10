@@ -22,3 +22,30 @@ Task 9: complete (commits b9562bb..22eb069, review clean, 2 minor deferred — s
 Task 10: minor (deferred): task-10-report.md cites a stale pre-accept commit hash (712dc00 vs actual e1c6b90) — same taskferry-accept-flattening artifact as prior tasks.
 Task 10: complete (commits 787d046..e1c6b90, review clean, 1 minor deferred — see above)
 Task 11: complete (commit c1e64b7). Deviation: executed directly in the controller session rather than dispatched — this task is repo administration invoking `taskferry init` on the repo itself, so a dispatched implementer running inside its own taskferry sandbox would be a nested-taskferry situation. Verified directly: `taskferry init` wrote the commented template (non-interactive, as expected), `check = "npm run check"` uncommented per Step 2, `npm run check` exits 0 (56/56 tests pass, including live-API tests since SERPER_API_KEY is set in this environment). No task-reviewer dispatch: single 12-line config file, already exercised end-to-end by the check command itself.
+
+## Final whole-branch review
+
+Final review (openai/gpt-5.6-luna, base e81f116..head 50adf81): Ready to merge? No.
+1 Critical + 3 Important findings, all traced to plan-mandated code (verbatim in
+.superpowers/plans/2026-08-09-serper-axi-implementation.md lines 841, 1196, 537,
+and Task 8's brief), not implementer error:
+- Critical: `update` command silently accepted unknown flags/positionals (exit 0
+  instead of 2), violating the plan's own global constraint.
+- Important: `parseFlags`'s `name in spec` check matched inherited
+  Object.prototype names (--constructor, --toString, etc.) as valid flags.
+- Important: truncated search snippets were 203 chars (200 + "..." suffix),
+  not the stated 200-char cap.
+- Important: unbounded network-error message interpolated into user-facing
+  SerperAxiError output.
+6 deferred minors from per-task reviews were also triaged: all confirmed stay
+deferred (brief-mandated, cosmetic, or documentation-only — no merge blockers).
+
+Human ruled: fix all 4 findings, overriding the plan's literal text (same
+fix-wins-over-plan-text pattern as Tasks 4/5/7).
+
+Fix wave: 1 fixer dispatch (all 4 findings, independent single-file fixes,
+commits 50adf81..461aeca), 1 scoped re-review (openai/gpt-5.6-luna) — all 4
+findings ADDRESSED, no new breakage, `npm run check` 60/60 pass (independently
+re-verified by the controller both before and after applying by hand).
+
+Final review: complete (commits e81f116..461aeca, 1 fix round, clean re-review).

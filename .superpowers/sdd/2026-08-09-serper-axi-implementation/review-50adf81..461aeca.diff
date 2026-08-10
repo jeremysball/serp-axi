@@ -1,0 +1,305 @@
+# Review package: 50adf81..461aeca
+
+## Commits
+461aeca fix: reject unknown update args, harden flag parsing, cap snippet and error-message length
+
+## Files changed
+ src/cli.test.ts             | 12 ++++++++++++
+ src/cli.ts                  |  2 +-
+ src/commands/search.test.ts |  2 +-
+ src/commands/search.ts      |  2 +-
+ src/commands/update.test.ts | 27 ++++++++++++++++++++++++++-
+ src/commands/update.ts      | 16 +++++++++++++---
+ src/serper.test.ts          | 18 ++++++++++++++++++
+ src/serper.ts               |  8 +++++++-
+ 8 files changed, 79 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/src/cli.test.ts b/src/cli.test.ts
+index 9f66af4..dc4305b 100644
+--- a/src/cli.test.ts
++++ b/src/cli.test.ts
+@@ -51,20 +51,32 @@ test("parseFlags rejects a value-flag with a missing value", () => {
+   assert.throws(
+     () => parseFlags(["--region"], { region: "string" }, "search"),
+     (error: unknown) => {
+       assert.ok(error instanceof SerperAxiError);
+       assert.equal(error.kind, "usage");
+       return true;
+     },
+   );
+ });
+ 
++test("parseFlags rejects inherited Object.prototype names as unknown flags", () => {
++  assert.throws(
++    () => parseFlags(["--constructor"], {}, "update"),
++    (error: unknown) => {
++      assert.ok(error instanceof SerperAxiError);
++      assert.equal(error.kind, "usage");
++      assert.match(error.message, /unknown flag --constructor/);
++      return true;
++    },
++  );
++});
++
+ test("runCli with no args renders the home view", async () => {
+   const stdout = fakeStdout();
+   const code = await runCli([], { ...baseOptions([]), stdout });
+   assert.equal(code, 0);
+   const decoded = decode(stdout.output) as Record<string, unknown>;
+   assert.equal(decoded.bin, "~/.local/bin/serper-axi");
+   assert.equal(decoded.description, "test tool");
+ });
+ 
+ test("runCli rejects an unknown command with exit 2", async () => {
+diff --git a/src/cli.ts b/src/cli.ts
+index b96c623..3fbe56b 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -16,21 +16,21 @@ export function parseFlags(args: string[], spec: FlagSpec, commandName: string):
+   let helpRequested = false;
+ 
+   for (let i = 0; i < args.length; i++) {
+     const arg = args[i];
+     if (arg === "--help" || arg === "-h") {
+       helpRequested = true;
+       continue;
+     }
+     if (arg.startsWith("--")) {
+       const name = arg.slice(2);
+-      if (!(name in spec)) {
++      if (!Object.hasOwn(spec, name)) {
+         throw new SerperAxiError(
+           `unknown flag --${name} for \`${commandName}\``,
+           "usage",
+           `valid flags for \`${commandName}\`: ${Object.keys(spec)
+             .map((f) => `--${f}`)
+             .join(", ")} (--help always allowed)`,
+         );
+       }
+       if (spec[name] === "boolean") {
+         flags[name] = true;
+diff --git a/src/commands/search.test.ts b/src/commands/search.test.ts
+index 7d69c19..0bb6777 100644
+--- a/src/commands/search.test.ts
++++ b/src/commands/search.test.ts
+@@ -57,21 +57,21 @@ test("runSearch rejects an unknown --fields value", async () => {
+   });
+ });
+ 
+ test("runSearch applies defaults and truncates a long snippet", async () => {
+   await withApiKey("test-key", async () => {
+     const longSnippet = "x".repeat(250);
+     const fetchImpl = fetchWithOrganic([{ position: 1, title: "t", link: "https://x", snippet: longSnippet }]);
+     const output = await runSearch(["hello world"], fetchImpl);
+     assert.equal(output.count, 1);
+     const results = output.results as Array<Record<string, unknown>>;
+-    assert.equal((results[0].snippet as string).length, 203);
++    assert.equal((results[0].snippet as string).length, 200);
+   });
+ });
+ 
+ test("runSearch includes an extra --fields value in the output rows", async () => {
+   await withApiKey("test-key", async () => {
+     const fetchImpl = fetchWithOrganic([
+       { position: 1, title: "t", link: "https://x", snippet: "s", date: "2026-01-01" },
+     ]);
+     const output = await runSearch(["q", "--fields", "date"], fetchImpl);
+     const results = output.results as Array<Record<string, unknown>>;
+diff --git a/src/commands/search.ts b/src/commands/search.ts
+index f3706e7..523c4de 100644
+--- a/src/commands/search.ts
++++ b/src/commands/search.ts
+@@ -83,21 +83,21 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
+ 
+   const apiKey = process.env.SERPER_API_KEY;
+   if (!apiKey) {
+     throw new SerperAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
+   }
+ 
+   const params: SearchParams = { q: query, gl: region, hl: lang, num };
+   const response = await searchSerper(apiKey, params, fetchImpl);
+ 
+   const results = response.organic.map((r) => {
+-    const snippetInfo = truncate(r.snippet, SNIPPET_LIMIT);
++    const snippetInfo = truncate(r.snippet, SNIPPET_LIMIT - 3);
+     const row: Record<string, unknown> = {
+       position: r.position,
+       title: r.title,
+       link: r.link,
+       snippet: snippetInfo.truncated ? `${snippetInfo.text}...` : snippetInfo.text,
+     };
+     for (const field of extraFields) {
+       row[field] = (r as unknown as Record<string, unknown>)[field];
+     }
+     return row;
+diff --git a/src/commands/update.test.ts b/src/commands/update.test.ts
+index bc3ad2f..dd351fe 100644
+--- a/src/commands/update.test.ts
++++ b/src/commands/update.test.ts
+@@ -1,9 +1,34 @@
+ import { test } from "node:test";
+ import assert from "node:assert/strict";
+ import { runUpdate } from "./update.ts";
++import { SerperAxiError } from "../errors.ts";
+ 
+ test("runUpdate reports a local install with the upgrade path, no registry call", () => {
+-  const output = runUpdate();
++  const output = runUpdate([]);
+   assert.equal(output.status, "local install; no registry to check");
+   assert.equal(output.upgrade, "git pull && npm run build && npm install -g .");
+ });
++
++test("runUpdate rejects an unknown flag with a usage error", () => {
++  assert.throws(
++    () => runUpdate(["--bogus"]),
++    (error: unknown) => {
++      assert.ok(error instanceof SerperAxiError);
++      assert.equal(error.kind, "usage");
++      assert.match(error.message, /unknown flag --bogus/);
++      return true;
++    },
++  );
++});
++
++test("runUpdate rejects an extra positional with a usage error", () => {
++  assert.throws(
++    () => runUpdate(["extra"]),
++    (error: unknown) => {
++      assert.ok(error instanceof SerperAxiError);
++      assert.equal(error.kind, "usage");
++      assert.match(error.message, /unexpected argument "extra"/);
++      return true;
++    },
++  );
++});
+diff --git a/src/commands/update.ts b/src/commands/update.ts
+index 3476705..9ec4a7b 100644
+--- a/src/commands/update.ts
++++ b/src/commands/update.ts
+@@ -1,23 +1,33 @@
+-import type { CliCommand } from "../cli.ts";
++import { parseFlags, type CliCommand } from "../cli.ts";
++import { SerperAxiError } from "../errors.ts";
+ import type { AxiOutput } from "../output.ts";
+ 
+ const UPDATE_HELP = `serper-axi update
+ 
+ Report the local install's upgrade path. serper-axi is not published to the
+ npm registry, so there is no version to check remotely.
+ 
+ Examples:
+   serper-axi update`;
+ 
+-export function runUpdate(): AxiOutput {
++export function runUpdate(args: string[]): AxiOutput {
++  const { positionals } = parseFlags(args, {}, "update");
++  if (positionals.length > 0) {
++    const extras = positionals.map((p) => `"${p}"`).join(", ");
++    throw new SerperAxiError(
++      `unexpected argument${positionals.length > 1 ? "s" : ""} ${extras} for \`update\``,
++      "usage",
++      "usage: serper-axi update",
++    );
++  }
+   return {
+     status: "local install; no registry to check",
+     upgrade: "git pull && npm run build && npm install -g .",
+   };
+ }
+ 
+ export const updateCommand: CliCommand = {
+   name: "update",
+   help: UPDATE_HELP,
+-  run: () => runUpdate(),
++  run: (args) => runUpdate(args),
+ };
+diff --git a/src/serper.test.ts b/src/serper.test.ts
+index 14e2b39..4a6482d 100644
+--- a/src/serper.test.ts
++++ b/src/serper.test.ts
+@@ -76,20 +76,38 @@ test("scrapeSerper throws a runtime error on 404", async () => {
+   );
+ });
+ 
+ test("searchSerper wraps a network failure as a runtime error", async () => {
+   const fetchImpl = (async () => {
+     throw new Error("getaddrinfo ENOTFOUND");
+   }) as typeof fetch;
+   await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerperAxiError);
+ });
+ 
++test("searchSerper bounds a verbose network error message", async () => {
++  const longMessage = "x".repeat(5000);
++  const fetchImpl = (async () => {
++    throw new Error(longMessage);
++  }) as typeof fetch;
++  await assert.rejects(
++    () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
++    (error: unknown) => {
++      assert.ok(error instanceof SerperAxiError);
++      assert.equal(error.kind, "runtime");
++      assert.ok(error.message.length <= 200 + "network error calling Serper: ".length + 3);
++      assert.match(error.message, /\.\.\.$/);
++      assert.ok(!error.message.includes("x".repeat(5000)));
++      return true;
++    },
++  );
++});
++
+ test("searchSerper on an unmapped status uses the parsed message and not the raw body", async () => {
+   const rawBody = JSON.stringify({ message: "Bad request", statusCode: 400 });
+   const fetchImpl = (async () => new Response(rawBody, { status: 400 })) as typeof fetch;
+   await assert.rejects(
+     () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
+     (error: unknown) => {
+       assert.ok(error instanceof SerperAxiError);
+       assert.equal(error.kind, "runtime");
+       assert.match(error.message, /400/);
+       assert.match(error.message, /Bad request/);
+diff --git a/src/serper.ts b/src/serper.ts
+index df1be65..f4f710e 100644
+--- a/src/serper.ts
++++ b/src/serper.ts
+@@ -23,34 +23,40 @@ export interface SearchResponse {
+ export interface ScrapeResponse {
+   text: string;
+   metadata: { title?: string; [key: string]: unknown };
+ }
+ 
+ interface SerperErrorBody {
+   message?: string;
+   statusCode?: number;
+ }
+ 
++const MAX_ERROR_DETAIL = 200;
++
++function boundedDetail(message: string): string {
++  return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
++}
++
+ async function serperRequest(url: string, apiKey: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
+   let response: Response;
+   try {
+     response = await fetchImpl(url, {
+       method: "POST",
+       headers: {
+         "X-API-KEY": apiKey,
+         "Content-Type": "application/json",
+       },
+       body: JSON.stringify(body),
+     });
+   } catch (cause) {
+     throw new SerperAxiError(
+-      `network error calling Serper: ${(cause as Error).message}`,
++      `network error calling Serper: ${boundedDetail((cause as Error).message)}`,
+       "runtime",
+       "check network connectivity and retry",
+     );
+   }
+ 
+   if (response.ok) {
+     try {
+       return await response.json();
+     } catch {
+       throw new SerperAxiError(
