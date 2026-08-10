@@ -120,3 +120,20 @@ test("runCli prints a command's help text on --help without dispatching", async 
   assert.equal(ran, false);
   assert.match(stdout.output, /echo help text/);
 });
+
+test("runCli sanitizes a non-SerperAxiError throw so raw detail never reaches stdout", async () => {
+  const command: CliCommand = {
+    name: "crack",
+    help: "crack help text",
+    run: () => {
+      throw new Error("HTTP 500 from some.service.internal");
+    },
+  };
+  const stdout = fakeStdout();
+  const code = await runCli(["crack"], { ...baseOptions([command]), stdout });
+  assert.equal(code, 1);
+  const decoded = decode(stdout.output) as Record<string, unknown>;
+  assert.equal(decoded.error, "unexpected error");
+  assert.equal(decoded.help, "see stderr for details");
+  assert.ok(!stdout.output.includes("HTTP 500"));
+});

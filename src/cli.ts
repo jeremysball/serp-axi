@@ -130,11 +130,15 @@ export async function runCli(argv: string[], options: RunCliOptions): Promise<nu
     options.stdout.write(typeof result === "string" ? result : encodeOutput(result));
     return 0;
   } catch (error) {
-    const message = error instanceof SerperAxiError ? error.message : (error as Error).message;
-    const help = error instanceof SerperAxiError ? error.help : undefined;
-    const output: AxiOutput = { error: message };
-    if (help) output.help = help;
-    options.stdout.write(encodeOutput(output));
+    if (error instanceof SerperAxiError) {
+      const output: AxiOutput = { error: error.message };
+      if (error.help) output.help = error.help;
+      options.stdout.write(encodeOutput(output));
+      return exitCodeForError(error);
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`unexpected error: ${detail}\n`);
+    options.stdout.write(encodeOutput({ error: "unexpected error", help: "see stderr for details" }));
     return exitCodeForError(error);
   }
 }
