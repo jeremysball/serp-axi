@@ -14,13 +14,14 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@toon-format/toon": "2.3.1"
   },
   "devDependencies": {
-    "typescript": "7.0.2",
-    "@types/node": "26.2.0"
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2"
   }
 }

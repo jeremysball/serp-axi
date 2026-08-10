@@ -1,0 +1,47 @@
+name: check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Single collapsed job rather than a [lint, typecheck, unit] matrix — see
+    # scaffolding-repos: this account's shared Actions concurrent-runner cap
+    # saturates once a few PRs are open across repos, leaving matrix legs
+    # queued 10-20+ min for a runner slot. One job means one runner request
+    # per push/PR; the tradeoff is legs running sequentially instead of in
+    # parallel.
+    #
+    # No lint leg: typescript-eslint hard-refuses to run against TS 7.x as
+    # of this writing (typescript-eslint/typescript-eslint#10940, still
+    # open) and serper-axi pins typescript@7.0.2. `typecheck` (strict tsc)
+    # is the real static gate until that support ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up mise (reads .mise.toml for the pinned Node version)
+        uses: jdx/mise-action@v2
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
