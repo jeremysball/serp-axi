@@ -1,0 +1,26 @@
+{
+  "name": "serper-axi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AXI-compliant CLI for Serper (Google Search API) search and page-scrape queries",
+  "type": "module",
+  "bin": {
+    "serper-axi": "dist/bin/serper-axi.js"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@toon-format/toon": "2.3.1"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@types/node": "26.2.0"
+  }
+}

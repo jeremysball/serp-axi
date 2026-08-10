@@ -1,0 +1,12 @@
+# taskferry project config -- see docs/config.md#taskferrytoml
+# Command the verification gate runs at settle, and that workers are told to
+# run before declaring done. Absent = no gate; taskferry says so loudly.
+check = "npm run check"
+
+# Optional. Gate run is killed after this many seconds and recorded as a
+# timeout. Default 900.
+# check_timeout_seconds = 900
+
+# Optional. Host paths bound read-only into the sandbox for every dispatch
+# from this project. Ignored when sandboxing is off.
+# read_only_paths = ["/path/to/reference-docs"]
