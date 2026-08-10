@@ -19,3 +19,5 @@ Task 8: minor (deferred): task-8-report.md cites a stale pre-accept commit hash 
 Task 8: complete (commits 81921c6..c031ecb, review clean, 1 minor deferred — see above)
 Task 9: minor (deferred): src/app.test.ts's "without making a network call" test name overstates coverage — no fetch mock asserts zero calls, brief-mandated; task-9-report.md cites a stale pre-accept commit hash (9f9711f vs actual 22eb069) — same taskferry-accept-flattening artifact as prior tasks.
 Task 9: complete (commits b9562bb..22eb069, review clean, 2 minor deferred — see above)
+Task 10: minor (deferred): task-10-report.md cites a stale pre-accept commit hash (712dc00 vs actual e1c6b90) — same taskferry-accept-flattening artifact as prior tasks.
+Task 10: complete (commits 787d046..e1c6b90, review clean, 1 minor deferred — see above)
