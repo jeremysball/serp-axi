@@ -11,3 +11,5 @@ Task 5: fix round 1/5 (2 addressed, 0 open — raw non-SerperAxiError message le
 Task 5: minor (deferred): task-5-report.md's fix-round Commits section cites a stale pre-accept commit hash (265e433 vs actual a78c617) — same taskferry-accept-flattening artifact as Tasks 3/4's stale-hash notes.
 Task 5: minor (deferred): initial commit f31f8ff also included task-5-report.md beyond the brief's stated `git add src/cli.ts src/cli.test.ts` — same commit-scope pattern as Task 2, harmless.
 Task 5: complete (commits 1977860..a78c617, 1 fix round, 2 minor deferred — see above)
+Task 6: minor (deferred): --fields "" or --fields "," silently yields no extra fields instead of a usage error (brief-mandated); Number("1e2")/Number("0x10") accepted as --num (brief-mandated, range/integer checks still gate it); no test for lowercase-ASCII --region/--lang validation or sitelinks extra field (brief-complete coverage); commit swept in task-6-report.md and cites a stale pre-accept hash (fce7bd2 vs actual b40ed81) — same known taskferry-accept artifacts as Tasks 2/3/4/5.
+Task 6: complete (commits f649ffb..b40ed81, review clean, 1 minor deferred — see above)
