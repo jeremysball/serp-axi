@@ -12,7 +12,9 @@ export function createAppOptions(
   overrides: { homeDir?: string } = {},
 ): Omit<RunCliOptions, "stdout"> {
   return {
-    description: "Run Serper (Google Search API) queries and page scrapes",
+    description:
+      "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) — " +
+      "live search results (title/link/snippet) and page-scrape text extraction.",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
     homeDir: overrides.homeDir ?? os.homedir(),
