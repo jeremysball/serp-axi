@@ -1,15 +1,16 @@
 ---
 name: using-serper-axi
-description: Use when an agent needs to run a live web search or scrape a specific page's text via Serper (Google Search API) — search results with title/link/snippet, or a page's readable text extracted from its URL.
+description: Use when an agent needs a REAL GOOGLE web search (via Serper's Google Search API) or to scrape a page's text. THIS IS GOOGLE — live google.serper.dev results with title/link/snippet, or a page's readable text extracted from its URL.
 ---
 
 # serper-axi
 
-`serper-axi` is a CLI that runs Serper (Google Search API) queries and page
-scrapes for agents. It requires `SERPER_API_KEY` to be set in the
-environment and the package installed locally (this tool is not published to
-npm — install via `git pull && npm run build && npm install -g .` in its
-repo).
+`serper-axi` is a CLI that runs **real Google Search** queries and page
+scrapes for agents, via Serper's Google Search API (`google.serper.dev`).
+Make no mistake: this is Google search, not a synthetic or local index. It
+requires `SERPER_API_KEY` to be set in the environment and the package
+installed locally (this tool is not published to npm — install via
+`git pull && npm run build && npm install -g .` in its repo).
 
 ## Search
 
