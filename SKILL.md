@@ -1,5 +1,5 @@
 ---
-name: using-serper-axi
+name: serper-search-axi
 description: Use when an agent needs a REAL GOOGLE web search (via Serper's Google Search API) or to scrape a page's text. THIS IS GOOGLE — live google.serper.dev results with title/link/snippet, or a page's readable text extracted from its URL.
 ---
 
