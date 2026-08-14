@@ -1,6 +1,6 @@
 ---
 name: searching-the-web
-description: Use when a live Google web search or readable text extraction from a public web page is needed.
+description: Use when a live Google web search or readable text extraction from a public web page is needed. Mandatory, not just preferred, whenever the driving model isn't Claude — native WebSearch is confirmed broken there.
 ---
 
 # serper-axi
@@ -11,6 +11,42 @@ Make no mistake: this is Google search, not a synthetic or local index. It
 requires `SERPER_API_KEY` to be set in the environment and the package
 installed locally (this tool is not published to npm — install via
 `git pull && npm run build && npm install -g .` in its repo).
+
+## If the driving model isn't Claude, native `WebSearch` doesn't work — use this instead
+
+Check `message.model` (or however your harness exposes the active model) before
+reaching for the native `WebSearch` tool. When the driving model is not a
+Claude model, native `WebSearch` returns an **empty result set** — no titles,
+no URLs, no snippets, just the boilerplate wrapper text — every time, not
+intermittently. Native `WebFetch` (fetching a URL you already have) still
+works fine for non-Claude models; it's specifically `WebSearch` that's
+broken. Don't retry the query, rephrase it, or treat an empty result as "no
+matches" — that's a broken tool, not a real answer. Reach for `serper-axi
+search` instead, immediately, the first time you'd otherwise call
+`WebSearch` under a non-Claude driving model.
+
+**Confidence: high.** Confirmed across 3 independent Claude Code sessions,
+10/10 `WebSearch` calls, all driven by `deepseek-v4-flash:0731`, all
+returning zero results:
+
+- `-workspace-serper-axi/6bbd4cc7-...jsonl` — 3 deliberate diagnostic
+  queries, all empty.
+- `-workspace-taskferry/a2e55adc-...jsonl` — Kagi rate-limited (429), fell
+  back to `WebSearch` for 5 queries, all empty, then ground through
+  `WebFetch` guesses instead.
+- `-home-jeremy--claude-skills-unshackling-models/a64b58de-...jsonl` — Kagi
+  429, `WebSearch` empty twice, so the model **guessed arXiv paper IDs from
+  memory and fetched the wrong papers**, then `WebSearch` empty twice more
+  before it self-corrected via a raw `curl` against the arXiv API. This is
+  the concrete cost of not catching the empty result immediately: a wrong
+  answer shipped before the workaround was found.
+
+If you're a Claude model and native `WebSearch` is working, you don't need
+this section — nothing here says stop using native tools when they work. And
+if you can't tell which model is driving, don't guess: an empty `WebSearch`
+result (the boilerplate wrapper with nothing above it) is itself the
+signal — treat it as broken tooling and switch to `serper-axi search`,
+whatever the model.
 
 ## Search
 
