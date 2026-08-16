@@ -1,2 +1,14 @@
 [tools]
 node = "26.5.1"
+
+[tasks.build]
+run = "npm run build"
+
+[tasks.typecheck]
+run = "npm run typecheck"
+
+[tasks.test]
+run = "npm test"
+
+[tasks.check]
+run = "npm run check"
