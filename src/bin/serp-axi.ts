@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// src/bin/serper-axi.ts
+// src/bin/serp-axi.ts
 import { runCli } from "../cli.ts";
 import { createAppOptions } from "../app.ts";
 

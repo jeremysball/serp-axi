@@ -1,4 +1,4 @@
-import { SerperAxiError, exitCodeForError } from "./errors.ts";
+import { SerpAxiError, exitCodeForError } from "./errors.ts";
 import { encodeOutput, collapseHomeDirectory, type AxiOutput } from "./output.ts";
 
 export type FlagType = "string" | "boolean";
@@ -24,7 +24,7 @@ export function parseFlags(args: string[], spec: FlagSpec, commandName: string):
     if (arg.startsWith("--")) {
       const name = arg.slice(2);
       if (!Object.hasOwn(spec, name)) {
-        throw new SerperAxiError(
+        throw new SerpAxiError(
           `unknown flag --${name} for \`${commandName}\``,
           "usage",
           `valid flags for \`${commandName}\`: ${Object.keys(spec)
@@ -38,7 +38,7 @@ export function parseFlags(args: string[], spec: FlagSpec, commandName: string):
       }
       const value = args[i + 1];
       if (value === undefined || value.startsWith("--")) {
-        throw new SerperAxiError(`--${name} requires a value`, "usage", `example: --${name} <value>`);
+        throw new SerpAxiError(`--${name} requires a value`, "usage", `example: --${name} <value>`);
       }
       flags[name] = value;
       i++;
@@ -76,7 +76,7 @@ function renderHome(options: RunCliOptions): AxiOutput {
   return {
     ...homeHeader(options),
     commands: options.commands.map((c) => c.name),
-    help: options.commands.map((c) => `Run \`serper-axi ${c.name} --help\` for details`),
+    help: options.commands.map((c) => `Run \`serp-axi ${c.name} --help\` for details`),
   };
 }
 
@@ -87,7 +87,7 @@ function renderTopLevelHelp(options: RunCliOptions): string {
     "Commands:",
     ...options.commands.map((c) => `  ${c.name}`),
     "",
-    "Run `serper-axi <command> --help` for a command's flags.",
+    "Run `serp-axi <command> --help` for a command's flags.",
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -130,7 +130,7 @@ export async function runCli(argv: string[], options: RunCliOptions): Promise<nu
     options.stdout.write(typeof result === "string" ? result : encodeOutput(result));
     return 0;
   } catch (error) {
-    if (error instanceof SerperAxiError) {
+    if (error instanceof SerpAxiError) {
       const output: AxiOutput = { error: error.message };
       if (error.help) output.help = error.help;
       options.stdout.write(encodeOutput(output));

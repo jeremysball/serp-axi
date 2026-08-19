@@ -18,11 +18,11 @@ test("encodeOutput renders a tabular array", () => {
 });
 
 test("collapseHomeDirectory replaces a leading home path with ~", () => {
-  assert.equal(collapseHomeDirectory("/home/user/.local/bin/serper-axi", "/home/user"), "~/.local/bin/serper-axi");
+  assert.equal(collapseHomeDirectory("/home/user/.local/bin/serp-axi", "/home/user"), "~/.local/bin/serp-axi");
 });
 
 test("collapseHomeDirectory leaves a non-home path untouched", () => {
-  assert.equal(collapseHomeDirectory("/usr/local/bin/serper-axi", "/home/user"), "/usr/local/bin/serper-axi");
+  assert.equal(collapseHomeDirectory("/usr/local/bin/serp-axi", "/home/user"), "/usr/local/bin/serp-axi");
 });
 
 test("truncate passes short text through unchanged", () => {

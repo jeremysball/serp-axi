@@ -20,7 +20,7 @@ jobs:
     #
     # No lint leg: typescript-eslint hard-refuses to run against TS 7.x as
     # of this writing (typescript-eslint/typescript-eslint#10940, still
-    # open) and serper-axi pins typescript@7.0.2. `typecheck` (strict tsc)
+    # open) and serp-axi pins typescript@7.0.2. `typecheck` (strict tsc)
     # is the real static gate until that support ships.
     runs-on: ubuntu-latest
     steps:

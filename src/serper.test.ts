@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { searchSerper, scrapeSerper } from "./serper.ts";
-import { SerperAxiError } from "./errors.ts";
+import { SerpAxiError } from "./errors.ts";
 
 function fakeFetch(status: number, body: unknown): typeof fetch {
   return (async () => new Response(JSON.stringify(body), { status })) as typeof fetch;
@@ -32,7 +32,7 @@ test("searchSerper throws a runtime error on 403", async () => {
   await assert.rejects(
     () => searchSerper("bad", { q: "hi", gl: "us", hl: "en", num: 5 }, fetchImpl),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "runtime");
       assert.match(error.message, /403/);
       return true;
@@ -42,12 +42,12 @@ test("searchSerper throws a runtime error on 403", async () => {
 
 test("searchSerper throws a runtime error on 429", async () => {
   const fetchImpl = fakeFetch(429, { message: "Too Many Requests", statusCode: 429 });
-  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerperAxiError);
+  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerpAxiError);
 });
 
 test("searchSerper throws a runtime error on 500", async () => {
   const fetchImpl = fakeFetch(500, { message: "Internal Server Error", statusCode: 500 });
-  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerperAxiError);
+  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerpAxiError);
 });
 
 test("scrapeSerper posts to the scrape endpoint and returns text", async () => {
@@ -69,7 +69,7 @@ test("scrapeSerper throws a runtime error on 404", async () => {
   await assert.rejects(
     () => scrapeSerper("key", "https://example.com/missing", fetchImpl),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.match(error.message, /404/);
       return true;
     },
@@ -80,7 +80,7 @@ test("searchSerper wraps a network failure as a runtime error", async () => {
   const fetchImpl = (async () => {
     throw new Error("getaddrinfo ENOTFOUND");
   }) as typeof fetch;
-  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerperAxiError);
+  await assert.rejects(() => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl), SerpAxiError);
 });
 
 test("searchSerper bounds a verbose network error message", async () => {
@@ -91,7 +91,7 @@ test("searchSerper bounds a verbose network error message", async () => {
   await assert.rejects(
     () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "runtime");
       assert.ok(error.message.length <= 200 + "network error calling Serper: ".length + 3);
       assert.match(error.message, /\.\.\.$/);
@@ -107,7 +107,7 @@ test("searchSerper on an unmapped status uses the parsed message and not the raw
   await assert.rejects(
     () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "runtime");
       assert.match(error.message, /400/);
       assert.match(error.message, /Bad request/);
@@ -122,7 +122,7 @@ test("searchSerper wraps a non-JSON 200 body as a runtime error, not a SyntaxErr
   await assert.rejects(
     () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "runtime");
       assert.match(error.message, /non-JSON/);
       return true;

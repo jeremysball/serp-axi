@@ -19,7 +19,7 @@ test("scrapeSerper returns real page text from the live API", { skip: !apiKey },
 
 test("searchSerper surfaces a 403 for a bad key against the live API", { skip: !apiKey }, async () => {
   await assert.rejects(
-    () => searchSerper("invalid-key-serper-axi-test", { q: "test", gl: "us", hl: "en", num: 1 }),
+    () => searchSerper("invalid-key-serp-axi-test", { q: "test", gl: "us", hl: "en", num: 1 }),
     (error: unknown) => {
       assert.match((error as Error).message, /403/);
       return true;

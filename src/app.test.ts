@@ -18,7 +18,7 @@ function fakeStdout() {
 }
 
 function testOptions() {
-  return createAppOptions("file:///home/user/.local/bin/serper-axi", { homeDir: "/home/user" });
+  return createAppOptions("file:///home/user/.local/bin/serp-axi", { homeDir: "/home/user" });
 }
 
 test("no-args home view includes bin, description, and every command", async () => {
@@ -26,7 +26,7 @@ test("no-args home view includes bin, description, and every command", async () 
   const code = await runCli([], { ...testOptions(), stdout });
   assert.equal(code, 0);
   const decoded = decode(stdout.output) as Record<string, unknown>;
-  assert.equal(decoded.bin, "~/.local/bin/serper-axi");
+  assert.equal(decoded.bin, "~/.local/bin/serp-axi");
   assert.deepEqual(decoded.commands, ["search", "scrape", "update"]);
 });
 
@@ -50,5 +50,5 @@ test("search --help prints the command's help without making a network call", as
   const stdout = fakeStdout();
   const code = await runCli(["search", "--help"], { ...testOptions(), stdout });
   assert.equal(code, 0);
-  assert.match(stdout.output, /serper-axi search/);
+  assert.match(stdout.output, /serp-axi search/);
 });
