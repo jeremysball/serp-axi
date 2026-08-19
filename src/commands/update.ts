@@ -4,8 +4,8 @@ import type { AxiOutput } from "../output.ts";
 
 const UPDATE_HELP = `serp-axi update
 
-Report the local install's upgrade path. serp-axi is not published to the
-npm registry, so there is no version to check remotely.
+Report the local install's upgrade path. serp-axi does not check the npm
+registry itself; this just prints the command to pull the latest version.
 
 Examples:
   serp-axi update`;
@@ -21,8 +21,8 @@ export function runUpdate(args: string[]): AxiOutput {
     );
   }
   return {
-    status: "local install; no registry to check",
-    upgrade: "git pull && npm run build && npm install -g .",
+    status: "no live version check; run the upgrade command below",
+    upgrade: "npm install -g serp-axi@latest",
   };
 }
 

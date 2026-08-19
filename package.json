@@ -1,12 +1,28 @@
 {
   "name": "serp-axi",
   "version": "0.1.0",
-  "private": true,
   "description": "AXI-compliant CLI for Google Search via Serper or Bright Data, and page-scrape queries via Serper",
   "type": "module",
+  "license": "Unlicense",
+  "author": "Jeremy Ball",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeremysball/serp-axi.git"
+  },
+  "keywords": [
+    "cli",
+    "search",
+    "serper",
+    "brightdata",
+    "axi",
+    "agent"
+  ],
   "bin": {
     "serp-axi": "dist/bin/serp-axi.js"
   },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=26"
   },
@@ -15,7 +31,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
     "check": "npm run typecheck && npm test",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@toon-format/toon": "2.3.1"

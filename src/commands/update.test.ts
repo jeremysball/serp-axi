@@ -5,8 +5,8 @@ import { SerpAxiError } from "../errors.ts";
 
 test("runUpdate reports a local install with the upgrade path, no registry call", () => {
   const output = runUpdate([]);
-  assert.equal(output.status, "local install; no registry to check");
-  assert.equal(output.upgrade, "git pull && npm run build && npm install -g .");
+  assert.equal(output.status, "no live version check; run the upgrade command below");
+  assert.equal(output.upgrade, "npm install -g serp-axi@latest");
 });
 
 test("runUpdate rejects an unknown flag with a usage error", () => {

@@ -1,11 +1,20 @@
 import os from "node:os";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunCliOptions } from "./cli.ts";
 import { searchCommand } from "./commands/search.ts";
 import { scrapeCommand } from "./commands/scrape.ts";
 import { updateCommand } from "./commands/update.ts";
 
-export const VERSION = "0.1.0";
+// Read from package.json at runtime rather than hardcoding, so release-please's
+// version bumps (which only touch package.json) don't silently drift from what
+// `serp-axi --version` reports. This file lives one directory below the repo
+// root both as src/app.ts and as the compiled dist/app.js, so the relative
+// path to package.json is the same either way.
+const packageJsonPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
+export const VERSION = packageJson.version;
 
 export function createAppOptions(
   execUrl: string,
