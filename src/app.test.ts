@@ -43,7 +43,7 @@ test("update command dispatches end to end through runCli", async () => {
   const code = await runCli(["update"], { ...testOptions(), stdout });
   assert.equal(code, 0);
   const decoded = decode(stdout.output) as Record<string, unknown>;
-  assert.equal(decoded.status, "local install; no registry to check");
+  assert.equal(decoded.status, "no live version check; run the upgrade command below");
 });
 
 test("search --help prints the command's help without making a network call", async () => {
