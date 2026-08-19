@@ -21,7 +21,8 @@
     "serp-axi": "dist/bin/serp-axi.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.test.js"
   ],
   "engines": {
     "node": ">=26"
