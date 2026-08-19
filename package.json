@@ -1,11 +1,11 @@
 {
-  "name": "serper-axi",
+  "name": "serp-axi",
   "version": "0.1.0",
   "private": true,
-  "description": "AXI-compliant CLI for Serper (Google Search API) search and page-scrape queries",
+  "description": "AXI-compliant CLI for Google Search via Serper or Bright Data, and page-scrape queries via Serper",
   "type": "module",
   "bin": {
-    "serper-axi": "dist/bin/serper-axi.js"
+    "serp-axi": "dist/bin/serp-axi.js"
   },
   "engines": {
     "node": ">=26"

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runScrape } from "./scrape.ts";
-import { SerperAxiError } from "../errors.ts";
+import { SerpAxiError } from "../errors.ts";
 
 async function withApiKey<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
   const original = process.env.SERPER_API_KEY;
@@ -17,7 +17,7 @@ async function withApiKey<T>(value: string | undefined, fn: () => Promise<T>): P
 
 test("runScrape rejects a missing URL before any network call", async () => {
   await withApiKey("test-key", async () => {
-    await assert.rejects(() => runScrape([], (async () => new Response("{}")) as typeof fetch), SerperAxiError);
+    await assert.rejects(() => runScrape([], (async () => new Response("{}")) as typeof fetch), SerpAxiError);
   });
 });
 
@@ -26,7 +26,7 @@ test("runScrape rejects a non-http(s) scheme", async () => {
     await assert.rejects(
       () => runScrape(["file:///etc/passwd"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -39,7 +39,7 @@ test("runScrape rejects a loopback host", async () => {
     await assert.rejects(
       () => runScrape(["http://127.0.0.1/secret"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -51,7 +51,7 @@ test("runScrape rejects a private-range host", async () => {
   await withApiKey("test-key", async () => {
     await assert.rejects(
       () => runScrape(["http://192.168.1.5/"], (async () => new Response("{}")) as typeof fetch),
-      SerperAxiError,
+      SerpAxiError,
     );
   });
 });
@@ -61,7 +61,7 @@ test("runScrape rejects any loopback /8 host, not just 127.0.0.1", async () => {
     await assert.rejects(
       () => runScrape(["http://127.0.0.2/"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -74,7 +74,7 @@ test("runScrape rejects an IPv4-mapped IPv6 loopback host", async () => {
     await assert.rejects(
       () => runScrape(["http://[::ffff:127.0.0.1]/"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -86,7 +86,7 @@ test("runScrape rejects an IPv4-mapped IPv6 private-range host", async () => {
   await withApiKey("test-key", async () => {
     await assert.rejects(
       () => runScrape(["http://[::ffff:192.168.1.5]/"], (async () => new Response("{}")) as typeof fetch),
-      SerperAxiError,
+      SerpAxiError,
     );
   });
 });
@@ -96,7 +96,7 @@ test("runScrape rejects a link-local host", async () => {
     await assert.rejects(
       () => runScrape(["http://169.254.1.1/"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -109,7 +109,7 @@ test("runScrape rejects a unique-local IPv6 host", async () => {
     await assert.rejects(
       () => runScrape(["http://[fc00::1]/"], (async () => new Response("{}")) as typeof fetch),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         return true;
       },
@@ -127,7 +127,7 @@ test("runScrape rejects extra positional arguments before any network call", asy
     await assert.rejects(
       () => runScrape(["https://example.com", "garbage"], fetchImpl),
       (error: unknown) => {
-        assert.ok(error instanceof SerperAxiError);
+        assert.ok(error instanceof SerpAxiError);
         assert.equal(error.kind, "usage");
         assert.match(error.message, /garbage/);
         return true;
@@ -144,7 +144,7 @@ test("runScrape requires SERPER_API_KEY before any network call", async () => {
       called = true;
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
-    await assert.rejects(() => runScrape(["https://example.com"], fetchImpl), SerperAxiError);
+    await assert.rejects(() => runScrape(["https://example.com"], fetchImpl), SerpAxiError);
     assert.equal(called, false);
   });
 });

@@ -1,4 +1,4 @@
-import { SerperAxiError } from "./errors.ts";
+import { SerpAxiError } from "./errors.ts";
 
 export interface SearchParams {
   q: string;
@@ -48,7 +48,7 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
       body: JSON.stringify(body),
     });
   } catch (cause) {
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       `network error calling Serper: ${boundedDetail((cause as Error).message)}`,
       "runtime",
       "check network connectivity and retry",
@@ -59,7 +59,7 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     try {
       return await response.json();
     } catch {
-      throw new SerperAxiError(
+      throw new SerpAxiError(
         `Serper returned a non-JSON response (${response.status})`,
         "runtime",
         "this may be a transient upstream issue; retry",
@@ -75,30 +75,30 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
   }
 
   if (response.status === 403) {
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       "Serper rejected the API key (403)",
       "runtime",
       "check that SERPER_API_KEY is set to a valid key",
     );
   }
   if (response.status === 429) {
-    throw new SerperAxiError("Serper rate-limited this request (429)", "runtime", "wait and retry later");
+    throw new SerpAxiError("Serper rate-limited this request (429)", "runtime", "wait and retry later");
   }
   if (response.status === 404) {
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       "Serper could not find the requested page (404)",
       "runtime",
       "verify the URL is correct and reachable",
     );
   }
   if (response.status >= 500) {
-    throw new SerperAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
+    throw new SerpAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
   }
 
-  throw new SerperAxiError(
+  throw new SerpAxiError(
     `Serper returned an unexpected status ${response.status}: ${parsed.message ?? "no details"}`,
     "runtime",
-    "this is not a status serper-axi maps explicitly; report it if it persists",
+    "this is not a status serp-axi maps explicitly; report it if it persists",
   );
 }
 

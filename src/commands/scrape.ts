@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
-import { SerperAxiError } from "../errors.ts";
+import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { scrapeSerper } from "../serper.ts";
 
@@ -11,16 +11,18 @@ const SCRAPE_FLAGS: FlagSpec = {
 const DEFAULT_LIMIT = 1200;
 const FULL_LIMIT = 50000;
 
-const SCRAPE_HELP = `serper-axi scrape <url> [--full]
+const SCRAPE_HELP = `serp-axi scrape <url> [--full]
 
-Fetch and extract readable text from a web page via Serper.
+Fetch and extract readable text from a web page via Serper. Unlike
+\`search\`, scrape does not support --provider brightdata; it always uses
+Serper and requires SERPER_API_KEY.
 
 Flags:
   --full   Return up to 50,000 characters instead of the default 1,200.
 
 Examples:
-  serper-axi scrape https://example.com/article
-  serper-axi scrape https://example.com/article --full`;
+  serp-axi scrape https://example.com/article
+  serp-axi scrape https://example.com/article --full`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],
@@ -84,19 +86,19 @@ function validateUrl(raw: string): URL {
   try {
     url = new URL(raw);
   } catch {
-    throw new SerperAxiError(`"${raw}" is not a valid URL`, "usage", "example: serper-axi scrape https://example.com/article");
+    throw new SerpAxiError(`"${raw}" is not a valid URL`, "usage", "example: serp-axi scrape https://example.com/article");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       `scrape only accepts http/https URLs, got "${url.protocol}"`,
       "usage",
-      "example: serper-axi scrape https://example.com/article",
+      "example: serp-axi scrape https://example.com/article",
     );
   }
   const hostname = url.hostname.toLowerCase();
   const bareHost = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
   if (hostname === "localhost" || blockedHost(bareHost)) {
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       `"${hostname}" is a loopback or private-range host`,
       "usage",
       "scrape only accepts publicly reachable URLs",
@@ -110,21 +112,21 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
 
   const raw = positionals[0];
   if (!raw) {
-    throw new SerperAxiError("scrape requires a URL", "usage", "example: serper-axi scrape https://example.com/article");
+    throw new SerpAxiError("scrape requires a URL", "usage", "example: serp-axi scrape https://example.com/article");
   }
   if (positionals.length > 1) {
     const extras = positionals.slice(1).map((p) => `"${p}"`).join(", ");
-    throw new SerperAxiError(
+    throw new SerpAxiError(
       `unexpected argument${positionals.length > 2 ? "s" : ""} ${extras} for \`scrape\``,
       "usage",
-      "usage: serper-axi scrape <url> [--full]",
+      "usage: serp-axi scrape <url> [--full]",
     );
   }
   const url = validateUrl(raw);
 
   const apiKey = process.env.SERPER_API_KEY;
   if (!apiKey) {
-    throw new SerperAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
+    throw new SerpAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
   }
 
   const response = await scrapeSerper(apiKey, url.toString(), fetchImpl);
@@ -140,7 +142,7 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
     output.truncatedFrom = info.totalChars;
     output.help = flags.full
       ? `content is capped at ${FULL_LIMIT} characters even with --full`
-      : `Run \`serper-axi scrape ${url.toString()} --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
+      : `Run \`serp-axi scrape ${url.toString()} --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
   }
   return output;
 }

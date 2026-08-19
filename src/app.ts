@@ -13,8 +13,9 @@ export function createAppOptions(
 ): Omit<RunCliOptions, "stdout"> {
   return {
     description:
-      "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) — " +
-      "live search results (title/link/snippet) and page-scrape text extraction.",
+      "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) or " +
+      "Bright Data (api.brightdata.com) — live search results (title/link/snippet) " +
+      "— plus page-scrape text extraction via Serper.",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
     homeDir: overrides.homeDir ?? os.homedir(),

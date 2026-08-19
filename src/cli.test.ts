@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decode } from "@toon-format/toon";
 import { parseFlags, runCli, type CliCommand, type RunCliOptions } from "./cli.ts";
-import { SerperAxiError } from "./errors.ts";
+import { SerpAxiError } from "./errors.ts";
 
 function fakeStdout() {
   let buffer = "";
@@ -21,7 +21,7 @@ function baseOptions(commands: CliCommand[]): Omit<RunCliOptions, "stdout"> {
   return {
     description: "test tool",
     version: "0.0.1",
-    execPath: "/home/user/.local/bin/serper-axi",
+    execPath: "/home/user/.local/bin/serp-axi",
     homeDir: "/home/user",
     commands,
   };
@@ -38,7 +38,7 @@ test("parseFlags rejects an unknown flag with a usage error", () => {
   assert.throws(
     () => parseFlags(["--stat", "closed"], { state: "string" }, "list"),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "usage");
       assert.match(error.message, /unknown flag --stat/);
       assert.match(error.help, /--state/);
@@ -51,7 +51,7 @@ test("parseFlags rejects a value-flag with a missing value", () => {
   assert.throws(
     () => parseFlags(["--region"], { region: "string" }, "search"),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "usage");
       return true;
     },
@@ -62,7 +62,7 @@ test("parseFlags rejects inherited Object.prototype names as unknown flags", () 
   assert.throws(
     () => parseFlags(["--constructor"], {}, "update"),
     (error: unknown) => {
-      assert.ok(error instanceof SerperAxiError);
+      assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "usage");
       assert.match(error.message, /unknown flag --constructor/);
       return true;
@@ -75,7 +75,7 @@ test("runCli with no args renders the home view", async () => {
   const code = await runCli([], { ...baseOptions([]), stdout });
   assert.equal(code, 0);
   const decoded = decode(stdout.output) as Record<string, unknown>;
-  assert.equal(decoded.bin, "~/.local/bin/serper-axi");
+  assert.equal(decoded.bin, "~/.local/bin/serp-axi");
   assert.equal(decoded.description, "test tool");
 });
 
@@ -100,12 +100,12 @@ test("runCli dispatches to a matching command and renders its output", async () 
   assert.equal(decoded.heard, "hi there");
 });
 
-test("runCli surfaces a SerperAxiError as a structured error with the right exit code", async () => {
+test("runCli surfaces a SerpAxiError as a structured error with the right exit code", async () => {
   const command: CliCommand = {
     name: "boom",
     help: "boom help text",
     run: () => {
-      throw new SerperAxiError("something is unset", "runtime", "set the thing");
+      throw new SerpAxiError("something is unset", "runtime", "set the thing");
     },
   };
   const stdout = fakeStdout();
@@ -133,7 +133,7 @@ test("runCli prints a command's help text on --help without dispatching", async 
   assert.match(stdout.output, /echo help text/);
 });
 
-test("runCli sanitizes a non-SerperAxiError throw so raw detail never reaches stdout", async () => {
+test("runCli sanitizes a non-SerpAxiError throw so raw detail never reaches stdout", async () => {
   const command: CliCommand = {
     name: "crack",
     help: "crack help text",
