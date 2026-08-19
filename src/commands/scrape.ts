@@ -13,7 +13,9 @@ const FULL_LIMIT = 50000;
 
 const SCRAPE_HELP = `serp-axi scrape <url> [--full]
 
-Fetch and extract readable text from a web page via Serper.
+Fetch and extract readable text from a web page via Serper. Unlike
+\`search\`, scrape does not support --provider brightdata; it always uses
+Serper and requires SERPER_API_KEY.
 
 Flags:
   --full   Return up to 50,000 characters instead of the default 1,200.

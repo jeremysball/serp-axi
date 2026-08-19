@@ -87,6 +87,20 @@ export async function searchBrightData(
     if (response.status === 429) {
       throw new SerpAxiError("Bright Data rate-limited this request (429)", "runtime", "wait and retry later");
     }
+    if (response.status === 404) {
+      throw new SerpAxiError(
+        "Bright Data could not find the requested zone or endpoint (404)",
+        "runtime",
+        "check that BRIGHTDATA_ZONE (or --zone) names an existing zone",
+      );
+    }
+    if (response.status === 400) {
+      throw new SerpAxiError(
+        `Bright Data rejected the request as invalid (400): ${text || "no details"}`,
+        "runtime",
+        "check that BRIGHTDATA_ZONE (or --zone) names an existing zone",
+      );
+    }
     if (response.status >= 500) {
       throw new SerpAxiError(`Bright Data had an upstream failure (${response.status})`, "runtime", "retry later");
     }
@@ -108,6 +122,20 @@ export async function searchBrightData(
     );
   }
 
+  if (envelope.status_code === 429) {
+    throw new SerpAxiError(
+      "Google (via Bright Data) rate-limited this request (429)",
+      "runtime",
+      "wait and retry later",
+    );
+  }
+  if (envelope.status_code >= 500) {
+    throw new SerpAxiError(
+      `Google (via Bright Data) had an upstream failure (${envelope.status_code})`,
+      "runtime",
+      "retry later",
+    );
+  }
   if (envelope.status_code !== 200) {
     throw new SerpAxiError(
       `Google (via Bright Data) returned an unexpected status ${envelope.status_code}`,
