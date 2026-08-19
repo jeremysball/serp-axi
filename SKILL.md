@@ -53,7 +53,7 @@ whatever the model.
 ## Search
 
 ```
-serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>]
+serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
 ```
 
 Defaults: `--region us --lang en --num 10 --provider serper`. Results include
@@ -61,7 +61,7 @@ Defaults: `--region us --lang en --num 10 --provider serper`. Results include
 date,sitelinks` to include either of those two extra fields when present
 (Serper only). Pass `--provider brightdata` to query Bright Data's SERP API
 instead of Serper; it uses the Bright Data zone `serp_api1` by default,
-overridable via `BRIGHTDATA_ZONE`.
+overridable via `--zone` or `BRIGHTDATA_ZONE` (`--zone` wins if both are set).
 
 ## Scrape
 
@@ -74,7 +74,7 @@ Fetches a page's readable text (from Serper's scrape endpoint), truncated to
 
 ## Notes
 
-- `SERPER_API_KEY` (default `search` provider) or `BRIGHTDATA_API_KEY`
+- `SERPER_API_KEY` (default `--provider serper`) or `BRIGHTDATA_API_KEY`
   (`--provider brightdata`) must be exported in the environment before
   running; serp-axi checks for the relevant one before making any network
   call. `scrape` always uses Serper.

@@ -2,7 +2,7 @@ import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { searchSerper, type SearchParams, type SearchResponse } from "../serper.ts";
-import { searchBrightData } from "../brightdata.ts";
+import { searchBrightData, BRIGHT_DATA_DEFAULT_ZONE } from "../brightdata.ts";
 
 const SEARCH_FLAGS: FlagSpec = {
   region: "string",
@@ -10,15 +10,15 @@ const SEARCH_FLAGS: FlagSpec = {
   num: "string",
   fields: "string",
   provider: "string",
+  zone: "string",
 };
 
 const ALLOWED_EXTRA_FIELDS = ["date", "sitelinks"];
 const PROVIDERS = ["serper", "brightdata"] as const;
 type Provider = (typeof PROVIDERS)[number];
-const DEFAULT_BRIGHTDATA_ZONE = "serp_api1";
 const SNIPPET_LIMIT = 200;
 
-const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>]
+const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
 
 Run a Google Search query via Serper or Bright Data.
 
@@ -29,16 +29,20 @@ Flags:
   --fields <a,b,c>      Extra fields to include beyond the default schema.
                           Accepted: date, sitelinks. Serper only.
   --provider <name>     Which backend to query: serper or brightdata. Default: serper
+  --zone <name>          Bright Data zone to use. Only applies with --provider brightdata.
+                          Default: "${BRIGHT_DATA_DEFAULT_ZONE}", or the BRIGHTDATA_ZONE env var.
 
 Requires SERPER_API_KEY (serper) or BRIGHTDATA_API_KEY (brightdata) in the
 environment for whichever provider is selected. Bright Data's zone defaults
-to "${DEFAULT_BRIGHTDATA_ZONE}"; override with BRIGHTDATA_ZONE.
+to "${BRIGHT_DATA_DEFAULT_ZONE}"; override with --zone or the BRIGHTDATA_ZONE
+env var (--zone wins if both are set).
 
 Examples:
   serp-axi search "site:example.com pricing"
   serp-axi search "climate policy" --region uk --lang en --num 20
   serp-axi search "conference talks" --fields date,sitelinks
-  serp-axi search "climate policy" --provider brightdata`;
+  serp-axi search "climate policy" --provider brightdata
+  serp-axi search "climate policy" --provider brightdata --zone my_zone`;
 
 function parseNum(raw: string | undefined): number {
   if (raw === undefined) return 10;
@@ -95,6 +99,7 @@ async function runProviderSearch(
   provider: Provider,
   params: SearchParams,
   fetchImpl: typeof fetch,
+  zoneFlag: string | undefined,
 ): Promise<SearchResponse> {
   if (provider === "serper") {
     const apiKey = process.env.SERPER_API_KEY;
@@ -111,7 +116,7 @@ async function runProviderSearch(
       "export BRIGHTDATA_API_KEY=<your key> and re-run",
     );
   }
-  const zone = process.env.BRIGHTDATA_ZONE || DEFAULT_BRIGHTDATA_ZONE;
+  const zone = zoneFlag || process.env.BRIGHTDATA_ZONE || BRIGHT_DATA_DEFAULT_ZONE;
   return searchBrightData(apiKey, params, fetchImpl, zone);
 }
 
@@ -127,6 +132,7 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
   const region = parseRegionOrLang(flags.region as string | undefined, "region", "us");
   const lang = parseRegionOrLang(flags.lang as string | undefined, "lang", "en");
   const provider = parseProvider(flags.provider as string | undefined);
+  const extraFields = parseFields(flags.fields as string | undefined);
   if (provider === "brightdata" && flags.fields !== undefined) {
     throw new SerpAxiError(
       "--fields is not supported with --provider brightdata",
@@ -134,10 +140,9 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
       "drop --fields, or use --provider serper",
     );
   }
-  const extraFields = parseFields(flags.fields as string | undefined);
 
   const params: SearchParams = { q: query, gl: region, hl: lang, num };
-  const response = await runProviderSearch(provider, params, fetchImpl);
+  const response = await runProviderSearch(provider, params, fetchImpl, flags.zone as string | undefined);
 
   const results = response.organic.map((r) => {
     const snippetInfo = truncate(r.snippet, SNIPPET_LIMIT - 3);

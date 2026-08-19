@@ -1,7 +1,7 @@
 import { SerpAxiError } from "./errors.ts";
 import type { OrganicResult, SearchParams, SearchResponse } from "./serper.ts";
 
-const DEFAULT_ZONE = "serp_api1";
+export const BRIGHT_DATA_DEFAULT_ZONE = "serp_api1";
 const REQUEST_URL = "https://api.brightdata.com/request";
 
 interface BrightDataEnvelope {
@@ -48,7 +48,7 @@ export async function searchBrightData(
   apiKey: string,
   params: SearchParams,
   fetchImpl: typeof fetch = fetch,
-  zone: string = DEFAULT_ZONE,
+  zone: string = BRIGHT_DATA_DEFAULT_ZONE,
 ): Promise<SearchResponse> {
   let response: Response;
   try {

@@ -201,6 +201,38 @@ test("runSearch honors BRIGHTDATA_ZONE when --provider brightdata", async () => 
   });
 });
 
+test("runSearch honors --zone when --provider brightdata", async () => {
+  await withEnv("BRIGHTDATA_API_KEY", "bd-key", async () => {
+    let capturedBody: string | undefined;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      capturedBody = init?.body as string;
+      return new Response(
+        JSON.stringify({ status_code: 200, headers: {}, body: JSON.stringify({ organic: [] }) }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    await runSearch(["hello world", "--provider", "brightdata", "--zone", "flag_zone"], fetchImpl);
+    assert.equal(JSON.parse(capturedBody as string).zone, "flag_zone");
+  });
+});
+
+test("runSearch prefers --zone over BRIGHTDATA_ZONE when both are set", async () => {
+  await withEnv("BRIGHTDATA_API_KEY", "bd-key", async () => {
+    await withEnv("BRIGHTDATA_ZONE", "env_zone", async () => {
+      let capturedBody: string | undefined;
+      const fetchImpl = (async (_url: string, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return new Response(
+          JSON.stringify({ status_code: 200, headers: {}, body: JSON.stringify({ organic: [] }) }),
+          { status: 200 },
+        );
+      }) as typeof fetch;
+      await runSearch(["hello world", "--provider", "brightdata", "--zone", "flag_zone"], fetchImpl);
+      assert.equal(JSON.parse(capturedBody as string).zone, "flag_zone");
+    });
+  });
+});
+
 test("runSearch reports a definitive zero-result state via --provider brightdata", async () => {
   await withEnv("BRIGHTDATA_API_KEY", "bd-key", async () => {
     const fetchImpl = fetchWithBrightDataOrganic([]);
