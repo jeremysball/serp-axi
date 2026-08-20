@@ -8,6 +8,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-please:
     runs-on: ubuntu-latest
@@ -34,6 +38,13 @@ jobs:
       - name: Set up mise (reads .mise.toml for the pinned Node version)
         uses: jdx/mise-action@v2
 
+      # release-please's own commit bumps package-lock.json's top-level
+      # "version" field on every release, so this job's key changes on
+      # every real run and the primary cache entry never hits -- only the
+      # restore-keys prefix fallback below ever does, giving a partial
+      # (still useful) restore of npm's download cache rather than a full
+      # cold one. Accepted tradeoff: this job runs once per release, not
+      # on every push, so the cost of never getting an exact hit is low.
       - name: Cache npm dependencies
         uses: actions/cache@v4
         with:

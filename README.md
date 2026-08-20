@@ -10,6 +10,10 @@ tools through shell execution rather than a browser.
 npm install -g serp-axi
 ```
 
+Until the first release has actually published (see "Publishing" below),
+this package doesn't exist on the npm registry yet and the install above
+404s.
+
 Confirms it's on `PATH`:
 
 ```
@@ -88,6 +92,20 @@ is completable with flags alone.
 | `SERPER_API_KEY` | `search` (default provider), `scrape` (always) |
 | `BRIGHTDATA_API_KEY` | `search --provider brightdata` |
 | `BRIGHTDATA_ZONE` | optional override for the Bright Data zone (`--zone` wins if both are set) |
+
+## Publishing (maintainers)
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please):
+merging its release PR tags a version and triggers a `publish` job that runs
+`npm publish` under [npm trusted publishing](https://docs.npmjs.com/trusted-publishers)
+(OIDC) — no long-lived npm token stored in the workflow.
+
+Trusted publishing has to be configured on npmjs.com against a package that
+already exists, so it can't cover the very first publish of a brand-new
+package name. That first publish is a one-time manual step from an
+authenticated local session (`npm publish`, using the `NPM_TOKEN` repo
+secret's value) *before* the first release PR is merged. Every release
+after that goes through OIDC only.
 
 ## Status
 
