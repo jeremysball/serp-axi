@@ -1,0 +1,71 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm trusted publishing (OIDC) -- no NPM_TOKEN needed
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up mise (reads .mise.toml for the pinned Node version)
+        uses: jdx/mise-action@v2
+
+      # release-please's own commit bumps package-lock.json's top-level
+      # "version" field on every release, so this job's key changes on
+      # every real run and the primary cache entry never hits -- only the
+      # restore-keys prefix fallback below ever does, giving a partial
+      # (still useful) restore of npm's download cache rather than a full
+      # cold one. Accepted tradeoff: this job runs once per release, not
+      # on every push, so the cost of never getting an exact hit is low.
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Trusted publishing (npm CLI >= 11.5.1, Node >= 22.14.0 -- .mise.toml
+      # pins Node 26.5.1) exchanges this job's OIDC id-token for a
+      # short-lived npm publish token; no NPM_TOKEN secret, no ~/.npmrc auth
+      # line, and npm auto-attaches provenance. Requires a trusted publisher
+      # configured on npmjs.com for this package (Settings > Publishing
+      # access > Trusted Publisher > GitHub Actions), pointing at
+      # jeremysball/serp-axi and this workflow's filename. npmjs.com can
+      # only configure a trusted publisher for a package that already
+      # exists, so the very first publish of a brand-new package name still
+      # needs one manual `npm publish` from an authenticated local session
+      # before this job's OIDC exchange has anything to attach to.
+      - name: Publish to npm
+        run: npm publish
