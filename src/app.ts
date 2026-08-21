@@ -39,7 +39,7 @@ export function createAppOptions(
     description:
       "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) or " +
       "Bright Data (api.brightdata.com) — live search results (title/link/snippet) " +
-      "— plus page-scrape text extraction via Serper.",
+      "— plus page-scrape text extraction via Serper or Bright Data.",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
     homeDir: overrides.homeDir ?? os.homedir(),

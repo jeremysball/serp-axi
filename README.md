@@ -59,14 +59,21 @@ serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields 
 
 ### `scrape`
 
-Fetches a URL and extracts readable text via Serper. Always uses Serper,
-regardless of which provider `search` was run with.
+Fetches one or more URLs and extracts readable text via Serper or Bright Data.
+Serper is the default and accepts one URL. Bright Data accepts multiple URLs
+in one batched request and requires `BRIGHTDATA_API_KEY`.
 
 ```
 serp-axi scrape <url> [--full]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--dataset-id <id>]
 ```
 
-`--full` returns up to 50,000 characters instead of the default 1,200.
+Bright Data uses dataset `gd_m6gjtfmeh43we6cqc` by default. Override it with
+`--dataset-id` or `BRIGHTDATA_DATASET_ID`. `--full` returns up to 50,000
+characters per page instead of the default 1,200. Bright Data returns a
+batched object with `provider`, `datasetId`, and dataset-specific `results`.
+Truncated result fields include a `<field>TruncatedFrom` count and a `help`
+hint showing how to retry with `--full`.
 Loopback and private-range hosts are rejected.
 
 ### `update`
@@ -89,9 +96,10 @@ is completable with flags alone.
 
 | Variable | Required for |
 |---|---|
-| `SERPER_API_KEY` | `search` (default provider), `scrape` (always) |
-| `BRIGHTDATA_API_KEY` | `search --provider brightdata` |
+| `SERPER_API_KEY` | `search` (default provider), default `scrape` |
+| `BRIGHTDATA_API_KEY` | `search --provider brightdata`, `scrape --provider brightdata` |
 | `BRIGHTDATA_ZONE` | optional override for the Bright Data zone (`--zone` wins if both are set) |
+| `BRIGHTDATA_DATASET_ID` | optional default dataset for `scrape --provider brightdata` (`--dataset-id` wins) |
 
 ## Publishing (maintainers)
 
