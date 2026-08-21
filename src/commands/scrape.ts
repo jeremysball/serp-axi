@@ -2,27 +2,58 @@ import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
+import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
 
 const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
+  provider: "string",
+  "dataset-id": "string",
 };
 
 const DEFAULT_LIMIT = 1200;
 const FULL_LIMIT = 50000;
+const PROVIDERS = ["serper", "brightdata"] as const;
+type Provider = (typeof PROVIDERS)[number];
+
+const NON_TRUNCATED_RECORD_FIELDS = new Set(["url"]);
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > 0 ? value : undefined;
+}
+
+function preferredUrlString(raw: string, normalized: URL): string {
+  const normalizedStr = normalized.toString();
+  if (raw === normalizedStr) return normalizedStr;
+  if (raw + "/" === normalizedStr) return raw;
+  return normalizedStr;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 const SCRAPE_HELP = `serp-axi scrape <url> [--full]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--dataset-id <id>]
 
-Fetch and extract readable text from a web page via Serper. Unlike
-\`search\`, scrape does not support --provider brightdata; it always uses
-Serper and requires SERPER_API_KEY.
+Fetch and extract readable text from one or more web pages.
+
+Providers:
+  serper (default)   Serper's own scrape endpoint. Exactly one URL, synchronous.
+  brightdata          Bright Data's dataset scrape API. One or more URLs, synchronous,
+                      batched in a single request. Requires BRIGHTDATA_API_KEY.
 
 Flags:
-  --full   Return up to 50,000 characters instead of the default 1,200.
+  --full                Return up to 50,000 characters per page instead of the default 1,200.
+  --provider <name>      serper (default) or brightdata.
+  --dataset-id <id>     Bright Data dataset to scrape against.
+                         Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
+                         Only valid with --provider brightdata.
 
 Examples:
   serp-axi scrape https://example.com/article
-  serp-axi scrape https://example.com/article --full`;
+  serp-axi scrape https://example.com/article --full
+  serp-axi scrape https://example.com https://example.com/1 --provider brightdata`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],
@@ -107,8 +138,91 @@ function validateUrl(raw: string): URL {
   return url;
 }
 
+function parseProvider(raw: string | boolean | undefined): Provider {
+  if (raw === undefined) return "serper";
+  if (typeof raw !== "string" || !PROVIDERS.includes(raw as Provider)) {
+    throw new SerpAxiError(
+      `--provider must be one of ${PROVIDERS.join(", ")}, got "${String(raw)}"`,
+      "usage",
+      "example: --provider brightdata",
+    );
+  }
+  return raw as Provider;
+}
+
+function summarizeRecord(record: BrightDataRecord, limit: number, full: boolean): AxiOutput {
+  const out: AxiOutput = { ...record };
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value !== "string") continue;
+    if (NON_TRUNCATED_RECORD_FIELDS.has(key)) continue;
+    const info = truncate(value, limit);
+    out[key] = info.text;
+    const marker = `${key}TruncatedFrom`;
+    if (info.truncated) {
+      if (!Object.hasOwn(record, marker)) {
+        out[marker] = info.totalChars;
+      }
+      const url = shellQuote(typeof record.url === "string" ? record.url : "<url>");
+      out.help = full
+        ? `content is capped at ${FULL_LIMIT} characters even with --full`
+        : `Run \`serp-axi scrape ${url} --provider brightdata --full\` to see up to ${FULL_LIMIT} characters`;
+    }
+  }
+  return out;
+}
+
+async function runBrightDataScrape(
+  positionals: string[],
+  flags: Record<string, string | boolean>,
+  fetchImpl: typeof fetch,
+): Promise<AxiOutput> {
+  if (positionals.length === 0) {
+    throw new SerpAxiError(
+      "scrape requires at least one URL",
+      "usage",
+      "example: serp-axi scrape https://example.com --provider brightdata",
+    );
+  }
+  const urls = positionals.map((raw) => preferredUrlString(raw, validateUrl(raw)));
+
+  const apiKey = process.env.BRIGHTDATA_API_KEY;
+  if (!apiKey) {
+    throw new SerpAxiError(
+      "BRIGHTDATA_API_KEY is not set",
+      "runtime",
+      "export BRIGHTDATA_API_KEY=<your key> and re-run",
+    );
+  }
+  const datasetId =
+    nonEmpty(flags["dataset-id"] as string | undefined) ??
+    nonEmpty(process.env.BRIGHTDATA_DATASET_ID) ??
+    BRIGHT_DATA_DEFAULT_DATASET_ID;
+
+  const limit = flags.full ? FULL_LIMIT : DEFAULT_LIMIT;
+  const records = await scrapeBrightData(apiKey, datasetId, urls, limit, fetchImpl);
+
+  return {
+    provider: "brightdata",
+    datasetId,
+    results: records.map((record) => summarizeRecord(record, limit, Boolean(flags.full))),
+  };
+}
+
 export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch): Promise<AxiOutput> {
   const { positionals, flags } = parseFlags(args, SCRAPE_FLAGS, "scrape");
+  const provider = parseProvider(flags.provider);
+
+  if (provider === "brightdata") {
+    return runBrightDataScrape(positionals, flags, fetchImpl);
+  }
+
+  if (flags["dataset-id"] !== undefined) {
+    throw new SerpAxiError(
+      "--dataset-id only applies with --provider brightdata",
+      "usage",
+      "example: serp-axi scrape <url> --provider brightdata --dataset-id <id>",
+    );
+  }
 
   const raw = positionals[0];
   if (!raw) {
@@ -119,7 +233,7 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
     throw new SerpAxiError(
       `unexpected argument${positionals.length > 2 ? "s" : ""} ${extras} for \`scrape\``,
       "usage",
-      "usage: serp-axi scrape <url> [--full]",
+      "usage: serp-axi scrape <url> [--full] (pass multiple URLs with --provider brightdata)",
     );
   }
   const url = validateUrl(raw);
