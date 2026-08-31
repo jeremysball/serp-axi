@@ -254,10 +254,10 @@ test("runScrape Bright Data batches URLs, applies the default dataset, and trunc
       capturedUrl = url;
       capturedBody = JSON.parse(init?.body as string);
       return new Response(
-        JSON.stringify([
-          { url: "https://example.com", markdown: longText },
-          { url: "https://example.com/1", markdown: "short" },
-        ]),
+        [
+          JSON.stringify({ url: "https://example.com", markdown: longText }),
+          JSON.stringify({ url: "https://example.com/1", markdown: "short" }),
+        ].join("\n"),
         { status: 200 },
       );
     }) as typeof fetch;
@@ -288,14 +288,12 @@ test("runScrape Bright Data preserves upstream truncation markers and quotes hel
   await withBrightData("test-key", undefined, async () => {
     const fetchImpl = (async () =>
       new Response(
-        JSON.stringify([
-          {
-            url: "https://example.com/$HOME/test",
-            markdown: "m".repeat(2000),
-            markdownTruncatedFrom: 9999,
-            content: "c".repeat(2000),
-          },
-        ]),
+        JSON.stringify({
+          url: "https://example.com/$HOME/test",
+          markdown: "m".repeat(2000),
+          markdownTruncatedFrom: 9999,
+          content: "c".repeat(2000),
+        }),
       )) as typeof fetch;
     const output = await runScrape(["https://example.com/$HOME/test", "--provider", "brightdata"], fetchImpl);
     const result = (output.results as Array<Record<string, unknown>>)[0];
@@ -311,7 +309,7 @@ test("runScrape Bright Data prefers --dataset-id over BRIGHTDATA_DATASET_ID", as
     let capturedUrl: string | undefined;
     const fetchImpl = (async (url: string) => {
       capturedUrl = url;
-      return new Response("[]");
+      return new Response("");
     }) as typeof fetch;
     const output = await runScrape(
       ["https://example.com", "--provider", "brightdata", "--dataset-id", "gd_from_flag"],
@@ -327,7 +325,7 @@ test("runScrape Bright Data uses BRIGHTDATA_DATASET_ID when no flag is given", a
     let capturedUrl: string | undefined;
     const fetchImpl = (async (url: string) => {
       capturedUrl = url;
-      return new Response("[]");
+      return new Response("");
     }) as typeof fetch;
     const output = await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
     assert.match(capturedUrl as string, /dataset_id=gd_from_env/);
@@ -340,7 +338,7 @@ test("runScrape Bright Data passes the full limit to the provider", async () => 
     let capturedBody: unknown;
     const fetchImpl = (async (_url: string, init?: RequestInit) => {
       capturedBody = JSON.parse(init?.body as string);
-      return new Response("[]");
+      return new Response("");
     }) as typeof fetch;
     await runScrape(["https://example.com", "--provider", "brightdata", "--full"], fetchImpl);
     assert.equal((capturedBody as { limit_per_input: number }).limit_per_input, 50000);
@@ -352,7 +350,7 @@ test("runScrape Bright Data preserves a bare-origin URL without adding a slash",
     let capturedBody: unknown;
     const fetchImpl = (async (_url: string, init?: RequestInit) => {
       capturedBody = JSON.parse(init?.body as string);
-      return new Response(JSON.stringify([{ url: "https://example.com", markdown: "x" }]));
+      return new Response(JSON.stringify({ url: "https://example.com", markdown: "x" }));
     }) as typeof fetch;
     await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
     assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
