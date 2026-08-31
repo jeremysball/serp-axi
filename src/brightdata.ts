@@ -238,30 +238,28 @@ export async function scrapeBrightData(
     );
   }
 
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new SerpAxiError(
-      "Bright Data returned a non-JSON response (200)",
-      "runtime",
-      "this may be a transient upstream issue; retry",
-    );
+  const text = await response.text();
+  const records: BrightDataRecord[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      throw new SerpAxiError(
+        "Bright Data returned a non-JSON line in its response",
+        "runtime",
+        "this may indicate an upstream API change; report it if it persists",
+      );
+    }
+    if (!isBrightDataRecord(record)) {
+      throw new SerpAxiError(
+        "Bright Data returned an invalid record shape (expected objects)",
+        "runtime",
+        "this may indicate an upstream API change; report it if it persists",
+      );
+    }
+    records.push(record);
   }
-
-  if (!Array.isArray(body)) {
-    throw new SerpAxiError(
-      "Bright Data returned an unexpected response shape (expected an array of records)",
-      "runtime",
-      "this may indicate an upstream API change; report it if it persists",
-    );
-  }
-  if (!body.every(isBrightDataRecord)) {
-    throw new SerpAxiError(
-      "Bright Data returned an invalid record shape (expected objects)",
-      "runtime",
-      "this may indicate an upstream API change; report it if it persists",
-    );
-  }
-  return body;
+  return records;
 }
