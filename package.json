@@ -36,7 +36,7 @@
     "prepublishOnly": "npm run check && npm run build"
   },
   "dependencies": {
-    "@toon-format/toon": "2.3.1"
+    "@toon-format/toon": "4.1.1"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

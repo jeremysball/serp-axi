@@ -17,6 +17,13 @@ test("encodeOutput renders a tabular array", () => {
   assert.match(text, /results\[2\]\{position,title\}:/);
 });
 
+test("encodeOutput quotes a title starting with # so it cannot decode as a comment", () => {
+  const text = encodeOutput({
+    results: [{ position: 1, title: "#1 Rust runtimes" }],
+  });
+  assert.match(text, /1,"#1 Rust runtimes"/);
+});
+
 test("collapseHomeDirectory replaces a leading home path with ~", () => {
   assert.equal(collapseHomeDirectory("/home/user/.local/bin/serp-axi", "/home/user"), "~/.local/bin/serp-axi");
 });
