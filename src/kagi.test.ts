@@ -45,6 +45,19 @@ test("parseKagiHtml drops the Summarize UI control from snippets", () => {
   }
 });
 
+test("parseKagiHtml finds blocks regardless of where _0_SRI sits in the class list", () => {
+  // Kagi currently writes `class="_0_SRI _ext_ub_r search-result "`, so a
+  // prefix-anchored selector passes today and breaks on any class reorder.
+  const html =
+    '<div class="search-result _0_SRI x">' +
+    '<a class="__sri_title_link a" title="Example" href="https://example.com/"></a>' +
+    '<div class="_0_DESC __sri-desc">a snippet</div></div>';
+
+  assert.deepEqual(parseKagiHtml(html), [
+    { position: 1, title: "Example", link: "https://example.com/", snippet: "a snippet" },
+  ]);
+});
+
 test("parseKagiHtml returns nothing for a page with no result blocks", () => {
   assert.deepEqual(parseKagiHtml("<html><body>Sign in to continue</body></html>"), []);
 });

@@ -1,16 +1,10 @@
-import { SerpAxiError } from "./errors.ts";
+import { SerpAxiError, boundedDetail } from "./errors.ts";
 import type { OrganicResult, SearchParams, SearchResponse } from "./serper.ts";
 
 // Kagi's default /search endpoint streams results to the browser over SSE, so
 // its static HTML carries no organic results at all. /html/search is the
 // non-JavaScript endpoint and renders the full SERP server-side.
 const SEARCH_URL = "https://kagi.com/html/search";
-
-const MAX_ERROR_DETAIL = 200;
-
-function boundedDetail(message: string): string {
-  return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
-}
 
 const ENTITIES: Record<string, string> = {
   amp: "&",
@@ -84,7 +78,10 @@ function extractDescription(block: string): string | null {
  */
 export function parseKagiHtml(html: string): OrganicResult[] {
   const results: OrganicResult[] = [];
-  const blocks = html.split('<div class="_0_SRI').slice(1);
+  // Match `_0_SRI` as a class token rather than a prefix: Kagi writes the
+  // block as `class="_0_SRI _ext_ub_r search-result "`, and the description
+  // below puts its own marker class second, so position is not guaranteed.
+  const blocks = html.split(/<div (?=class="[^"]*\b_0_SRI\b)/).slice(1);
 
   for (const block of blocks) {
     const link = /class="__sri_title_link[^"]*"[^>]*title="([^"]*)"[^>]*href="([^"]*)"/.exec(block);
