@@ -38,8 +38,9 @@ export function createAppOptions(
   return {
     description:
       "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) or " +
-      "Bright Data (api.brightdata.com) — live search results (title/link/snippet) " +
-      "— plus page-scrape text extraction via Serper or Bright Data.",
+      "Bright Data (api.brightdata.com) — live search results (title/link/snippet). " +
+      "Also searches Kagi (kagi.com) with --provider kagi, against your own " +
+      "subscription. Plus page-scrape text extraction via Serper or Bright Data.",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
     homeDir: overrides.homeDir ?? os.homedir(),
