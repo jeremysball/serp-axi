@@ -44,17 +44,21 @@ Runs a Google Search query via [Serper](https://serper.dev) or
 `--provider brightdata` to use Bright Data instead (requires
 `BRIGHTDATA_API_KEY` and, optionally, `--zone`/`BRIGHTDATA_ZONE`).
 
+`--provider kagi` searches [Kagi](https://kagi.com) instead of Google, against
+your own subscription. It needs `KAGI_SESSION_TOKEN`; see
+[Using the Kagi provider](#using-the-kagi-provider) below.
+
 ```
 serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--region <cc>` | `us` | Two-letter region code |
-| `--lang <code>` | `en` | Language code |
+| `--region <cc>` | `us` | Two-letter region code; ignored by `kagi` |
+| `--lang <code>` | `en` | Language code; ignored by `kagi` |
 | `--num <n>` | `10` | 1–100 results |
 | `--fields <a,b,c>` | — | `date`, `sitelinks` (Serper only) |
-| `--provider <name>` | `serper` | `serper` or `brightdata` |
+| `--provider <name>` | `serper` | `serper`, `brightdata`, or `kagi` |
 | `--zone <name>` | account default | Bright Data zone; `--provider brightdata` only |
 
 ### `scrape`
@@ -100,6 +104,35 @@ is completable with flags alone.
 | `BRIGHTDATA_API_KEY` | `search --provider brightdata`, `scrape --provider brightdata` |
 | `BRIGHTDATA_ZONE` | optional override for the Bright Data zone (`--zone` wins if both are set) |
 | `BRIGHTDATA_DATASET_ID` | optional default dataset for `scrape --provider brightdata` (`--dataset-id` wins) |
+| `KAGI_SESSION_TOKEN` | `search --provider kagi` |
+
+## Using the Kagi provider
+
+Kagi has no public search API on a normal subscription, so this provider signs
+in the way a browser does: it sends your session token as a cookie to
+`kagi.com/html/search`, the non-JavaScript endpoint that renders results
+server-side, and parses that HTML.
+
+Get the token from [kagi.com/settings?p=user_details](https://kagi.com/settings?p=user_details),
+under Session Link. The link ends in `&q=%s`; the token is everything before
+that.
+
+```
+export KAGI_SESSION_TOKEN=<token>
+serp-axi search "postgres lateral join" --provider kagi --num 5
+```
+
+Worth knowing about it:
+
+- The token authenticates your account. Treat it like a password, and rotate it
+  from that same settings page if it leaks.
+- `--region` and `--lang` are accepted but do nothing here. Kagi takes both from
+  your account settings.
+- `--fields` and `scrape` do not support this provider, and both say so rather
+  than failing quietly.
+- Parsing HTML means a Kagi redesign can break this provider where an API
+  version would not. `src/kagi.test.ts` runs against a saved copy of a real
+  SERP, so a breaking change shows up as a test failure.
 
 ## Publishing (maintainers)
 
@@ -117,9 +150,9 @@ after that goes through OIDC only.
 
 ## Status
 
-- `search` (both providers) and `scrape` are exercised against their live
-  APIs in this repo's test suite and were run manually against real Serper
-  and Bright Data endpoints during development.
+- `search` (all three providers) and `scrape` are exercised against their live
+  endpoints in this repo's test suite and were run manually against real
+  Serper, Bright Data, and Kagi during development.
 - No npm-registry version check is implemented yet (`update` is a static
   reminder, not a live lookup).
 

@@ -3,6 +3,7 @@ import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { searchSerper, type SearchParams, type SearchResponse } from "../serper.ts";
 import { searchBrightData, BRIGHT_DATA_DEFAULT_ZONE } from "../brightdata.ts";
+import { searchKagi } from "../kagi.ts";
 
 const SEARCH_FLAGS: FlagSpec = {
   region: "string",
@@ -14,13 +15,13 @@ const SEARCH_FLAGS: FlagSpec = {
 };
 
 const ALLOWED_EXTRA_FIELDS = ["date", "sitelinks"];
-const PROVIDERS = ["serper", "brightdata"] as const;
+const PROVIDERS = ["serper", "brightdata", "kagi"] as const;
 type Provider = (typeof PROVIDERS)[number];
 const SNIPPET_LIMIT = 200;
 
 const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
 
-Run a Google Search query via Serper or Bright Data.
+Run a search query via Serper, Bright Data, or Kagi.
 
 Flags:
   --region <cc>      Two-letter region code (maps to gl). Default: us
@@ -28,21 +29,27 @@ Flags:
   --num <n>            Number of results, 1-100. Default: 10
   --fields <a,b,c>      Extra fields to include beyond the default schema.
                           Accepted: date, sitelinks. Serper only.
-  --provider <name>     Which backend to query: serper or brightdata. Default: serper
+  --provider <name>     Which backend to query: serper, brightdata, or kagi. Default: serper
   --zone <name>          Bright Data zone to use. Only applies with --provider brightdata.
                           Default: "${BRIGHT_DATA_DEFAULT_ZONE}", or the BRIGHTDATA_ZONE env var.
 
-Requires SERPER_API_KEY (serper) or BRIGHTDATA_API_KEY (brightdata) in the
-environment for whichever provider is selected. Bright Data's zone defaults
-to "${BRIGHT_DATA_DEFAULT_ZONE}"; override with --zone or the BRIGHTDATA_ZONE
-env var (--zone wins if both are set).
+Requires SERPER_API_KEY (serper), BRIGHTDATA_API_KEY (brightdata), or
+KAGI_SESSION_TOKEN (kagi) in the environment for whichever provider is
+selected. Bright Data's zone defaults to "${BRIGHT_DATA_DEFAULT_ZONE}";
+override with --zone or the BRIGHTDATA_ZONE env var (--zone wins if both
+are set).
+
+Kagi searches your own subscription through its session token. It takes
+region and language from your Kagi account settings, so --region and --lang
+are accepted but have no effect there.
 
 Examples:
   serp-axi search "site:example.com pricing"
   serp-axi search "climate policy" --region uk --lang en --num 20
   serp-axi search "conference talks" --fields date,sitelinks
   serp-axi search "climate policy" --provider brightdata
-  serp-axi search "climate policy" --provider brightdata --zone my_zone`;
+  serp-axi search "climate policy" --provider brightdata --zone my_zone
+  serp-axi search "climate policy" --provider kagi`;
 
 function parseNum(raw: string | undefined): number {
   if (raw === undefined) return 10;
@@ -108,16 +115,28 @@ async function runProviderSearch(
     }
     return searchSerper(apiKey, params, fetchImpl);
   }
-  const apiKey = process.env.BRIGHTDATA_API_KEY;
-  if (!apiKey) {
+  if (provider === "brightdata") {
+    const apiKey = process.env.BRIGHTDATA_API_KEY;
+    if (!apiKey) {
+      throw new SerpAxiError(
+        "BRIGHTDATA_API_KEY is not set",
+        "runtime",
+        "export BRIGHTDATA_API_KEY=<your key> and re-run",
+      );
+    }
+    const zone = zoneFlag || process.env.BRIGHTDATA_ZONE || BRIGHT_DATA_DEFAULT_ZONE;
+    return searchBrightData(apiKey, params, fetchImpl, zone);
+  }
+  const token = process.env.KAGI_SESSION_TOKEN;
+  if (!token) {
     throw new SerpAxiError(
-      "BRIGHTDATA_API_KEY is not set",
+      "KAGI_SESSION_TOKEN is not set",
       "runtime",
-      "export BRIGHTDATA_API_KEY=<your key> and re-run",
+      "export KAGI_SESSION_TOKEN=<your token> and re-run; " +
+        "get the token from kagi.com/settings?p=user_details",
     );
   }
-  const zone = zoneFlag || process.env.BRIGHTDATA_ZONE || BRIGHT_DATA_DEFAULT_ZONE;
-  return searchBrightData(apiKey, params, fetchImpl, zone);
+  return searchKagi(token, params, fetchImpl);
 }
 
 export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch): Promise<AxiOutput> {
@@ -133,9 +152,9 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
   const lang = parseRegionOrLang(flags.lang as string | undefined, "lang", "en");
   const provider = parseProvider(flags.provider as string | undefined);
   const extraFields = parseFields(flags.fields as string | undefined);
-  if (provider === "brightdata" && flags.fields !== undefined) {
+  if (provider !== "serper" && flags.fields !== undefined) {
     throw new SerpAxiError(
-      "--fields is not supported with --provider brightdata",
+      `--fields is not supported with --provider ${provider}`,
       "usage",
       "drop --fields, or use --provider serper",
     );

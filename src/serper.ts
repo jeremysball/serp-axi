@@ -1,4 +1,4 @@
-import { SerpAxiError } from "./errors.ts";
+import { SerpAxiError, boundedDetail } from "./errors.ts";
 
 export interface SearchParams {
   q: string;
@@ -28,12 +28,6 @@ export interface ScrapeResponse {
 interface SerperErrorBody {
   message?: string;
   statusCode?: number;
-}
-
-const MAX_ERROR_DETAIL = 200;
-
-function boundedDetail(message: string): string {
-  return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
 }
 
 async function serperRequest(url: string, apiKey: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {

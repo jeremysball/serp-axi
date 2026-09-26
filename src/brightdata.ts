@@ -1,4 +1,4 @@
-import { SerpAxiError } from "./errors.ts";
+import { SerpAxiError, boundedDetail } from "./errors.ts";
 import type { OrganicResult, SearchParams, SearchResponse } from "./serper.ts";
 
 export const BRIGHT_DATA_DEFAULT_ZONE = "serp_api1";
@@ -25,12 +25,6 @@ export type BrightDataRecord = Record<string, unknown>;
 
 function isBrightDataRecord(value: unknown): value is BrightDataRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-const MAX_ERROR_DETAIL = 200;
-
-function boundedDetail(message: string): string {
-  return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
 }
 
 function buildGoogleSearchUrl(params: SearchParams): string {
