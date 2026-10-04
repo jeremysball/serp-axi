@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 4 shards, each in its own dir so zendriver profiles and pages/ never collide. Hosts are all distinct.
+# The interpreter path below predates the move into the repo: point PY at a venv that has
+# camoufox, zendriver, primp and browserforge installed, and put the domain list in sample.txt.
 cd "$(dirname "$0")"
-PY=../../spike-2026-10-03/.venv/bin/python
+PY=${PY:?set PY to the python that has camoufox/zendriver/primp/browserforge, e.g. PY=$HOME/.venvs/serp-axi/bin/python}
 split -n r/4 -d sample.txt shard.
 for i in 0 1 2 3; do
   mkdir -p w$i

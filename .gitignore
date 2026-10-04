@@ -1,3 +1,13 @@
 .worktrees/
 node_modules/
 dist/
+
+# Spike harness regenerable bulk. spikes/README.md claims these are excluded;
+# without these lines a re-run inside spikes/ stages a whole venv and profiles.
+spikes/**/.venv/
+spikes/**/profiles/
+spikes/**/__pycache__/
+spikes/sample100-2026-10-03/w[0-9].log
+spikes/sample100-2026-10-03/pages/
+spikes/sample100-2026-10-03/shard.[0-9]
+spikes/sample100-2026-10-03/out[0-9].jsonl

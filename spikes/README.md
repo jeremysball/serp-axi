@@ -13,7 +13,15 @@ Two things are deliberately absent and are Linear attachments on BAL-40 instead:
 the screenshots, because a picture nobody diffs does not belong in git, and the
 JSONL files and page dumps that embed verbatim scraped third-party page text.
 Browser profiles, the Python venv and `__pycache__` are excluded from both, being
-regenerable bulk that carries no findings.
+regenerable bulk that carries no findings; so are the per-shard logs, output files
+and saved page directories a re-run produces. All of those are named in the root
+`.gitignore`.
+
+The scripts here are a snapshot, not a working install. None of them are wired
+into `npm run check`, none have their dependencies checked in, and `ladder.py`
+and `run.sh` in particular carry a stale interpreter path from before this data
+moved into the repo. They are kept so the measured thresholds stay readable and
+so the JSONL rows can be traced back to the code that produced them.
 
 | Spike | Linear issue | What it measured |
 | --- | --- | --- |

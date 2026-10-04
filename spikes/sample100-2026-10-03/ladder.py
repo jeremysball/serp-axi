@@ -1,7 +1,14 @@
-"""Fetch a URL by climbing the challenge ladder (03-ladder.md). One rung per subprocess, SIGKILL at 90s.
+"""Fetch a URL by climbing the challenge ladder. One rung per subprocess, SIGKILL at 90s.
 
-Usage: ../spike-2026-10-03/.venv/bin/python ladder.py <out.jsonl> url...   (child: ladder.py --rung <rung> <url>)
+Usage: <venv>/bin/python ladder.py <out.jsonl> url...   (child: ladder.py --rung <rung> <url>)
 Rung 1 uses a site API where one exists (reddit .json, HN Algolia), else primp. Full text goes to pages/.
+
+This is a snapshot of the ladder as it stood at the end of the 2026-10-03 run, kept
+because it is the reference implementation for BAL-8. It expects a Python venv with
+camoufox, zendriver, primp and browserforge installed; none of that is checked in.
+Its interpreter path in run.sh predates the move into this repo and needs updating
+before a re-run. The ladder's design and the per-rung thresholds are in Linear:
+https://linear.app/ball-master/document/the-challenge-ladder-what-we-tried-and-what-held-up-2026-10-03-79e61a6a8c51
 """
 import asyncio, hashlib, json, os, re, signal, subprocess, sys, time, urllib.parse
 
