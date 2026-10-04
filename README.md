@@ -111,7 +111,8 @@ is completable with flags alone.
 The paid providers above all fail the same way, on credits or a 429, and agents
 fail over badly when they do. A $0 path is being built: SearXNG across several
 free engines for search, and an escalation ladder for fetching pages behind the
-links. Not merged, not in `main`, and not wired into any command yet.
+links. Nothing here is wired into a command yet, and no flag or provider accepts
+this path today.
 
 The measured results are written up in the project's Linear tracker. The raw
 datasets they cite are in [`spikes/`](spikes/), which explains each one.
