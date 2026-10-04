@@ -1,0 +1,10 @@
+{"steps": [{"round": 0, "transcript": "The exterior, the paint.", "answer": "the exterior the paint"}], "outcome": "solved", "ms": 21206, "try_": 0, "ts": "2026-10-03T06:57:33-0400"}
+{"steps": [{"round": 0, "transcript": "A few hardships in", "answer": "a few hardships in"}], "outcome": "solved", "ms": 23543, "try_": 1, "ts": "2026-10-03T06:58:28-0400"}
+{"steps": [{"round": 0, "transcript": "The system have recognized it.", "answer": "the system have recognized it"}], "outcome": "solved", "ms": 21063, "try_": 2, "ts": "2026-10-03T06:59:20-0400"}
+{"steps": [{"round": 0, "transcript": "It's actually really good.", "answer": "its actually really good"}], "outcome": "solved", "ms": 21251, "try_": 3, "ts": "2026-10-03T07:00:12-0400"}
+{"steps": [], "outcome": "refused", "why": "Your computer or network may be sending automated queries. To protect our users, we can't process your request right now. For more details visit our help page.", "ms": 15375, "try_": 4, "ts": "2026-10-03T07:00:58-0400"}
+{"steps": [{"round": 0, "transcript": "Point results, cloud surf.", "answer": "point results cloud surf"}], "outcome": "solved", "ms": 21182, "try_": 5, "ts": "2026-10-03T07:01:50-0400"}
+{"steps": [], "outcome": "refused", "why": "Your computer or network may be sending automated queries. To protect our users, we can't process your request right now. For more details visit our help page.", "ms": 14443, "try_": 6, "ts": "2026-10-03T07:02:36-0400"}
+{"steps": [], "outcome": "refused", "why": "Your computer or network may be sending automated queries. To protect our users, we can't process your request right now. For more details visit our help page.", "ms": 14355, "try_": 7, "ts": "2026-10-03T07:03:21-0400"}
+{"steps": [], "outcome": "refused", "why": "Your computer or network may be sending automated queries. To protect our users, we can't process your request right now. For more details visit our help page.", "ms": 14587, "try_": 8, "ts": "2026-10-03T07:04:07-0400"}
+{"steps": [{"round": 0, "transcript": "This period dinosaur was...", "answer": "this period dinosaur was"}], "outcome": "solved", "ms": 20633, "try_": 9, "ts": "2026-10-03T07:04:59-0400"}
