@@ -59,9 +59,10 @@ are archived as Linear attachments on BAL-40, next to the report that cites them
 `q6_rows.jsonl` is the fetch baseline: 219 rows over 77 targets, carrying status,
 title, extracted character count, leading page text, and the verdict the ladder
 reached. `harness/q6_score.py` is the script that produced the accuracy figures
-in BAL-40; it needs `q6_rows.jsonl` alongside it to run.
+in BAL-40. It needs `q6_rows.jsonl` in the working directory, and reads its
+argument paths relative to the current directory, so run it from this one.
 
-`harness/` holds the ten driver scripts the runs used. They are throwaway
+`harness/` holds the nine driver scripts the runs used. They are throwaway
 code kept for reproducibility; they are not part of the shipped CLI and nothing
 in `src/` imports them.
 
