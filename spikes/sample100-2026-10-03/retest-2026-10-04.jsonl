@@ -1,0 +1,2 @@
+{"url": "https://famishare.jp/", "rung": "dead", "tried": [{"rung": "http", "verdict": "dead", "why": "primp.RequestError: error sending request for url (https://famishare.jp/) > tls handshake eof", "regex": null, "jev": null}], "ts": "09:29:49"}
+{"url": "https://htx.com.gt/", "rung": "dead", "tried": [{"rung": "http", "verdict": "dead", "why": "primp.RequestError: error sending request for url (https://htx.com.gt/) > received corrupt message of type InvalidContentType", "regex": null, "jev": null}], "ts": "09:29:49"}

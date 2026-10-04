@@ -1,0 +1,27 @@
+use_default_settings:
+  engines:
+    keep_only: [bing, brave, mojeek, startpage, yandex]
+general:
+  debug: false
+server:
+  port: 8888
+  bind_address: "127.0.0.1"
+  secret_key: "spike-only-not-secret"
+  limiter: false
+  public_instance: false
+search:
+  formats: [html, json]
+engines:
+  - name: yandex
+    disabled: false
+    inactive: false
+  - name: mojeek
+    disabled: false
+    inactive: false
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+    inactive: false

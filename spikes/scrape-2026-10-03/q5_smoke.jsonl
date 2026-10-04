@@ -1,0 +1,2 @@
+{"outcome": "error", "why": "TypeError: open() got an unexpected keyword argument 'metadata_errors'", "try_": 0, "ts": "2026-10-03T06:56:06-0400"}
+{"steps": [{"round": 0, "transcript": "uh... for organizations like", "answer": "uh for organizations like"}], "outcome": "solved", "ms": 21173, "try_": 0, "ts": "2026-10-03T06:56:48-0400"}

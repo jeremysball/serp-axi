@@ -106,6 +106,16 @@ is completable with flags alone.
 | `BRIGHTDATA_DATASET_ID` | optional default dataset for `scrape --provider brightdata` (`--dataset-id` wins) |
 | `KAGI_SESSION_TOKEN` | `search --provider kagi` |
 
+## In progress: free search and scraping
+
+The paid providers above all fail the same way, on credits or a 429, and agents
+fail over badly when they do. A $0 path is being built: SearXNG across several
+free engines for search, and an escalation ladder for fetching pages behind the
+links. Not merged, not in `main`, and not wired into any command yet.
+
+The measured results are written up in the project's Linear tracker. The raw
+datasets they cite are in [`spikes/`](spikes/), which explains each one.
+
 ## Using the Kagi provider
 
 Kagi has no public search API on a normal subscription, so this provider signs
@@ -153,6 +163,8 @@ after that goes through OIDC only.
 - `search` (all three providers) and `scrape` are exercised against their live
   endpoints in this repo's test suite and were run manually against real
   Serper, Bright Data, and Kagi during development.
+- The free SearXNG and escalation-ladder path is measured but not implemented.
+  See "In progress" above.
 - No npm-registry version check is implemented yet (`update` is a static
   reminder, not a live lookup).
 
