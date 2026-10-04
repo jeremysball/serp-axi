@@ -7,7 +7,15 @@ dist/
 spikes/**/.venv/
 spikes/**/profiles/
 spikes/**/__pycache__/
+
+# What run.sh leaves behind in sample100. Three of these patterns were wrong on
+# the first attempt and git check-ignore -v is how that was found:
+#   split -n r/4 -d writes shard.00 to shard.03, so shard.[0-9] matched nothing.
+#   run.sh cd's into w$i before invoking ladder.py, and ladder.py writes pages/
+#   and profiles/ relative to the cwd, so the real output lands in w$i/, not the
+#   spike root. The w[i] rule has to cover pages/ itself: it is verbatim
+#   scraped third-party page text, which is the thing spikes/README.md keeps out.
+spikes/sample100-2026-10-03/w[0-9]/
 spikes/sample100-2026-10-03/w[0-9].log
-spikes/sample100-2026-10-03/pages/
-spikes/sample100-2026-10-03/shard.[0-9]
+spikes/sample100-2026-10-03/shard.[0-9][0-9]
 spikes/sample100-2026-10-03/out[0-9].jsonl

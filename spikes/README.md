@@ -18,10 +18,14 @@ and saved page directories a re-run produces. All of those are named in the root
 `.gitignore`.
 
 The scripts here are a snapshot, not a working install. None of them are wired
-into `npm run check`, none have their dependencies checked in, and `ladder.py`
-and `run.sh` in particular carry a stale interpreter path from before this data
-moved into the repo. They are kept so the measured thresholds stay readable and
-so the JSONL rows can be traced back to the code that produced them.
+into `npm run check` and none have their dependencies checked in. `run.sh` takes
+its interpreter from `$PY` and its domain list from `sample.txt`, neither of which
+is committed, so a re-run needs both supplied. `harness/etsy_repeat.sh` still
+carries the one interpreter path that was not fixed, `.venv/bin/python` relative
+to its own directory, which does not exist in the repo; it also writes its
+`etsy_*.jsonl` output into `harness/` rather than the spike root where the
+committed copies live. The scripts are kept so the measured thresholds stay
+readable and so the JSONL rows can be traced back to the code that produced them.
 
 | Spike | Linear issue | What it measured |
 | --- | --- | --- |
@@ -44,6 +48,13 @@ The scrape A/B rows are `scrape_probe.py` and `scrape_driver.py`, which ran ~15
 hostile URLs through headless shell, headless new, persistent, patchright and
 stealth variants.
 
+Neither run's `scrape_*.jsonl` output is in git, for the reason the other two
+spikes have: both scripts record a `head` field holding the first 240 characters
+of the page body, so the rows embed verbatim third-party text. Those files are
+part of BAL-6 and BAL-7's evidence and are Linear attachments alongside it. The
+committed `serp_probe.jsonl` is the exception that proves the rule worth naming:
+it holds per-engine result counts and error strings, no page text, so it stays.
+
 ## scrape-2026-10-03
 
 One JSONL row per fetch attempt. `q0` through `q6` map to the questions in
@@ -62,7 +73,9 @@ reached. `harness/q6_score.py` is the script that produced the accuracy figures
 in BAL-40. It needs `q6_rows.jsonl` in the working directory, and reads its
 argument paths relative to the current directory, so run it from this one.
 
-`harness/` holds the nine driver scripts the runs used. They are throwaway
+`harness/` holds the nine Python driver scripts the runs used, plus
+`etsy_repeat.sh`, the shell wrapper that drove `solver_probe.py` twice through
+the two Etsy arms. They are throwaway
 code kept for reproducibility; they are not part of the shipped CLI and nothing
 in `src/` imports them.
 
