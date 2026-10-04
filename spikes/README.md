@@ -67,11 +67,16 @@ runs, where `etsy_rate.jsonl` holds every fetch of the speed run and
 `q1.jsonl` and `q6_rows.jsonl` are **not** in git. Both embed scraped third-party
 page text verbatim, and the em-dash gate on commit correctly refuses them. They
 are archived as Linear attachments on BAL-40, next to the report that cites them.
-`q6_rows.jsonl` is the fetch baseline: 219 rows over 77 targets, carrying status,
-title, extracted character count, leading page text, and the verdict the ladder
-reached. `harness/q6_score.py` is the script that produced the accuracy figures
-in BAL-40. It needs `q6_rows.jsonl` in the working directory, and reads its
-argument paths relative to the current directory, so run it from this one.
+`q6_rows.jsonl` is the fetch baseline: 219 rows over 64 distinct targets, each
+target fetched under more than one browser variant, carrying status, title,
+extracted character count, leading page text, and the verdict the ladder reached.
+The row count and the target count are both recomputable from the five
+`q6_*.jsonl` files here, which carry one row per input row with `target` copied
+through as `url`; `219 rows over 77 targets` appeared in an earlier draft of this
+file and the target count was wrong. `harness/q6_score.py` is the script that
+produced the accuracy figures in BAL-40. It needs `q6_rows.jsonl` in the working
+directory, and reads its argument paths relative to the current directory, so run
+it from this one.
 
 `harness/` holds the nine Python driver scripts the runs used, plus
 `etsy_repeat.sh`, the shell wrapper that drove `solver_probe.py` twice through
