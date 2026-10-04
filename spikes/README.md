@@ -80,9 +80,28 @@ it from this one.
 
 `harness/` holds the nine Python driver scripts the runs used, plus
 `etsy_repeat.sh`, the shell wrapper that drove `solver_probe.py` twice through
-the two Etsy arms. They are throwaway
-code kept for reproducibility; they are not part of the shipped CLI and nothing
-in `src/` imports them.
+the two Etsy arms. They are throwaway code kept for reproducibility; they are not
+part of the shipped CLI and nothing in `src/` imports them.
+
+**The `blocked` verdict does not mean the same thing in every one of these
+scripts.** Four of them carry their own challenge-marker regex and they have
+drifted apart. Counting distinct markers:
+
+| Script | Markers |
+| --- | --- |
+| `serp-2026-10-02/scrape_probe.py` | 18 |
+| `sample100-2026-10-03/ladder.py` | 10, two of them (`prove your humanity`, `blocked by network security`) not in the 18 |
+| `scrape-2026-10-03/harness/etsy_rate.py` | 8, adding `unusual activity` and `slide right` |
+| `scrape-2026-10-03/harness/solver_probe.py` | 7, the narrowest, all 7 shared with the 18 |
+
+`solver_probe.py` even imports `classify` from `scrape_probe.py` and then judges
+with its own narrower regex instead. The 12 markers it drops include `captcha`
+and `access denied`, so a page whose only marker is one of those is `blocked`
+under `classify` and `ok` under `solver_probe`'s verdict at line 141, once the
+page is over 300 characters. Checked against every committed row in this
+directory, no verdict in the shipped data is affected, so this is a latent
+divergence rather than a wrong number. Anyone porting the ladder into BAL-8
+should pick one list deliberately instead of inheriting four.
 
 `flywheel.md` is the harness ledger: every hypothesis that turned out to be a
 defect in this harness rather than a result, with the test that settled it. H1
