@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "spike-2026-10-02"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "serp-2026-10-02"))
 from scrape_probe import URLS, classify  # noqa: E402
 
 HARD_KILL_S = 75

@@ -12,7 +12,7 @@ import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "spike-2026-10-02"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "serp-2026-10-02"))
 from scrape_probe import classify  # noqa: E402  (the regex baseline)
 
 # Hand labels by page state, written from reading every distinct (status, title, head) cluster.
