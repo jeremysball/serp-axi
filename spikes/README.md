@@ -1,12 +1,13 @@
 # Spike data
 
 Measured datasets backing the free-SERP and page-scrape work. Each directory is
-one spike run, with the machine-readable output that the findings in Linear are
-derived from.
+one spike run, with the machine-readable output and the scripts that produced
+it. The findings derived from this data are **not** here. They live in Linear as
+prose, one issue per spike, and this repo holds the data those reports cite.
 
-The findings themselves are **not** in this directory. They live in Linear as
-prose, one issue per spike, and this repo holds only the data those reports cite.
-That split is deliberate: Linear is the human-readable record, git is the data.
+That split is deliberate: Linear is the human-readable record, git is the data
+and the code that produced it. Where a harness ledger exists it stays here,
+because a debugging record is only useful next to the runs it explains.
 
 Two things are deliberately absent and are Linear attachments on BAL-40 instead:
 the screenshots, because a picture nobody diffs does not belong in git, and the
@@ -56,6 +57,12 @@ in BAL-40; it needs `q6_rows.jsonl` alongside it to run.
 code kept for reproducibility; they are not part of the shipped CLI and nothing
 in `src/` imports them.
 
+`flywheel.md` is the harness ledger: every hypothesis that turned out to be a
+defect in this harness rather than a result, with the test that settled it. H1
+(headed Chrome deadlocking under Xvfb) and H12 (every zendriver rung crashing on
+one unevaluated arrow function) are the two that cost real time, and both read as
+findings in the JSONL if you do not have the ledger.
+
 `q4_hold.py` in `harness/` drives the PerimeterX press-and-hold. The run failed 0
 of 4, and the two screenshots attached to BAL-40 are the evidence that the button
 accepted the hold while PerimeterX still denied access.
@@ -80,7 +87,9 @@ is verbatim third-party page content. It is archived as a Linear attachment on
 BAL-40.
 
 `ladder.py` is the ladder as it stood at the end of the run. It is the reference
-implementation for the strategy refactor in BAL-8.
+implementation for the strategy refactor in BAL-8, and the executable statement
+of the thresholds the rungs were tuned to. The design it feeds is written up in
+[serp-axi: the free scrape ladder, end to end](https://linear.app/ball-master/document/serp-axi-the-free-scrape-ladder-end-to-end-f403a7925b23).
 
 ## Reproducing
 
