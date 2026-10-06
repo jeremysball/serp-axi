@@ -234,6 +234,7 @@ test("runSearch dedupes by URL minus fragment, unions engines, caps after dedup"
     assert.equal(rows[0].title, "First");
     assert.equal(rows[0].snippet, "content one");
     assert.deepEqual(rows[0].engines, ["bing", "mojeek"]);
+    assert.equal(rows[0].link, "https://a.example/x");
     assert.equal(rows[0].position, 1);
     assert.equal(rows[1].position, 2);
   });
@@ -255,7 +256,7 @@ test("runSearch reports partial when results exist and an engine failed", async 
     assert.equal(error, undefined);
     assert.equal(output?.status, "partial");
     assert.equal(output?.count, 1);
-    assert.match(output?.warning as string, /1 engine/);
+    assert.equal(output?.warning, "1 engine failed; results may be incomplete");
     const engines = output?.engines as Array<Record<string, unknown>>;
     const brave = engines.find((e) => e.name === "brave") as Record<string, unknown>;
     assert.equal(brave.status, "error");
@@ -287,7 +288,7 @@ test("runSearch attributes a failed engine truthfully even when rows name it", a
   });
 });
 
-test("runSearch treats 2xx with rows and unresponsive engines containing captcha/blocked as partial with blocked rows", async (t) => {
+test("runSearch maps zero rows with blocked unresponsive engines to a typed blocked error", async (t) => {
   await isolated(t, async () => {
     const captured: CapturedCall[] = [];
     const fetchImpl = searxngFetch(
@@ -604,6 +605,7 @@ test("runSearch rejects invalid selected values with usage errors", async (t) =>
     const cases: Array<Array<string>> = [
       ["q", "--provider", "searxng", "--searxng-url", "http://user:pw@127.0.0.1:9"],
       ["q", "--provider", "searxng", "--searxng-url", "http://127.0.0.1:9/?a=1"],
+      ["q", "--provider", "searxng", "--searxng-url", "http://127.0.0.1:9/#frag"],
       ["q", "--provider", "searxng", "--searxng-url", "ftp://127.0.0.1:9"],
       ["q", "--provider", "searxng", "--searxng-url", ""],
       ["q", "--provider", "searxng", "--search-timeout-ms", "0"],
@@ -945,5 +947,79 @@ test("config searxngEngines must be a JSON array", async (t) => {
     assert.equal(error.kind, "usage");
     assert.match(error.message, /searxngEngines/);
     assert.match(error.message, /array/);
+  });
+});
+
+test("requested-but-silent engines appear with zero results", async (t) => {
+  await isolated(t, async () => {
+    const captured: CapturedCall[] = [];
+    const fetchImpl = searxngFetch(
+      { results: [{ url: "https://a.example/x", title: "A", content: "s", engines: ["bing"] }] },
+      captured,
+    );
+    const { output, error } = await capture(() =>
+      runSearch(["q", "--provider", "searxng", "--searxng-url", "http://127.0.0.1:9", "--engines", "bing,mojeek"], fetchImpl),
+    );
+    assert.equal(error, undefined);
+    const engines = output?.engines as Array<Record<string, unknown>>;
+    const mojeek = engines.find((e) => e.name === "mojeek") as Record<string, unknown>;
+    assert.equal(mojeek.status, "ok");
+    assert.equal(mojeek.resultCount, 0);
+  });
+});
+
+test("validation errors from env values name the env var", async (t) => {
+  await isolated(t, async () => {
+    await withEnvs([["SERP_AXI_SEARXNG_URL", "ftp://127.0.0.1:9"]], async () => {
+      const { error } = await capture(() =>
+        runSearch(["q", "--provider", "searxng"], (async () => new Response("{}")) as typeof fetch),
+      );
+      assert.ok(error instanceof SerpAxiError);
+      assert.match(error.message, /SERP_AXI_SEARXNG_URL/);
+    });
+    await withEnvs([["SERP_AXI_SEARXNG_ENGINES", "bing,,mojeek"]], async () => {
+      const { error } = await capture(() =>
+        runSearch(["q", "--provider", "searxng"], (async () => new Response("{}")) as typeof fetch),
+      );
+      assert.ok(error instanceof SerpAxiError);
+      assert.match(error.message, /SERP_AXI_SEARXNG_ENGINES/);
+      assert.match(error.message, /comma-separated/);
+    });
+  });
+});
+
+test("long upstream engine reasons are clamped in output", async (t) => {
+  await isolated(t, async () => {
+    const longReason = `connection reset by peer ${"x".repeat(300)}`;
+    const captured: CapturedCall[] = [];
+    const fetchImpl = searxngFetch(
+      {
+        results: [{ url: "https://a.example/x", title: "A", engines: ["bing"] }],
+        unresponsive_engines: [["brave", longReason]],
+      },
+      captured,
+    );
+    const { output, error } = await capture(() =>
+      runSearch(["q", "--provider", "searxng", "--searxng-url", "http://127.0.0.1:9"], fetchImpl),
+    );
+    assert.equal(error, undefined);
+    const engines = output?.engines as Array<Record<string, unknown>>;
+    const brave = engines.find((e) => e.name === "brave") as Record<string, unknown>;
+    assert.ok((brave.reason as string).length < longReason.length);
+    assert.ok((brave.reason as string).endsWith("..."));
+  });
+});
+
+test("non-object config bodies are rejected", async (t) => {
+  await isolated(t, async (_home, configDir) => {
+    for (const body of ["[1,2]", '"str"']) {
+      writeConfig(configDir, body);
+      const { error } = await capture(() =>
+        runSearch(["q", "--provider", "searxng"], (async () => new Response("{}")) as typeof fetch),
+      );
+      assert.ok(error instanceof SerpAxiError, body);
+      assert.equal(error.kind, "usage", body);
+      assert.match(error.message, /JSON object/, body);
+    }
   });
 });

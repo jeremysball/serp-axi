@@ -29,7 +29,7 @@ const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [
 Run a search query via Serper, Bright Data, Kagi, or SearXNG.
 
 Flags:
-  --region <cc>      Two-letter region code. Default: us
+  --region <cc>      Lowercase region code. Default: us
   --lang <code>       Language code. Default: en
   --num <n>            Number of results, 1-100. Default: 10
   --fields <a,b,c>      Extra fields to include beyond the default schema.

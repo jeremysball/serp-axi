@@ -82,7 +82,10 @@ function validateEngines(raw: unknown, source: string): string[] {
     items = raw.split(",").map((name) => name.trim());
   }
   if (items.length === 0 || items.some((name) => name.length === 0)) {
-    throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describe(raw)}`, "usage", "example: --engines bing,mojeek");
+    if (source === "config") {
+      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describe(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+    }
+    throw new SerpAxiError(`${field} must be a comma-separated list of non-empty engine names, got ${describe(raw)}`, "usage", "example: --engines bing,mojeek");
   }
   return [...new Set(items)];
 }

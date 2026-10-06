@@ -56,8 +56,11 @@ locally; no API key. Endpoint, engines, and timeout come from flags, then
 `~/.config/serp-axi/config.json`), then built-in defaults. The default
 endpoint is `http://127.0.0.1:8888`. SearXNG output adds `provider: searxng`,
 a `status` field (`ok`, `partial`, `blocked`, `unavailable`), and per-engine
-counts; blocked and unavailable runs exit 1 with engine details rather than
-claiming zero results.
+counts. Runs with no usable results exit 1 rather than claiming zero
+results: unresponsive-engine failures carry per-engine details, while an
+HTTP 403/429 at the SearXNG endpoint itself surfaces `blocked` with no
+engine breakdown, and 401/5xx/network/timeout errors surface a plain
+runtime error.
 
 ```
 serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>] [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>]
@@ -65,7 +68,7 @@ serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields 
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--region <cc>` | `us` | Two-letter region code; ignored by `kagi` |
+| `--region <cc>` | `us` | Lowercase region code; ignored by `kagi` |
 | `--lang <code>` | `en` | Language code; ignored by `kagi` |
 | `--num <n>` | `10` | 1–100 results |
 | `--fields <a,b,c>` | — | `date`, `sitelinks` (Serper only) |
