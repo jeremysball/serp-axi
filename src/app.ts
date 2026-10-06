@@ -37,9 +37,9 @@ export function createAppOptions(
 ): Omit<RunCliOptions, "stdout"> {
   return {
     description:
-      "THIS IS GOOGLE. Runs real Google Search via Serper (google.serper.dev) or " +
-      "Bright Data (api.brightdata.com) — live search results (title/link/snippet). " +
-      "Also searches Kagi (kagi.com) with --provider kagi, against your own " +
+      "THIS IS GOOGLE. Runs real Google Search via Serper, Bright Data (api.brightdata.com), " +
+      "or free via a SearXNG instance (--provider searxng, no API key), live search results " +
+      "(title/link/snippet). Also searches Kagi (kagi.com) with --provider kagi, against your own " +
       "subscription. Plus page-scrape text extraction via Serper or Bright Data.",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
