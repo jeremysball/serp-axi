@@ -131,7 +131,7 @@ export async function runCli(argv: string[], options: RunCliOptions): Promise<nu
     return 0;
   } catch (error) {
     if (error instanceof SerpAxiError) {
-      const output: AxiOutput = { error: error.message };
+      const output: AxiOutput = { ...error.details, error: error.message };
       if (error.help) output.help = error.help;
       options.stdout.write(encodeOutput(output));
       return exitCodeForError(error);

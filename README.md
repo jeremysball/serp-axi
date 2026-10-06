@@ -48,8 +48,19 @@ Runs a Google Search query via [Serper](https://serper.dev) or
 your own subscription. It needs `KAGI_SESSION_TOKEN`; see
 [Using the Kagi provider](#using-the-kagi-provider) below.
 
+`--provider searxng` runs a free search against a SearXNG instance you run
+locally; no API key. Endpoint, engines, and timeout come from flags, then
+`SERP_AXI_SEARXNG_URL` / `SERP_AXI_SEARXNG_ENGINES` /
+`SERP_AXI_SEARCH_TIMEOUT_MS`, then `searxngUrl` / `searxngEngines` /
+`searchTimeoutMs` in `$XDG_CONFIG_HOME/serp-axi/config.json` (default
+`~/.config/serp-axi/config.json`), then built-in defaults. The default
+endpoint is `http://127.0.0.1:8888`. SearXNG output adds `provider: searxng`,
+a `status` field (`ok`, `partial`, `blocked`, `unavailable`), and per-engine
+counts; blocked and unavailable runs exit 1 with engine details rather than
+claiming zero results.
+
 ```
-serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
+serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>] [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>]
 ```
 
 | Flag | Default | Notes |
@@ -58,8 +69,11 @@ serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields 
 | `--lang <code>` | `en` | Language code; ignored by `kagi` |
 | `--num <n>` | `10` | 1–100 results |
 | `--fields <a,b,c>` | — | `date`, `sitelinks` (Serper only) |
-| `--provider <name>` | `serper` | `serper`, `brightdata`, or `kagi` |
+| `--provider <name>` | `serper` | `serper`, `brightdata`, `kagi`, or `searxng` |
 | `--zone <name>` | account default | Bright Data zone; `--provider brightdata` only |
+| `--searxng-url <url>` | `http://127.0.0.1:8888` | SearXNG base URL; `--provider searxng` only |
+| `--engines <a,b>` | server's engines | SearXNG engine selection; `--provider searxng` only |
+| `--search-timeout-ms <ms>` | `30000` | SearXNG request timeout; `--provider searxng` only |
 
 ### `scrape`
 
@@ -105,13 +119,15 @@ is completable with flags alone.
 | `BRIGHTDATA_ZONE` | optional override for the Bright Data zone (`--zone` wins if both are set) |
 | `BRIGHTDATA_DATASET_ID` | optional default dataset for `scrape --provider brightdata` (`--dataset-id` wins) |
 | `KAGI_SESSION_TOKEN` | `search --provider kagi` |
+| `SERP_AXI_SEARXNG_URL` | optional endpoint override for `search --provider searxng` |
+| `SERP_AXI_SEARXNG_ENGINES` | optional engine list for `search --provider searxng` |
+| `SERP_AXI_SEARCH_TIMEOUT_MS` | optional timeout override for `search --provider searxng` |
 
-## In progress: free search and scraping
+## In progress: scraping escalation ladder
 
-The paid providers above all fail the same way, on credits or a 429, and agents
-fail over badly when they do. A $0 path is being built: SearXNG across several
-free engines for search, and an escalation ladder for fetching pages behind the
-links. Nothing here is wired into a command yet, and no flag or provider accepts
+The free SearXNG search path is wired in (`--provider searxng`). The
+escalation ladder for fetching pages behind the links is still being built.
+Nothing about it is wired into a command yet, and no flag or provider accepts
 this path today.
 
 The measured results are written up in the project's Linear tracker. The raw
@@ -161,10 +177,10 @@ after that goes through OIDC only.
 
 ## Status
 
-- `search` (all three providers) and `scrape` are exercised against their live
-  endpoints in this repo's test suite and were run manually against real
-  Serper, Bright Data, and Kagi during development.
-- The free SearXNG and escalation-ladder path is measured but not implemented.
+- `search` (all four providers, including SearXNG) and `scrape` are exercised
+  against their endpoints in this repo's test suite; Serper, Bright Data,
+  Kagi, and a local SearXNG were run live during development.
+- The fetch escalation ladder is measured but not implemented.
   See "In progress" above.
 - No npm-registry version check is implemented yet (`update` is a static
   reminder, not a live lookup).

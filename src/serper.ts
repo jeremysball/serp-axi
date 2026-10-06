@@ -14,6 +14,7 @@ export interface OrganicResult {
   snippet: string;
   date?: string;
   sitelinks?: unknown;
+  engines?: string[];
 }
 
 export interface SearchResponse {
