@@ -39,10 +39,11 @@ serp-axi scrape https://example.com/article
 
 ### `search`
 
-Runs a Google Search query via [Serper](https://serper.dev) or
-[Bright Data](https://brightdata.com). Serper is the default; pass
-`--provider brightdata` to use Bright Data instead (requires
-`BRIGHTDATA_API_KEY` and, optionally, `--zone`/`BRIGHTDATA_ZONE`).
+Runs a free search query via SearXNG by default (no API key; see below),
+or a Google Search query via [Serper](https://serper.dev) or
+[Bright Data](https://brightdata.com). Pass `--provider serper` for Serper
+or `--provider brightdata` for Bright Data (requires `BRIGHTDATA_API_KEY`
+and, optionally, `--zone`/`BRIGHTDATA_ZONE`).
 
 `--provider kagi` searches [Kagi](https://kagi.com) instead of Google, against
 your own subscription. It needs `KAGI_SESSION_TOKEN`; see
@@ -72,7 +73,7 @@ serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields 
 | `--lang <code>` | `en` | Language code; ignored by `kagi` |
 | `--num <n>` | `10` | 1–100 results |
 | `--fields <a,b,c>` | — | `date`, `sitelinks` (Serper only) |
-| `--provider <name>` | `serper` | `serper`, `brightdata`, `kagi`, or `searxng` |
+| `--provider <name>` | `searxng` | `searxng` (free), `serper`, `brightdata`, or `kagi` |
 | `--zone <name>` | account default | Bright Data zone; `--provider brightdata` only |
 | `--searxng-url <url>` | `http://127.0.0.1:8888` | SearXNG base URL; `--provider searxng` only |
 | `--engines <a,b>` | server's engines | SearXNG engine selection; `--provider searxng` only |
@@ -117,7 +118,7 @@ is completable with flags alone.
 
 | Variable | Required for |
 |---|---|
-| `SERPER_API_KEY` | `search` (default provider), default `scrape` |
+| `SERPER_API_KEY` | `search --provider serper`, default `scrape` |
 | `BRIGHTDATA_API_KEY` | `search --provider brightdata`, `scrape --provider brightdata` |
 | `BRIGHTDATA_ZONE` | optional override for the Bright Data zone (`--zone` wins if both are set) |
 | `BRIGHTDATA_DATASET_ID` | optional default dataset for `scrape --provider brightdata` (`--dataset-id` wins) |

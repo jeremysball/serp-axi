@@ -81,7 +81,7 @@ test("runSearch applies defaults and truncates a long snippet", async () => {
   await withApiKey("test-key", async () => {
     const longSnippet = "x".repeat(250);
     const fetchImpl = fetchWithOrganic([{ position: 1, title: "t", link: "https://x", snippet: longSnippet }]);
-    const output = await runSearch(["hello world"], fetchImpl);
+    const output = await runSearch(["hello world", "--provider", "serper"], fetchImpl);
     assert.equal(output.count, 1);
     const results = output.results as Array<Record<string, unknown>>;
     assert.equal((results[0].snippet as string).length, 200);
@@ -93,7 +93,7 @@ test("runSearch includes an extra --fields value in the output rows", async () =
     const fetchImpl = fetchWithOrganic([
       { position: 1, title: "t", link: "https://x", snippet: "s", date: "2026-01-01" },
     ]);
-    const output = await runSearch(["q", "--fields", "date"], fetchImpl);
+    const output = await runSearch(["q", "--provider", "serper", "--fields", "date"], fetchImpl);
     const results = output.results as Array<Record<string, unknown>>;
     assert.equal(results[0].date, "2026-01-01");
   });
@@ -102,7 +102,7 @@ test("runSearch includes an extra --fields value in the output rows", async () =
 test("runSearch reports a definitive zero-result state", async () => {
   await withApiKey("test-key", async () => {
     const fetchImpl = fetchWithOrganic([]);
-    const output = await runSearch(["nothing here"], fetchImpl);
+    const output = await runSearch(["nothing here", "--provider", "serper"], fetchImpl);
     assert.equal(output.count, 0);
     assert.match(output.results as string, /0 results found for query "nothing here"/);
   });
@@ -115,7 +115,7 @@ test("runSearch requires SERPER_API_KEY before any network call", async () => {
       called = true;
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
-    await assert.rejects(() => runSearch(["hi"], fetchImpl), SerpAxiError);
+    await assert.rejects(() => runSearch(["hi", "--provider", "serper"], fetchImpl), SerpAxiError);
     assert.equal(called, false);
   });
 });
