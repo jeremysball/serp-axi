@@ -1,6 +1,6 @@
 ---
 system_approved: true
-program_approved: false
+program_approved: true
 ---
 
 # TDD: resident ladder CLI for scraping at home
@@ -164,7 +164,24 @@ Every guide gets a sensor; a guide without one does not ship.
 
 ## 2. Program design
 
-Approval: pending
+Approval: approved 2026-10-07
+
+Three rulings recorded at approval, because Phase 1 had already shipped narrower
+than this section reads and the gap was found by diffing §2 against the merged
+code rather than against the summary:
+
+1. Axis resolution, the nine-field request schema, and `protocol: 1`
+   negotiation move forward from outline Phase 4 into **Phase 2**. They are
+   inseparable from the Python `LadderRequest` dataclass, which §2.3 specifies
+   rejects unknown fields: a parent that still sends only `{url}` fails every
+   request the moment the child exists.
+2. §1.3's honest-empty rule is enforced in **Phase 2**, parent-side, not
+   deferred to Phase 5: `verdict: "ok"` with empty text is a schema violation.
+3. Binary resolution keeps sibling-of-package as specified in §2.2, even though
+   Phase 1 shipped only `SERP_AXI_LADDER_BIN ?? "ladder-cli"`. It is Phase 2 work.
+
+Below, the call path and signatures are aligned to the names Phase 1 actually
+shipped (`LadderClient`, `fetchViaLadder`) rather than the drafted `resolveLadder`.
 
 ### 2.1 Call paths
 
@@ -172,21 +189,23 @@ TypeScript side (new code, all inside `src/`):
 
 ```
 scrape command (src/commands/scrape.ts)
-  -> resolveLadder (src/ladder.ts, new)
+  -> fetchViaLadder (src/commands/scrape.ts) -> LadderClient (src/ladder.ts)
        resolve axes: flags > env > config > default; expand --profile; expand jar sugar
-       spawn child on first use: ladder-cli; wait for {"ready": true}
-     -> writeRequest: NDJSON line on child stdin
+       resolve binary: SERP_AXI_LADDER_BIN > sibling-of-package > PATH
+       spawn child on first use: ladder-cli; wait for {"ready": true, "protocol": 1}
+     -> writeRequest: NDJSON line carrying all nine fields + protocol: 1
      -> readResponse: first stdout line; parse + validate against LadderResponse
+     -> honest-empty: verdict ok with empty text is a schema violation, not a success
      -> verdict mapping: ok -> rows; dead/blocked -> typed SerpAxiError (blocked exits 1)
      -> idle teardown: last-resort timer closes stdin after N ms with no in-flight request
 ```
 
-`resolveLadder` owns the whole child lifecycle: exactly one child per process,
-one in-flight request at a time (a second concurrent scrape queues behind the
-first; the falsifier in 1.1 is measured here, not designed for). A child that
-dies mid-request surfaces its stderr tail as the request error. SIGKILL per
-rung stays inside the child; the parent's overall timeout races the response
-read.
+`LadderClient` (the class shipped in Phase 1) owns the whole child lifecycle:
+exactly one child per process, one in-flight request at a time (a second
+concurrent scrape queues behind the first; the falsifier in 1.1 is measured here,
+not designed for). A child that dies mid-request surfaces its stderr tail as the
+request error. SIGKILL per rung stays inside the child; the parent's overall
+timeout races the response read.
 
 Python side (new `ladder-cli/` tree at repo root, so the Python package never
 nests inside the npm layout):
@@ -214,7 +233,7 @@ allowlist, humanize flag) with the spike file cited in a comment at each use.
 ```
 src/ladder.ts            parent-side lifecycle: spawn, ready, write, read, teardown, verdict mapping
 src/ladder.test.ts       contract tests against a stub child (a 20-line node script, not Python)
-src/commands/scrape.ts   route --ladder through resolveLadder (new flag; serper stays default for scrape)
+src/commands/scrape.ts   route --ladder through fetchViaLadder (new flag; serper stays default for scrape)
 ladder-cli/pyproject.toml  pinned deps: camoufox==0.5.6, zendriver==0.17.1, faster-whisper==1.2.1,
                            primp==2.0.1, browserforge==1.2.4 (versions from the measured spikes)
 ladder-cli/cli.py        handshake + NDJSON loop + dispatch + rung ceiling
@@ -234,6 +253,7 @@ env var and the docs page, and exits 1 as a failed request.
 ```ts
 // src/ladder.ts
 interface LadderRequest {
+  protocol: 1;                        // rides on every request; see the versioning note below
   url: string; tabState: "fresh" | "same";
   cookieState: "cold" | "jar"; cacheState: "cold" | "warm";
   fingerprintState: "rotate" | "stable"; rungCeiling: 1 | 2 | 3 | 4 | 5;
@@ -244,7 +264,7 @@ interface LadderResponse {
   title: string; text: string; engines: string[];
   elapsedMs: number; warning: string | null;
 }
-async function fetchViaLadder(url: string, axes: Axes): Promise<LadderResponse>
+async function fetchViaLadder(url: string, options: LadderClientOptions): Promise<LadderResponse>
 ```
 
 ```python
@@ -267,12 +287,21 @@ stale installed `ladder-cli` can never silently misparse.
   that replays canned NDJSON (ready line, one ok, one blocked, one malformed,
   one pre-ready exit) and asserts spawn-once, ready-wait, timeout race,
   verdict mapping, and stderr-tail errors. No Python involved.
+- Three assertions carry the approval rulings above, each a sensor on a gap
+  that shipped absent from Phase 1:
+  - the stub advertises `protocol: 1` on its ready line and the parent rejects
+    a mismatched `protocol` with a message naming both sides;
+  - the stub returns `verdict: "ok"` with empty `text` and `parseResponse`
+    throws instead of returning a successful empty scrape;
+  - binary resolution is exercised for all three legs (env override,
+    sibling-of-package, PATH fallback).
 - Python owns the rungs: each `rungs/*.py` gets unit tests with recorded
   fixtures; the fixture replay suite asserts `final.jsonl` verdicts and
   `q6_rows.jsonl` classifier thresholds bit-for-bit against the spike
   numbers, and fails if `spikes/scrape-2026-10-03/flywheel.md` is missing or
   has fewer entries than the count the suite records.
 - Axis orthogonality pairs live TypeScript-side (request building), one test
-  per axis varying alone.
+  per axis varying alone; they land with Phase 2 alongside the schema they
+  exercise.
 - Live-engine tests stay quarantined exactly like today's `*.live.test.ts`:
   never in `npm run check`, named `.live`, run by hand.

@@ -18,16 +18,24 @@ serper stays the scrape default).
 Checks: `npm run check` green; mutation pass on the ready-wait and
 verdict-mapping lines.
 
-# Phase 2: Python skeleton with rung 1
+# Phase 2: Python skeleton, full request schema, rung 1
 
 Testable result: a real `ladder-cli` answers a rung-1 URL end to end through
 `fetchViaLadder`: handshake, NDJSON loop, `primp` fetch, `ok` response with
 the `protocol: 1` field, and a 90s-budget timeout path exercised by test.
 
+The parent half lands in the same phase, because §2.3's dataclass rejects
+unknown fields: nine-field request schema, `protocol: 1` in both directions,
+axis resolution (flags > env > config > default) with `--profile` and jar
+expansion, sibling-of-package binary resolution, and the §1.3 honest-empty
+rule. A parent that still sends bare `{url}` cannot coexist with the child.
+
 Files touched: `ladder-cli/pyproject.toml` (pinned deps),
 `ladder-cli/cli.py`, `ladder-cli/rungs/http.py`, `ladder-cli/tests/`
-(skeleton + rung-1 tests), `src/ladder.ts` (binary resolution:
-sibling-of-package, `SERP_AXI_LADDER_BIN` override, missing-binary error).
+(skeleton + rung-1 tests), `src/ladder.ts` (request building, protocol check,
+honest-empty, binary resolution: sibling-of-package, `SERP_AXI_LADDER_BIN`
+override, missing-binary error), `src/commands/scrape.ts` (axis flags),
+`src/ladder.test.ts` (the three approval sensors).
 
 Checks: `npm run check` green; `pytest` green; one live rung-1 fetch by hand,
 never in CI.
@@ -46,16 +54,18 @@ Files touched: `ladder-cli/rungs/camoufox.py`,
 Checks: `pytest` green; fixture replay of a rung-2 and rung-3 URL from the
 spike rows.
 
-# Phase 4: Rung 5, jars, and the six axes
+# Phase 4: Rung 5, and the jar state modules
 
 Testable result: Whisper constructs once per CLI life (startup test asserts
-zero model loads before first audio need); `jarIn`/`jarOut` round-trip;
-all six axes vary independently end to end (orthogonality pairs); profiles
-expand parent-side.
+zero model loads before first audio need); `jarIn`/`jarOut` round-trip through
+the Python state module; README documents the ladder flags.
+
+Axis resolution, `--profile` expansion, and the six-axis orthogonality pairs
+moved to Phase 2 (ruling 1 at §2): they are request building, not rung
+behaviour, and cannot ship after the dataclass that validates them.
 
 Files touched: `ladder-cli/rungs/whisper.py`, `ladder-cli/state/jars.py`,
-`src/ladder.ts` (axis resolution + profile expansion), `src/ladder.test.ts`
-(orthogonality pairs), README (ladder flags documented).
+`README.md` (ladder flags documented).
 
 Checks: `npm run check` green; `pytest` green; the q3_restart jar-replay
 expectation encoded (replay alone stays `blocked`: want 4 still unmet, by
