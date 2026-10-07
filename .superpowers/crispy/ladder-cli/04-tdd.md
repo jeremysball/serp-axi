@@ -1,5 +1,5 @@
 ---
-system_approved: false
+system_approved: true
 program_approved: false
 ---
 
@@ -21,7 +21,7 @@ long-lived process and supervises itself (BAL-45 narrowed).
 
 ## 1. System design
 
-Approval: pending
+Approval: approved 2026-10-07
 
 ### 1.1 Process contract
 
@@ -164,5 +164,115 @@ Every guide gets a sensor; a guide without one does not ship.
 
 ## 2. Program design
 
-Blocked on system approval. Will name call paths, files, types, function
-signatures, and test boundaries after the contract above is set.
+Approval: pending
+
+### 2.1 Call paths
+
+TypeScript side (new code, all inside `src/`):
+
+```
+scrape command (src/commands/scrape.ts)
+  -> resolveLadder (src/ladder.ts, new)
+       resolve axes: flags > env > config > default; expand --profile; expand jar sugar
+       spawn child on first use: ladder-cli; wait for {"ready": true}
+     -> writeRequest: NDJSON line on child stdin
+     -> readResponse: first stdout line; parse + validate against LadderResponse
+     -> verdict mapping: ok -> rows; dead/blocked -> typed SerpAxiError (blocked exits 1)
+     -> idle teardown: last-resort timer closes stdin after N ms with no in-flight request
+```
+
+`resolveLadder` owns the whole child lifecycle: exactly one child per process,
+one in-flight request at a time (a second concurrent scrape queues behind the
+first; the falsifier in 1.1 is measured here, not designed for). A child that
+dies mid-request surfaces its stderr tail as the request error. SIGKILL per
+rung stays inside the child; the parent's overall timeout races the response
+read.
+
+Python side (new `ladder-cli/` tree at repo root, so the Python package never
+nests inside the npm layout):
+
+```
+__main__ / cli.py
+  -> handshake: print({"ready": True}) ; loop: read line -> dispatch -> print response
+  -> dispatch(request: LadderRequest)
+       build browser context for axes (profile dir, jar-in load, cache/fp/tab policy)
+       for rung in rungs[:ceiling]:
+         run with 90s SIGKILL budget
+         ok -> finish(response); dead/blocked are rung-local signals, keep climbing
+       ceiling hit or all rungs exhausted -> blocked (never empty-ok)
+  rungs/http.py, rungs/camoufox.py, rungs/zendriver.py, rungs/headed.py, rungs/whisper.py
+  state/jars.py (allowlist-filtered load/save), state/profiles.py (dir layout)
+```
+
+`ladder.py` in `spikes/` is not imported and not moved: it stays as the
+executable statement of the measured thresholds. Rung implementations are
+rewritten against this contract, porting the measured constants (timeouts,
+allowlist, humanize flag) with the spike file cited in a comment at each use.
+
+### 2.2 Files
+
+```
+src/ladder.ts            parent-side lifecycle: spawn, ready, write, read, teardown, verdict mapping
+src/ladder.test.ts       contract tests against a stub child (a 20-line node script, not Python)
+src/commands/scrape.ts   route --ladder through resolveLadder (new flag; serper stays default for scrape)
+ladder-cli/pyproject.toml  pinned deps: camoufox==0.5.6, zendriver==0.17.1, faster-whisper==1.2.1,
+                           primp==2.0.1, browserforge==1.2.4 (versions from the measured spikes)
+ladder-cli/cli.py        handshake + NDJSON loop + dispatch + rung ceiling
+ladder-cli/rungs/*.py   one module per rung, each exposing run(url, ctx) -> RungOutcome
+ladder-cli/state/*.py   jars.py, profiles.py
+ladder-cli/tests/        rung unit tests + fixture replay (final.jsonl, q6_rows.jsonl) + ledger-presence test
+```
+
+How the TS dist finds the child: `ladder-cli` resolves to a sibling of the
+installed package, overridable by `SERP_AXI_LADDER_BIN` (exact binary path,
+highest precedence, for dev and sandboxes). The npm `postinstall` does not
+fetch Python; if the binary is missing at first scrape, the error names the
+env var and the docs page, and exits 1 as a failed request.
+
+### 2.3 Types and signatures
+
+```ts
+// src/ladder.ts
+interface LadderRequest {
+  url: string; tabState: "fresh" | "same";
+  cookieState: "cold" | "jar"; cacheState: "cold" | "warm";
+  fingerprintState: "rotate" | "stable"; rungCeiling: 1 | 2 | 3 | 4 | 5;
+  profile: string | null; jarIn: string | null; jarOut: string | null;
+}
+interface LadderResponse {
+  verdict: "ok" | "dead" | "blocked"; rungReached: number;
+  title: string; text: string; engines: string[];
+  elapsedMs: number; warning: string | null;
+}
+async function fetchViaLadder(url: string, axes: Axes): Promise<LadderResponse>
+```
+
+```python
+# ladder-cli/cli.py
+@dataclass
+class LadderRequest: ...   # same fields, same literals, validated on parse; unknown fields rejected
+@dataclass
+class LadderResponse: ...  # verdict required; empty text with verdict ok is a bug, asserted
+class RungOutcome(Enum): OK, DEAD, BLOCKED, ERROR  # ERROR is rung-local, never leaves the child
+def run_rung(name: str, url: str, ctx: BrowserCtx) -> RungOutcome: ...
+```
+
+The two schemas are versioned together: a `protocol: 1` field rides on every
+request, and a mismatch fails fast with a message naming both sides, so a
+stale installed `ladder-cli` can never silently misparse.
+
+### 2.4 Test boundaries
+
+- TypeScript owns the contract: `ladder.test.ts` spawns a stub child script
+  that replays canned NDJSON (ready line, one ok, one blocked, one malformed,
+  one pre-ready exit) and asserts spawn-once, ready-wait, timeout race,
+  verdict mapping, and stderr-tail errors. No Python involved.
+- Python owns the rungs: each `rungs/*.py` gets unit tests with recorded
+  fixtures; the fixture replay suite asserts `final.jsonl` verdicts and
+  `q6_rows.jsonl` classifier thresholds bit-for-bit against the spike
+  numbers, and fails if `spikes/scrape-2026-10-03/flywheel.md` is missing or
+  has fewer entries than the count the suite records.
+- Axis orthogonality pairs live TypeScript-side (request building), one test
+  per axis varying alone.
+- Live-engine tests stay quarantined exactly like today's `*.live.test.ts`:
+  never in `npm run check`, named `.live`, run by hand.
