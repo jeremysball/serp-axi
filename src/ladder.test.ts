@@ -88,10 +88,35 @@ test("a malformed response line fails instead of resolving", async () => {
   }
 });
 
-test("a response past the timeout fails and the queued request still resolves", async () => {
+test("a timed-out request fails while the queued request still resolves", async () => {
   const ladder = client("slow", { timeoutMs: 200 });
   try {
-    await assert.rejects(() => ladder.fetch("https://slow.example/x"), SerpAxiLadderError);
+    const [slow, queued] = await Promise.allSettled([
+      ladder.fetch("https://slow.example/x"),
+      ladder.fetch("https://fast.example/y"),
+    ]);
+    assert.equal(slow.status, "rejected");
+    assert.match(String((slow as PromiseRejectedResult).reason), /timed out/);
+    assert.equal(queued.status, "fulfilled");
+    assert.equal((queued as PromiseFulfilledResult<{ text: string }>).value.text, "body for https://fast.example/y");
+    assert.equal(ladder.spawnCount, 2);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a mid-request exit fails in-flight and queued requests fast, then respawns", async () => {
+  const ladder = client("die-mid", { timeoutMs: 10000 });
+  try {
+    const start = Date.now();
+    const [first, second] = await Promise.allSettled([
+      ladder.fetch("https://a.example/x"),
+      ladder.fetch("https://b.example/y"),
+    ]);
+    assert.ok(Date.now() - start < 5000);
+    assert.equal(first.status, "rejected");
+    assert.equal(second.status, "rejected");
+    assert.match(String((first as PromiseRejectedResult).reason), /exited/);
   } finally {
     await ladder.close();
   }

@@ -2,7 +2,8 @@
 // Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|slow
 import readline from "node:readline";
 
-const mode = process.env.LADDER_STUB_MODE ?? process.argv[process.argv.indexOf("--mode") + 1] ?? "ok";
+const modeIndex = process.argv.indexOf("--mode");
+const mode = process.env.LADDER_STUB_MODE ?? (modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined) ?? "ok";
 
 if (mode === "die-before-ready") {
   process.stderr.write("boom-startup: config missing\n");
@@ -28,6 +29,10 @@ input.on("line", async (line) => {
     return;
   }
   const url = request.url ?? "";
+  if (mode === "die-mid") {
+    setTimeout(() => process.exit(1), 50);
+    return;
+  }
   if (mode === "malformed") {
     process.stdout.write("not json at all\n");
     return;

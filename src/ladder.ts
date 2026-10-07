@@ -62,7 +62,7 @@ interface Pending {
   url: string;
   resolve: (response: LadderResponse) => void;
   reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
 }
 
 export class LadderClient {
@@ -101,12 +101,9 @@ export class LadderClient {
     }
     this.ensureSpawned();
     return new Promise<LadderResponse>((resolve, reject) => {
-      const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const pending: Pending = { url, resolve, reject, timer: undefined as unknown as NodeJS.Timeout };
-      pending.timer = setTimeout(() => {
-        this.dropPending(pending, new SerpAxiLadderError(`ladder-cli timed out after ${timeoutMs} ms for ${url}`));
-      }, timeoutMs);
-      this.queue.push(pending);
+      // No timer here: the timeout covers the upstream call and arms at
+      // dispatch, so queued requests never burn budget while waiting.
+      this.queue.push({ url, resolve, reject });
       void this.dispatch();
     });
   }
@@ -122,23 +119,35 @@ export class LadderClient {
     if (this.inFlight === pending) {
       this.inFlight = null;
       pending.reject(error);
+      // Fence the abandoned request: a late reply must never resolve a
+      // different request, and responses carry no id, so reset the child.
+      this.resetChild();
       this.armIdleTimer();
       void this.dispatch();
     }
   }
 
   private async dispatch(): Promise<void> {
+    if (this.closed) return;
+    this.ensureSpawned();
     try {
       await this.ready;
     } catch (error) {
       this.failAll(error instanceof Error ? error : new SerpAxiLadderError(String(error)));
       return;
     }
-    if (this.closed || this.inFlight !== null) return;
+    if (this.closed || this.inFlight !== null || !this.child?.stdin) return;
     const pending = this.queue.shift();
     if (!pending) return;
     this.inFlight = pending;
     this.clearIdleTimer();
+    const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    pending.timer = setTimeout(() => {
+      this.dropPending(
+        pending,
+        new SerpAxiLadderError(`ladder-cli timed out after ${timeoutMs} ms for ${pending.url}`),
+      );
+    }, timeoutMs);
     try {
       this.child?.stdin?.write(`${JSON.stringify({ url: pending.url })}\n`);
     } catch (error) {
@@ -147,6 +156,19 @@ export class LadderClient {
       pending.reject(error instanceof Error ? error : new SerpAxiLadderError(String(error)));
       this.armIdleTimer();
       void this.dispatch();
+    }
+  }
+
+  private resetChild(): void {
+    const child = this.child;
+    this.child = null;
+    this.buffer = "";
+    this.stderrTail = "";
+    this.ready = null;
+    this.readySettled = false;
+    this.didExit = false;
+    if (child && child.exitCode === null) {
+      child.kill();
     }
   }
 
@@ -186,8 +208,14 @@ export class LadderClient {
 
     this.exitPromise = new Promise<number | null>((resolve) => {
       child.on("exit", (code) => {
-        this.didExit = true;
         resolve(code);
+        if (child !== this.child) {
+          // Stale: killed by resetChild, or by close() which already nulled
+          // the handle. Only close() cares about the exit flag.
+          if (this.closed) this.didExit = true;
+          return;
+        }
+        this.didExit = true;
         if (!this.readySettled) {
           const tail = this.stderrTail.trim().split("\n").slice(-5).join("\n");
           this.settleReady(
@@ -201,7 +229,14 @@ export class LadderClient {
           clearTimeout(current.timer);
           current.reject(new SerpAxiLadderError(`ladder-cli exited mid-request (code ${code ?? "null"})`));
         }
-        if (this.closed) this.child = null;
+        if (this.closed) {
+          this.child = null;
+        } else {
+          // Unexpected exit: queued requests must not hang on a dead child,
+          // and later fetches must respawn instead of writing dead stdin.
+          this.failAll(new SerpAxiLadderError(`ladder-cli exited unexpectedly (code ${code ?? "null"})`));
+          this.resetChild();
+        }
       });
     });
 
