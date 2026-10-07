@@ -4,11 +4,13 @@ import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
+import { fetchViaLadder } from "../ladder.ts";
 
 const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
   provider: "string",
   "dataset-id": "string",
+  ladder: "boolean",
 };
 
 const DEFAULT_LIMIT = 1200;
@@ -35,6 +37,7 @@ function shellQuote(value: string): string {
 
 const SCRAPE_HELP = `serp-axi scrape <url> [--full]
 serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--dataset-id <id>]
+serp-axi scrape <url> [--full] --ladder
 
 Fetch and extract readable text from one or more web pages.
 
@@ -42,10 +45,13 @@ Providers:
   serper (default)   Serper's own scrape endpoint. Exactly one URL, synchronous.
   brightdata          Bright Data's dataset scrape API. One or more URLs, synchronous,
                       batched in a single request. Requires BRIGHTDATA_API_KEY.
+  ladder (--ladder)   Resident ladder CLI: free, no API key. Exactly one URL.
+                      Binary from SERP_AXI_LADDER_BIN or PATH.
 
 Flags:
   --full                Return up to 50,000 characters per page instead of the default 1,200.
-  --provider <name>      serper (default) or brightdata.
+  --provider <name>      serper (default) or brightdata. Not valid with --ladder.
+  --ladder               Scrape through the resident ladder CLI instead of a paid provider.
   --dataset-id <id>     Bright Data dataset to scrape against.
                          Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
                          Only valid with --provider brightdata.
@@ -53,7 +59,8 @@ Flags:
 Examples:
   serp-axi scrape https://example.com/article
   serp-axi scrape https://example.com/article --full
-  serp-axi scrape https://example.com https://example.com/1 --provider brightdata`;
+  serp-axi scrape https://example.com https://example.com/1 --provider brightdata
+  serp-axi scrape https://example.com/article --ladder`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],
@@ -210,6 +217,11 @@ async function runBrightDataScrape(
 
 export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch): Promise<AxiOutput> {
   const { positionals, flags } = parseFlags(args, SCRAPE_FLAGS, "scrape");
+
+  if (flags.ladder) {
+    return runLadderScrape(positionals, flags);
+  }
+
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
@@ -257,6 +269,75 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
     output.help = flags.full
       ? `content is capped at ${FULL_LIMIT} characters even with --full`
       : `Run \`serp-axi scrape ${url.toString()} --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
+  }
+  return output;
+}
+
+async function runLadderScrape(
+  positionals: string[],
+  flags: Record<string, string | boolean>,
+): Promise<AxiOutput> {
+  if (flags.provider !== undefined) {
+    throw new SerpAxiError(
+      "--provider does not apply with --ladder",
+      "usage",
+      "drop --provider, or drop --ladder",
+    );
+  }
+  if (flags["dataset-id"] !== undefined) {
+    throw new SerpAxiError(
+      "--dataset-id only applies with --provider brightdata",
+      "usage",
+      "example: serp-axi scrape <url> --provider brightdata --dataset-id <id>",
+    );
+  }
+  const raw = positionals[0];
+  if (!raw) {
+    throw new SerpAxiError("scrape requires a URL", "usage", "example: serp-axi scrape https://example.com/article --ladder");
+  }
+  if (positionals.length > 1) {
+    throw new SerpAxiError(
+      "--ladder scrapes exactly one URL per invocation",
+      "usage",
+      "run once per URL; batching lands in a later phase",
+    );
+  }
+  const url = validateUrl(raw);
+  const bin = nonEmpty(process.env.SERP_AXI_LADDER_BIN) ?? "ladder-cli";
+  let response;
+  try {
+    response = await fetchViaLadder(url.toString(), { bin });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new SerpAxiError(`ladder scrape failed: ${message}`, "runtime", "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)");
+  }
+  if (response.verdict !== "ok") {
+    throw new SerpAxiError(
+      `"${url.toString()}" could not be fetched (ladder verdict: ${response.verdict}, rung ${response.rungReached})`,
+      "runtime",
+      response.verdict === "blocked"
+        ? "the page is defended; retry later or solve it interactively"
+        : "the page appears dead; check the URL",
+      { verdict: response.verdict, rungReached: response.rungReached },
+    );
+  }
+
+  const limit = flags.full ? FULL_LIMIT : DEFAULT_LIMIT;
+  const info = truncate(response.text, limit);
+  const output: AxiOutput = {
+    url: url.toString(),
+    verdict: response.verdict,
+    rungReached: response.rungReached,
+  };
+  if (response.title) {
+    output.title = response.title;
+  }
+  output.text = info.text;
+  if (info.truncated) {
+    output.truncatedFrom = info.totalChars;
+    output.help = flags.full
+      ? `content is capped at ${FULL_LIMIT} characters even with --full`
+      : `Run \`serp-axi scrape ${url.toString()} --ladder --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
   }
   return output;
 }

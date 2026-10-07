@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
 
@@ -354,5 +356,72 @@ test("runScrape Bright Data preserves a bare-origin URL without adding a slash",
     }) as typeof fetch;
     await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
     assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
+  });
+});
+
+async function withLadderStub<T>(mode: string, fn: () => Promise<T>): Promise<T> {
+  const binKey = "SERP_AXI_LADDER_BIN";
+  const modeKey = "LADDER_STUB_MODE";
+  const originalBin = process.env[binKey];
+  const originalMode = process.env[modeKey];
+  process.env[binKey] = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "fixtures",
+    "ladder-stub-bin.sh",
+  );
+  process.env[modeKey] = mode;
+  try {
+    return await fn();
+  } finally {
+    if (originalBin === undefined) delete process.env[binKey];
+    else process.env[binKey] = originalBin;
+    if (originalMode === undefined) delete process.env[modeKey];
+    else process.env[modeKey] = originalMode;
+  }
+}
+
+test("runScrape --ladder returns rung text with no API key", async () => {
+  await withLadderStub("ok", async () => {
+    const output = await runScrape(
+      ["https://example.com/article", "--ladder"],
+      (async () => new Response("{}")) as typeof fetch,
+    );
+    assert.equal(output.verdict, "ok");
+    assert.equal(output.rungReached, 1);
+    assert.match(output.text as string, /example\.com\/article/);
+  });
+});
+
+test("runScrape --ladder maps a blocked verdict to a typed runtime error", async () => {
+  await withLadderStub("blocked", async () => {
+    await assert.rejects(
+      runScrape(["https://example.com/article", "--ladder"], (async () => new Response("{}")) as typeof fetch),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError);
+        assert.equal(error.kind, "runtime");
+        assert.match(error.message, /verdict: blocked/);
+        return true;
+      },
+    );
+  });
+});
+
+test("runScrape --ladder rejects --provider and multiple URLs", async () => {
+  await withLadderStub("ok", async () => {
+    await assert.rejects(
+      runScrape(
+        ["https://example.com/a", "--ladder", "--provider", "serper"],
+        (async () => new Response("{}")) as typeof fetch,
+      ),
+      /--provider does not apply with --ladder/,
+    );
+    await assert.rejects(
+      runScrape(
+        ["https://example.com/a", "https://example.com/b", "--ladder"],
+        (async () => new Response("{}")) as typeof fetch,
+      ),
+      /exactly one URL/,
+    );
   });
 });
