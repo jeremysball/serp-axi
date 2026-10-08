@@ -2,8 +2,10 @@
 
 A rung reports what it saw; this module decides what that means. Verdicts are
 ``ok``, ``dead``, and ``blocked``, the same three words as the spike ledger so
-fixture rows stay comparable. ``error`` is rung-local: it means the rung itself
-malfunctioned, which is never allowed to leave the child as a verdict.
+fixture rows stay comparable, plus ``error``, which says the rung itself
+malfunctioned rather than answering about the page. ``error`` climbs, because a
+rung that broke is not a reason to give up on the page, so it only reaches the
+caller once every rung above it has failed to answer as well.
 """
 
 from __future__ import annotations
@@ -58,8 +60,10 @@ def network_verdict(message: str) -> RungVerdict:
     """Map a child that produced no record at all.
 
     A DNS or TLS failure on rung 1 is final: no browser revives a domain that
-    does not resolve, so it reads ``dead``. Anything else is the rung
-    malfunctioning, which climbs rather than being reported to the caller.
+    does not resolve, so it reads ``dead``. A timeout is deliberately absent
+    from that set, because our budget firing is not the page's doing. Anything
+    else is the rung malfunctioning, which climbs rather than being reported to
+    the caller.
     """
     if http.DEAD_NET.search(message):
         return RungVerdict.DEAD

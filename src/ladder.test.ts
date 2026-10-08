@@ -2,12 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   LadderClient,
   SerpAxiLadderError,
   LADDER_PROTOCOL,
+  LADDER_AXIS_FLAG_NAMES,
   buildLadderRequest,
   resolveLadderAxes,
   resolveLadderBin,
@@ -21,7 +22,13 @@ const STUB = path.join(
   "ladder-stub.mjs",
 );
 
+// The stub's one-shot kill switch, so a test can remove a leftover marker.
+function onceMarker(mode: string): string {
+  return path.join(os.tmpdir(), `ladder-stub-once-${process.pid}-${mode}`);
+}
+
 function client(mode: string, extra: Record<string, unknown> = {}) {
+  rmSync(onceMarker(mode), { force: true });
   return new LadderClient({ bin: process.execPath, args: [STUB, "--mode", mode], ...extra });
 }
 
@@ -225,12 +232,22 @@ test("the request on the wire carries protocol plus all nine fields", async () =
 // defaults, asserting only its own field changes the request. The cookie-state
 // pair carries a jar path in both halves, because a path the sugar needs is
 // held constant rather than being the axis under test.
-const ORTHOGONAL_PAIRS: Array<{ axis: keyof LadderAxes; base: Record<string, string>; delta: Record<string, string> }> = [
+const ORTHOGONAL_PAIRS: Array<{
+  axis: keyof LadderAxes;
+  base: Record<string, string>;
+  delta: Record<string, string>;
+  // The jar sugar mirrors one path across jarIn and jarOut, so flipping
+  // cookieState between cold and jar is expected to move jarIn too. That is the
+  // sugar doing its job, not two axes drifting, so the pair says so rather than
+  // the assertion pretending the mirroring does not exist.
+  alsoChanges?: Array<keyof LadderAxes>;
+}> = [
   { axis: "tabState", base: {}, delta: { "tab-state": "same" } },
   {
     axis: "cookieState",
     base: { "jar-out": "/tmp/ladder-jar" },
     delta: { "jar-out": "/tmp/ladder-jar", "cookie-state": "jar" },
+    alsoChanges: ["jarIn"],
   },
   { axis: "cacheState", base: {}, delta: { "cache-state": "warm" } },
   { axis: "fingerprintState", base: {}, delta: { "fingerprint-state": "stable" } },
@@ -241,7 +258,7 @@ const ORTHOGONAL_PAIRS: Array<{ axis: keyof LadderAxes; base: Record<string, str
 const PROFILE_CONFIG: StoredConfig = { ladderProfiles: { cautious: {} } };
 
 test("each of the six axes varies the request alone", () => {
-  for (const { axis, base, delta } of ORTHOGONAL_PAIRS) {
+  for (const { axis, base, delta, alsoChanges } of ORTHOGONAL_PAIRS) {
     const before = buildLadderRequest("https://a.example/x", resolveLadderAxes({ flag: base, config: PROFILE_CONFIG }));
     const after = buildLadderRequest("https://a.example/x", resolveLadderAxes({ flag: delta, config: PROFILE_CONFIG }));
     const differing = Object.keys(before).filter(
@@ -249,7 +266,7 @@ test("each of the six axes varies the request alone", () => {
         JSON.stringify((before as unknown as Record<string, unknown>)[key]) !==
         JSON.stringify((after as unknown as Record<string, unknown>)[key]),
     );
-    assert.deepEqual(differing, [axis], `${axis} changed ${JSON.stringify(differing)}`);
+    assert.deepEqual(differing, [axis, ...(alsoChanges ?? [])], `${axis} changed ${JSON.stringify(differing)}`);
   }
 });
 
@@ -289,8 +306,15 @@ test("a profile bundle expands into exactly its named axes", () => {
 });
 
 test("an invalid axis value names the axis, the value, and its source", () => {
-  assert.throws(() => resolveLadderAxes({ env: { SERP_AXI_TAB_STATE: "sideways" } }), /tab-state "sideways" from env/);
-  assert.throws(() => resolveLadderAxes({ flag: { "rung-ceiling": "9" } }), /rung-ceiling "9" from flag/);
+  // The message names the spelling the caller wrote, not "from env": a flag, an
+  // env var, and a config key are three different places to look.
+  assert.throws(() => resolveLadderAxes({ env: { SERP_AXI_TAB_STATE: "sideways" } }), /SERP_AXI_TAB_STATE "sideways"/);
+  assert.throws(() => resolveLadderAxes({ flag: { "rung-ceiling": "9" } }), /--rung-ceiling "9"/);
+  assert.throws(
+    () => resolveLadderAxes({ config: { ladderCacheState: 3 } }),
+    /invalid config ladderCacheState 3/,
+    "a config value of the wrong type is an error, not a silent skip",
+  );
 });
 
 test("an unknown profile is a usage error that names the config file", () => {
@@ -325,5 +349,155 @@ test("binary resolution prefers env, then an existing sibling, then PATH", () =>
     assert.equal(resolveLadderBin({}, [path.join(dir, "absent")]), "ladder-cli");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Phase 2 review fixes ------------------------------------------------
+// Each of these pins one finding that survived verification, written so the test
+// fails on the code as it stood before the fix rather than only on a break.
+
+// Approval sensor: a mid-request death is the second place a stderr tail is
+// dropped, and the tail is the only thing that says why the child stopped.
+test("a mid-request exit carries its stderr tail like a pre-ready one does", async () => {
+  const ladder = client("tail-mid", { timeoutMs: 10000 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /exited mid-request/);
+      assert.match(error.message, /boom-mid: fetch exploded/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor: a child that spawns and never speaks is a hang, not a slow
+// start. Nothing else waits on the ready line, so this is the only thing between
+// a hung client and a queue that never drains.
+// A swallowed budget can only ever fail as a hang, so this test carries its own
+// timeout: a regression has to surface as a failed test, not a hung suite.
+test("a silent child is failed by the handshake budget instead of hanging", { timeout: 15000 }, async () => {
+  const ladder = client("silent", { handshakeMs: 120 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /printed no ready line within 120 ms/);
+      return true;
+    });
+    // The budget has to leave a usable client behind: the silent child was killed
+    // and its handle cleared, so the next fetch starts a fresh handshake rather
+    // than hanging on a corpse. (A spawnCount of 2 is the observable proof.)
+    await ladder.waitForExit(2000);
+    await assert.rejects(() => ladder.fetch("https://a.example/y"), /printed no ready line within 120 ms/);
+    assert.equal(ladder.spawnCount, 2, "the silent child must be respawned, not reused");
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor: 04-tdd 1.1, in this same change, says output before the
+// handshake completes is startup output and is tolerated. It was not.
+test("output before the handshake is startup noise, not a failed handshake", async () => {
+  const ladder = client("banner-then-ready");
+  try {
+    const res = await ladder.fetch("https://a.example/x");
+    assert.equal(res.verdict, "ok");
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor: folding `error` into `blocked` told the caller to retry a
+// defence that never happened, so the verdict has to survive the parse.
+test("an error verdict parses and stays distinct from blocked", async () => {
+  const errored = client("error");
+  try {
+    const res = await errored.fetch("https://a.example/x");
+    assert.equal(res.verdict, "error");
+    assert.equal(res.warning, "boom: primp refused");
+  } finally {
+    await errored.close();
+  }
+});
+
+// Approval sensor: after a mid-request death the shared buffer belongs to the new
+// child, and a byte from the dead one landing in it would pass for a ready line.
+test("a respawn after a mid-request death answers the next request", async () => {
+  const ladder = client("die-mid", { timeoutMs: 300 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"));
+    const after = await ladder.fetch("https://a.example/y");
+    assert.equal(after.text, "body for https://a.example/y");
+    assert.equal(ladder.spawnCount, 2);
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor: a spawn that failed leaves a live-looking handle, so every
+// later fetch would reuse a child that never existed.
+test("a failed spawn is retried by the next fetch rather than failing forever", async () => {
+  const ladder = new LadderClient({ bin: "/definitely/not/a/real/binary", handshakeMs: 200 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), /ladder binary not found/);
+    await assert.rejects(() => ladder.fetch("https://a.example/y"), /ladder binary not found/);
+    assert.equal(ladder.spawnCount, 2, "the second fetch must have spawned again");
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor: mirroring was unconditional, so a caller who named one jar
+// path and asked for cold got a cookie write they never requested.
+test("--cookie-state cold leaves the jar paths alone", () => {
+  const axes = resolveLadderAxes({ flag: { "cookie-state": "cold", "jar-out": "/tmp/j.txt" } });
+  assert.equal(axes.jarOut, "/tmp/j.txt");
+  assert.equal(axes.jarIn, null, "cold must not gain a jar it was not given");
+});
+
+// Approval sensor: AXIS_TABLE declared a config key for profile and StoredConfig
+// declared the field, yet nothing read it, so a config-set default was ignored.
+test("the config file can set the profile, not only be overridden by one", () => {
+  const axes = resolveLadderAxes({
+    config: { ladderProfile: "cautious", ladderProfiles: { cautious: { cacheState: "warm" } } },
+  });
+  assert.equal(axes.profile, "cautious");
+  assert.equal(axes.cacheState, "warm");
+});
+
+test("an unknown profile-bundle key is a usage error, not a silent default", () => {
+  assert.throws(
+    () =>
+      resolveLadderAxes({
+        flag: { profile: "cautious" },
+        config: { ladderProfiles: { cautious: { cacheStatee: "warm" } } },
+      }),
+    /unknown key: cacheStatee/,
+  );
+});
+
+// Approval sensor: existsSync accepts a directory, which spawn then rejects with
+// an errno that names neither the path nor the real problem.
+test("binary resolution does not accept a directory as a binary", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ladder-isdir-"));
+  try {
+    const file = path.join(root, "real");
+    writeFileSync(file, "", { mode: 0o755 });
+    const dir = path.join(root, "adir");
+    mkdirSync(dir);
+    assert.equal(resolveLadderBin({}, [dir, file]), file, "a directory at a candidate path is not a binary");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Approval sensor: every flag the resolver understands must be one the CLI
+// accepts. The list used to be hand-maintained in both places, which is how an
+// axis becomes speakable on the wire and unknowable on the command line.
+test("every ladder axis flag is a flag the scrape command accepts", async () => {
+  const { SCRAPE_FLAGS } = await import("./commands/scrape.ts");
+  for (const name of LADDER_AXIS_FLAG_NAMES) {
+    assert.ok(name in SCRAPE_FLAGS, `${name} is an axis flag the CLI does not accept`);
   }
 });

@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StoredConfig } from "./config.ts";
-import { SerpAxiError } from "./errors.ts";
+import { boundedDetail, SerpAxiError } from "./errors.ts";
 
-export type LadderVerdict = "ok" | "dead" | "blocked";
+export type LadderVerdict = "ok" | "dead" | "blocked" | "error";
 
 export interface LadderResponse {
   verdict: LadderVerdict;
@@ -52,6 +52,12 @@ export interface LadderClientOptions {
   args?: string[];
   timeoutMs?: number;
   idleMs?: number;
+  /**
+   * How long the child gets to print its ready line. A child that spawns but
+   * never says hello is a hang, not a slow start, so it must fail on a budget
+   * rather than holding every later fetch open.
+   */
+  handshakeMs?: number;
 }
 
 export class SerpAxiLadderError extends Error {
@@ -61,7 +67,15 @@ export class SerpAxiLadderError extends Error {
   }
 }
 
+// Two budgets, deliberately nested rather than competing. The handshake budget
+// covers one thing: the child printing its ready line, which is a few hundred
+// milliseconds of interpreter start. The request budget covers a rung, whose
+// ceiling is DEFAULT_RUNG_TIMEOUT_MS plus interpreter and transport overhead.
+// Nothing reads a timeout out of the environment: a knob that only one side
+// knows about cannot be reasoned about from the other, and the values below
+// are the ones both halves were measured against.
 const DEFAULT_TIMEOUT_MS = 120000;
+const DEFAULT_HANDSHAKE_MS = 30000;
 const DEFAULT_IDLE_MS = 30000;
 
 const LADDER_AXIS_DEFAULTS: LadderAxes = {
@@ -77,7 +91,8 @@ const LADDER_AXIS_DEFAULTS: LadderAxes = {
 
 // Each axis reads flag, then env, then config, then its default. The flag and
 // env names are derived from one table so a new axis cannot drift apart across
-// the three spellings.
+// the three spellings. The config leg is the same shape as the other two, which
+// is what makes `ladderProfile` in StoredConfig mean something.
 const AXIS_TABLE = {
   tabState: { flag: "tab-state", env: "SERP_AXI_TAB_STATE", config: "ladderTabState" },
   cookieState: { flag: "cookie-state", env: "SERP_AXI_COOKIE_STATE", config: "ladderCookieState" },
@@ -91,12 +106,22 @@ const AXIS_TABLE = {
 
 type AxisKey = keyof typeof AXIS_TABLE;
 
+/**
+ * Every flag the ladder understands, derived from the same table as the env and
+ * config names. Commands use this rather than keeping their own list, so an
+ * axis cannot exist on the wire while being unknown to the CLI.
+ */
+export const LADDER_AXIS_FLAG_NAMES: readonly string[] = Object.values(AXIS_TABLE).map((entry) => entry.flag);
+
 const AXIS_ENUMS: Record<string, readonly string[]> = {
   tabState: ["fresh", "same"],
   cookieState: ["cold", "jar"],
   cacheState: ["cold", "warm"],
   fingerprintState: ["rotate", "stable"],
 };
+
+const VALUE_KEYS = ["tabState", "cookieState", "cacheState", "fingerprintState", "rungCeiling"] as const;
+const JAR_KEYS = ["jarIn", "jarOut"] as const;
 
 // Axis and config validation is a usage error: the caller can fix it by
 // changing a flag, so it must reach the CLI as a SerpAxiError with a help
@@ -106,85 +131,142 @@ function usageError(message: string, help: string): SerpAxiError {
   return new SerpAxiError(message, "usage", help);
 }
 
-function readRaw(sources: LadderAxisSources, key: AxisKey): { value: string | undefined; origin: "flag" | "env" | null } {
+// Named, so an error says which spelling the caller wrote. searxng.ts does the
+// same for its endpoint; a flag, an env var, and a config key are three
+// different places to look, and "from env" tells the caller none of them.
+interface AxisSource {
+  kind: "flag" | "env" | "config" | "profile";
+  field: string;
+}
+
+function sourceLabel(source: AxisSource): string {
+  if (source.kind === "flag") return `--${source.field}`;
+  if (source.kind === "env") return source.field;
+  if (source.kind === "profile") return `profile ${source.field}`;
+  return `config ${source.field}`;
+}
+
+function readRaw(sources: LadderAxisSources, key: AxisKey): { value: string | undefined; source: AxisSource | null } {
   const entry = AXIS_TABLE[key];
   const flagValue = sources.flag?.[entry.flag];
   if (flagValue !== undefined && flagValue !== true && flagValue !== false) {
-    return { value: String(flagValue), origin: "flag" };
+    return { value: String(flagValue), source: { kind: "flag", field: entry.flag } };
   }
   const envValue = sources.env?.[entry.env];
   if (envValue !== undefined && envValue.length > 0) {
-    return { value: envValue, origin: "env" };
+    return { value: envValue, source: { kind: "env", field: entry.env } };
   }
-  return { value: undefined, origin: null };
+  return { value: undefined, source: null };
 }
 
-function enumValue(key: AxisKey, raw: string, origin: string): string {
+/**
+ * Read one lower-precedence layer of an axis. A value that is present but not a
+ * string is an error, not a skip: a config that says `"ladderRungCeiling": 2`
+ * would otherwise silently run rung 1 to 5, which is the opposite of what it
+ * asks for and indistinguishable from a missing key. Null and absent both mean
+ * "not set", because that is what they mean in JSON.
+ */
+function readMember(value: unknown, source: AxisSource): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw usageError(
+      `invalid ${sourceLabel(source)} ${JSON.stringify(value)}`,
+      `${source.field} must be a string, or remove the key to fall back to the default`,
+    );
+  }
+  return value;
+}
+
+function bundleMember(
+  bundle: Record<string, unknown>,
+  key: AxisKey,
+  profile: string | null,
+): { value: string | undefined; source: AxisSource } {
+  const source: AxisSource = { kind: "profile", field: `"${profile}" ${key}` };
+  return { value: key in bundle ? readMember(bundle[key], source) : undefined, source };
+}
+
+function readConfig(sources: LadderAxisSources, key: AxisKey): { value: string | undefined; source: AxisSource } {
+  const field = AXIS_TABLE[key].config;
+  const config = sources.config as Record<string, unknown> | undefined;
+  return { value: readMember(config?.[field], { kind: "config", field }), source: { kind: "config", field } };
+}
+
+function enumValue(key: AxisKey, raw: string, source: AxisSource): string {
   const allowed = AXIS_ENUMS[key];
   if (allowed && !allowed.includes(raw)) {
-    throw usageError(`invalid ${AXIS_TABLE[key].flag} "${raw}" from ${origin}`, `must be one of ${allowed.join(", ")}`);
+    throw usageError(`invalid ${sourceLabel(source)} "${raw}"`, `must be one of ${allowed.join(", ")}`);
   }
   return raw;
 }
 
-function ceilingValue(raw: string, origin: string): LadderRungCeiling {
+function ceilingValue(raw: string, source: AxisSource): LadderRungCeiling {
   if (!/^[1-5]$/.test(raw)) {
-    throw usageError(`invalid ${AXIS_TABLE.rungCeiling.flag} "${raw}" from ${origin}`, "must be an integer from 1 to 5");
+    throw usageError(`invalid ${sourceLabel(source)} "${raw}"`, "must be an integer from 1 to 5");
   }
   return Number(raw) as LadderRungCeiling;
 }
 
+function profileBundle(sources: LadderAxisSources, profile: string): Record<string, unknown> {
+  const profiles = sources.config?.ladderProfiles;
+  if (profiles !== undefined && !isRecord(profiles)) {
+    throw usageError("config ladderProfiles must be an object", "fix the config file");
+  }
+  const named = isRecord(profiles) ? profiles[profile] : undefined;
+  if (named === undefined) {
+    throw usageError(
+      `unknown ladder profile "${profile}"`,
+      "define it under ladderProfiles in the config file, or drop --profile",
+    );
+  }
+  if (!isRecord(named)) {
+    throw usageError(`ladder profile "${profile}" must be an object`, "map axis names to values in the config file");
+  }
+  // An unknown key in a bundle is a typo that would otherwise be read as
+  // "leaves this axis at its default", which looks exactly like it worked.
+  const unknown = Object.keys(named).filter((key) => !(key in AXIS_TABLE));
+  if (unknown.length > 0) {
+    throw usageError(
+      `ladder profile "${profile}" sets unknown ${unknown.length === 1 ? "key" : "keys"}: ${unknown.join(", ")}`,
+      `valid keys: ${Object.keys(AXIS_TABLE).join(", ")}`,
+    );
+  }
+  return named;
+}
+
 /**
- * Resolve the six axes plus jar paths, honoring flag > env > profile > config >
- * default. Profiles live in the config file as bundles of axis overrides, so the
- * request schema never grows a seventh axis.
+ * Resolve the six axes plus jar paths. Precedence, highest first: a flag, an
+ * env var, the config file, a bundle named by `profile`, then the default. The
+ * profile bundle sits below its own config file so a bundle is a named preset
+ * rather than an override the user cannot see past.
  */
 export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
-  const profileRead = readRaw(sources, "profile");
-  const profile = profileRead.value ?? null;
+  const flagOrEnvProfile = readRaw(sources, "profile");
+  const configProfile = readConfig(sources, "profile");
+  const profile = flagOrEnvProfile.value ?? configProfile.value ?? null;
 
-  let bundle: Record<string, unknown> = {};
-  if (profile !== null) {
-    const profiles = sources.config?.ladderProfiles;
-    if (profiles !== undefined && (typeof profiles !== "object" || profiles === null)) {
-      throw usageError("config ladderProfiles must be an object", "fix the config file");
-    }
-    const named = (profiles as Record<string, unknown> | undefined)?.[profile];
-    if (named === undefined) {
-      throw usageError(
-        `unknown ladder profile "${profile}"`,
-        "define it under ladderProfiles in the config file, or drop --profile",
-      );
-    }
-    if (typeof named !== "object" || named === null || Array.isArray(named)) {
-      throw usageError(`ladder profile "${profile}" must be an object`, "map axis names to values in the config file");
-    }
-    bundle = named as Record<string, unknown>;
-  }
-
+  const bundle = profile === null ? {} : profileBundle(sources, profile);
   const axes: LadderAxes = { ...LADDER_AXIS_DEFAULTS, profile };
 
-  for (const key of ["tabState", "cookieState", "cacheState", "fingerprintState", "rungCeiling"] as const) {
-    const { value, origin } = readRaw(sources, key);
-    const bundled = bundle[key];
-    const fromConfig = sources.config?.[AXIS_TABLE[key].config];
-    const raw =
-      value ??
-      (typeof bundled === "string" ? bundled : undefined) ??
-      (typeof fromConfig === "string" ? fromConfig : undefined);
-    if (raw === undefined) continue;
-    const source = origin ?? (typeof bundled === "string" ? `profile "${profile}"` : "config");
+  // Flag, then the selected profile bundle, then the config file. Each layer
+  // names where it came from, so an error points at the spelling the caller
+  // actually wrote rather than saying "from env" and covering three places.
+  const axisLayer = (key: AxisKey): { raw: string | undefined; source: AxisSource | null } => {
+    const layers = [readRaw(sources, key), bundleMember(bundle, key, profile), readConfig(sources, key)];
+    for (const layer of layers) {
+      if (layer.value !== undefined) return { raw: layer.value, source: layer.source };
+    }
+    return { raw: undefined, source: null };
+  };
+
+  for (const key of VALUE_KEYS) {
+    const { raw, source } = axisLayer(key);
+    if (raw === undefined || source === null) continue;
     axes[key] = (key === "rungCeiling" ? ceilingValue(raw, source) : enumValue(key, raw, source)) as never;
   }
 
-  for (const key of ["jarIn", "jarOut"] as const) {
-    const { value } = readRaw(sources, key);
-    const bundled = bundle[key];
-    const fromConfig = sources.config?.[AXIS_TABLE[key].config];
-    const raw =
-      value ??
-      (typeof bundled === "string" ? bundled : undefined) ??
-      (typeof fromConfig === "string" ? fromConfig : undefined);
+  for (const key of JAR_KEYS) {
+    const { raw } = axisLayer(key);
     axes[key] = raw === undefined || raw.length === 0 ? null : raw;
   }
 
@@ -192,14 +274,18 @@ export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   // ways" without a caller spelling out jar-in and jar-out separately. It never
   // invents a path, because a wrong path silently loses the clearance it exists
   // to keep, so it mirrors whichever path it was given and otherwise refuses.
-  if (axes.cookieState === "jar" && axes.jarIn === null && axes.jarOut === null) {
-    throw usageError(
-      "--cookie-state jar needs a jar path",
-      "pass --jar-out <path> (or --jar-in), which the sugar mirrors both ways",
-    );
+  // Mirroring is scoped to the sugar it belongs to: a caller who asked for
+  // `--cookie-state cold` and named one jar path expects a read, not a write.
+  if (axes.cookieState === "jar") {
+    if (axes.jarIn === null && axes.jarOut === null) {
+      throw usageError(
+        "--cookie-state jar needs a jar path",
+        "pass --jar-out <path> (or --jar-in), which the sugar mirrors both ways",
+      );
+    }
+    if (axes.jarIn === null) axes.jarIn = axes.jarOut;
+    if (axes.jarOut === null) axes.jarOut = axes.jarIn;
   }
-  if (axes.jarIn === null) axes.jarIn = axes.jarOut;
-  if (axes.jarOut === null) axes.jarOut = axes.jarIn;
 
   return axes;
 }
@@ -210,9 +296,10 @@ export function buildLadderRequest(url: string, axes: LadderAxes): LadderRequest
 
 /**
  * SERP_AXI_LADDER_BIN always wins so dev and sandboxes can point anywhere.
- * Otherwise the first candidate that actually exists wins, and PATH is the
- * fallback. Candidates are checked for existence rather than assumed, so an
- * absent ladder-cli never hides a working PATH entry.
+ * Otherwise the first candidate that is a regular file wins, and PATH is the
+ * fallback. Existence is checked as a *file* rather than with existsSync: a
+ * directory at a candidate path would otherwise be handed straight to spawn,
+ * which fails with an errno that names neither the path nor the real problem.
  *
  * `candidates` is a parameter so the precedence legs are testable without
  * rearranging the filesystem the tests run on.
@@ -224,9 +311,17 @@ export function resolveLadderBin(
   const explicit = env.SERP_AXI_LADDER_BIN;
   if (explicit !== undefined && explicit.length > 0) return explicit;
   for (const candidate of candidates ?? []) {
-    if (existsSync(candidate)) return candidate;
+    if (isRegularFile(candidate)) return candidate;
   }
   return "ladder-cli";
+}
+
+function isRegularFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function defaultLadderBinCandidates(): string[] {
@@ -251,7 +346,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isVerdict(value: unknown): value is LadderVerdict {
-  return value === "ok" || value === "dead" || value === "blocked";
+  return value === "ok" || value === "dead" || value === "blocked" || value === "error";
 }
 
 function parseResponse(line: string): LadderResponse {
@@ -259,7 +354,7 @@ function parseResponse(line: string): LadderResponse {
   try {
     body = JSON.parse(line);
   } catch {
-    throw new SerpAxiLadderError(`ladder-cli returned a malformed response line: ${line.slice(0, 120)}`);
+    throw new SerpAxiLadderError(`ladder-cli returned a malformed response line: ${boundedDetail(line)}`);
   }
   if (!isRecord(body) || !isVerdict(body.verdict)) {
     throw new SerpAxiLadderError(`ladder-cli returned a malformed response line: ${line.slice(0, 120)}`);
@@ -271,7 +366,7 @@ function parseResponse(line: string): LadderResponse {
   // empty honest, per the verdict-honesty guide.
   if (body.verdict === "ok" && text.trim().length === 0) {
     throw new SerpAxiLadderError(
-      `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${line.slice(0, 120)})`,
+      `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${boundedDetail(line)})`,
     );
   }
   return {
@@ -298,6 +393,7 @@ export class LadderClient {
   private readyResolve: () => void = () => {};
   private readyReject: (error: Error) => void = () => {};
   private readySettled = false;
+  private handshakeTimer: NodeJS.Timeout | null = null;
   private buffer = "";
   private stderrTail = "";
   private queue: Pending[] = [];
@@ -307,6 +403,13 @@ export class LadderClient {
   private exitPromise: Promise<number | null> | null = null;
   private didExit = false;
   private spawns = 0;
+  // The current child's listeners, kept so resetChild and close can detach
+  // them. A listener that outlives its child writes into `this.buffer`, which
+  // is shared across children: a byte that arrives after the kill would land in
+  // the *next* child's buffer and could pass for its ready line.
+  private stdoutListener: ((chunk: Buffer) => void) | null = null;
+  private stderrListener: ((chunk: Buffer) => void) | null = null;
+  private stdinListener: ((error: Error) => void) | null = null;
 
   private readonly options: LadderClientOptions;
 
@@ -390,6 +493,8 @@ export class LadderClient {
   private resetChild(): void {
     const child = this.child;
     this.child = null;
+    this.detachStreams(child);
+    this.clearHandshakeTimer();
     this.buffer = "";
     this.stderrTail = "";
     this.ready = null;
@@ -397,6 +502,29 @@ export class LadderClient {
     this.didExit = false;
     if (child && child.exitCode === null) {
       child.kill();
+    }
+  }
+
+  /**
+   * Drop a child's stream listeners. Belt and braces: the listeners also test
+   * `chunk owner === this.child` before touching shared state, so a byte in
+   * flight when the kill lands is discarded twice over rather than being read
+   * as the next child's handshake.
+   */
+  private detachStreams(child: ChildProcess | null): void {
+    if (!child) return;
+    if (this.stdoutListener) child.stdout?.off("data", this.stdoutListener);
+    if (this.stderrListener) child.stderr?.off("data", this.stderrListener);
+    if (this.stdinListener) child.stdin?.off("error", this.stdinListener);
+    this.stdoutListener = null;
+    this.stderrListener = null;
+    this.stdinListener = null;
+  }
+
+  private clearHandshakeTimer(): void {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
     }
   }
 
@@ -416,6 +544,7 @@ export class LadderClient {
   private settleReady(error?: Error): void {
     if (this.readySettled) return;
     this.readySettled = true;
+    this.clearHandshakeTimer();
     if (error) {
       this.readyReject(error);
       this.failAll(error);
@@ -444,8 +573,8 @@ export class LadderClient {
           return;
         }
         this.didExit = true;
+        const tail = this.stderrTail.trim().split("\n").slice(-5).join("\n");
         if (!this.readySettled) {
-          const tail = this.stderrTail.trim().split("\n").slice(-5).join("\n");
           this.settleReady(
             new SerpAxiLadderError(
               `ladder-cli exited before ready (code ${code ?? "null"})${tail ? `: ${tail}` : ""}`,
@@ -455,14 +584,18 @@ export class LadderClient {
           const current = this.inFlight;
           this.inFlight = null;
           clearTimeout(current.timer);
-          current.reject(new SerpAxiLadderError(`ladder-cli exited mid-request (code ${code ?? "null"})`));
+          current.reject(
+            new SerpAxiLadderError(`ladder-cli exited mid-request (code ${code ?? "null"})${tail ? `: ${tail}` : ""}`),
+          );
         }
         if (this.closed) {
           this.child = null;
         } else {
           // Unexpected exit: queued requests must not hang on a dead child,
           // and later fetches must respawn instead of writing dead stdin.
-          this.failAll(new SerpAxiLadderError(`ladder-cli exited unexpectedly (code ${code ?? "null"})`));
+          this.failAll(
+            new SerpAxiLadderError(`ladder-cli exited unexpectedly (code ${code ?? "null"})${tail ? `: ${tail}` : ""}`),
+          );
           this.resetChild();
         }
       });
@@ -473,18 +606,68 @@ export class LadderClient {
         error.code === "ENOENT"
           ? `ladder binary not found: ${this.options.bin}`
           : `ladder-cli failed to spawn: ${error.message}`;
+      this.clearHandshakeTimer();
       this.settleReady(new SerpAxiLadderError(message));
+      // A spawn that failed leaves a live-looking handle, so without this the
+      // client would hand every later fetch a child that never existed and fail
+      // them on the first attempt's error forever. Clearing it lets the next
+      // fetch try again, which is what a caller who just installed the binary
+      // expects.
+      if (this.child === child) this.resetChild();
     });
 
-    child.stderr?.on("data", (chunk: Buffer) => {
+    // Writing to a child that just died raises EPIPE asynchronously. With no
+    // listener that becomes an unhandled 'error' event on the stream and takes
+    // the process down, so it has to be claimed here and turned into a
+    // rejection rather than a crash.
+    const onStdinError = (error: Error) => {
+      if (child !== this.child) return;
+      this.settleReady(new SerpAxiLadderError(`ladder-cli stdin failed: ${boundedDetail(error.message)}`));
+      this.failAll(new SerpAxiLadderError(`ladder-cli stdin failed: ${boundedDetail(error.message)}`));
+    };
+    child.stdin?.on("error", onStdinError);
+    this.stdinListener = onStdinError;
+
+    const onStderr = (chunk: Buffer) => {
+      if (child !== this.child) return;
       this.stderrTail += chunk.toString();
       if (this.stderrTail.length > 2000) this.stderrTail = this.stderrTail.slice(-2000);
-    });
+    };
+    child.stderr?.on("data", onStderr);
+    this.stderrListener = onStderr;
 
-    child.stdout?.on("data", (chunk: Buffer) => {
+    const onStdout = (chunk: Buffer) => {
+      if (child !== this.child) return;
       this.buffer += chunk.toString();
       this.drainLines();
-    });
+    };
+    child.stdout?.on("data", onStdout);
+    this.stdoutListener = onStdout;
+
+    this.armHandshakeTimer();
+  }
+
+  /**
+   * Budget the handshake. A child that spawns and then stays silent is a hang:
+   * nothing else in the ladder is waiting on it, so `await this.ready` in
+   * dispatch would never settle and every fetch, present and future, would sit
+   * in the queue forever on a client that looks healthy.
+   */
+  private armHandshakeTimer(): void {
+    this.clearHandshakeTimer();
+    const handshakeMs = this.options.handshakeMs ?? DEFAULT_HANDSHAKE_MS;
+    this.handshakeTimer = setTimeout(() => {
+      if (this.readySettled) return;
+      const tail = this.stderrTail.trim().split("\n").slice(-5).join("\n");
+      this.detachStreams(this.child);
+      this.child?.kill();
+      this.settleReady(
+        new SerpAxiLadderError(
+          `ladder-cli printed no ready line within ${handshakeMs} ms${tail ? `: ${tail}` : ""}`,
+        ),
+      );
+    }, handshakeMs);
+    this.handshakeTimer.unref?.();
   }
 
   private drainLines(): void {
@@ -499,20 +682,25 @@ export class LadderClient {
         } catch {
           hello = null;
         }
-        if (!isRecord(hello) || hello.ready !== true) {
-          this.settleReady(new SerpAxiLadderError(`ladder-cli sent an invalid ready line: ${line.slice(0, 120)}`));
-        } else if (hello.protocol !== LADDER_PROTOCOL) {
-          // Fail at the handshake, not at the first garbled request: a stale
-          // installed ladder-cli must name both protocol numbers instead of
-          // silently misparsing everything after this point.
-          this.settleReady(
-            new SerpAxiLadderError(
-              `ladder-cli protocol mismatch: serp-axi speaks protocol ${LADDER_PROTOCOL}, ` +
-                `ladder-cli reported protocol ${JSON.stringify(hello.protocol ?? null)} on its ready line`,
-            ),
-          );
-        } else {
-          this.settleReady();
+        // Only a ready-shaped line is judged. Anything else before the handshake
+        // completes is startup output (a venv banner, a deprecation warning, a
+        // blank line) and is skipped rather than treated as corruption, per
+        // 04-tdd 1.1. Nothing is at risk in waiting, because the handshake
+        // timer is the only thing standing between a silent child and a hang.
+        if (isRecord(hello) && hello.ready === true) {
+          if (hello.protocol !== LADDER_PROTOCOL) {
+            // Fail at the handshake, not at the first garbled request: a stale
+            // installed ladder-cli must name both protocol numbers instead of
+            // silently misparsing everything after this point.
+            this.settleReady(
+              new SerpAxiLadderError(
+                `ladder-cli protocol mismatch: serp-axi speaks protocol ${LADDER_PROTOCOL}, ` +
+                  `ladder-cli reported protocol ${JSON.stringify(hello.protocol ?? null)} on its ready line`,
+              ),
+            );
+          } else {
+            this.settleReady();
+          }
         }
       } else if (line.length > 0) {
         const current = this.inFlight;
@@ -552,9 +740,11 @@ export class LadderClient {
   async close(): Promise<void> {
     this.closed = true;
     this.clearIdleTimer();
+    this.clearHandshakeTimer();
     this.failAll(new SerpAxiLadderError("ladder client is closed"));
     const child = this.child;
     this.child = null;
+    this.detachStreams(child);
     if (child && child.exitCode === null) {
       child.kill();
     }
@@ -572,10 +762,17 @@ export class LadderClient {
   }
 }
 
+/**
+ * One client, one fetch, then closed. The axes are required rather than
+ * defaulted: a default of `resolveLadderAxes({})` reads no environment and no
+ * config, so a caller that omitted them would silently send an all-defaults
+ * request while believing they had configured the ladder. There is exactly one
+ * shipped caller and it always resolves them.
+ */
 export async function fetchViaLadder(
   url: string,
   options: LadderClientOptions,
-  axes: LadderAxes = resolveLadderAxes({}),
+  axes: LadderAxes,
 ): Promise<LadderResponse> {
   const client = new LadderClient(options);
   try {

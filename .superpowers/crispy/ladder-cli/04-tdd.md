@@ -108,7 +108,7 @@ model.
 
 Rung order is fixed: HTTP (`primp`, browser impersonation), Camoufox 0.5.6
 (`humanize=True`, verified at
-`spikes/sample100-2026-10-03/ladder.py:69`), zendriver 0.17.1 with Turnstile
+`spikes/sample100-2026-10-03/ladder.py:71`), zendriver 0.17.1 with Turnstile
 click, headed Chromium under Xvfb, Whisper `base.en` on audio reCAPTCHA as
 the rung-4 fallback. Python stays Python for exactly these three rungs plus
 Whisper: no Node implementation exists for Camoufox's patched build,

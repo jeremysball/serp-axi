@@ -6,7 +6,10 @@ import { fetchViaLadder, resolveLadderBin, resolveLadderAxes } from "./ladder.ts
 // Live rung-1 fetch, never in CI: it needs the ladder-cli venv and a real
 // network path, so the plan requires it by hand rather than in a suite. Opt in
 // with SERP_AXI_LIVE_LADDER=1 after `cd ladder-cli && uv sync`.
-const bin = resolveLadderBin({});
+// Resolved from the real environment, not an empty one: an empty env drops
+// SERP_AXI_LADDER_BIN, which is the whole point of being able to point this at
+// a ladder-cli that is not installed.
+const bin = resolveLadderBin(process.env);
 const skip = process.env.SERP_AXI_LIVE_LADDER !== "1" || !existsSync(bin);
 
 test("ladder-cli answers a rung-1 URL end to end", { skip }, async () => {

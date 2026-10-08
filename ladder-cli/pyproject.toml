@@ -1,5 +1,8 @@
 [build-system]
-requires = ["hatchling"]
+# Pinned like every other dependency: an unpinned build requirement means two
+# installs of the same tag can build differently, and nothing in the lockfile
+# pins a build frontend. The floor is the version uv.lock was resolved with.
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]

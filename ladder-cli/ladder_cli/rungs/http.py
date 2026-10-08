@@ -13,33 +13,34 @@ import re
 import urllib.parse
 from typing import Any
 
-import primp
-
 from . import RungResult, RungVerdict
 
-# ladder.py:17
+# ladder.py:16
 CHALLENGE = re.compile(
     r"just a moment|attention required|checking your browser|press & hold|verify you are human|"
     r"prove your humanity|robot or human|access denied|blocked by network security|"
     r"enable javascript and cookies",
     re.I,
 )
-# ladder.py:18
+# ladder.py:19
 JS_SHELL = re.compile(r"\bloading(\.\.\.|…| the )", re.I)
-# ladder.py:130: any TLS failure is dead; plain-http fallback is an open item (BAL-40)
+# ladder.py:130: any TLS failure is dead; plain-http fallback is an open item (BAL-40).
+# The spike maps a timeout here too, which would let a blown budget read as "the
+# page is gone" and stop the climb dead. A timeout is our machinery failing
+# rather than the page, so it is deliberately absent and reads as an error.
 DEAD_NET = re.compile(
     r"DNSError|dns error|failed to lookup|Name or service not known|ConnectError|Connection refused|"
-    r"connection reset|certificate|tls handshake|received corrupt message|ERR_SSL|TimeoutError|timed out|"
+    r"connection reset|certificate|tls handshake|received corrupt message|ERR_SSL|"
     r"ERR_NAME_NOT_RESOLVED|ERR_CONNECTION",
     re.I,
 )
-# ladder.py:136: rung-1 text beyond the title; below this only a browser can say what the page is
+# ladder.py:133: rung-1 text beyond the title; below this only a browser can say what the page is
 SHELL_FLOOR = 300
-# ladder.py:137: gone, or Cloudflare saying the origin is down
+# ladder.py:134: gone, or Cloudflare saying the origin is down
 DEAD_STATUS = {404, 410, 521, 522, 523, 525, 526, 530}
-# ladder.py:131: the thin floor below which the spike's regex baseline refuses to call a page ok
+# ladder.py:125: the thin floor below which the spike's regex baseline refuses to call a page ok
 THIN_CHARS = 800
-# ladder.py:50
+# ladder.py:59
 USER_AGENT = "serp-axi-research/0.1"
 
 
@@ -57,10 +58,10 @@ def api_url(url: str) -> str | None:
 def flatten_api(url: str, data: Any) -> str:
     """Depth-first gather of readable post bodies from a discussion API payload.
 
-    ladder.py:63 strips tags by substituting a single space, which leaves double
-    spaces behind, and formats author and score unconditionally, so a node with
-    neither prints the string "None". Both are cosmetic rather than measured, so
-    they are cleaned here instead of carried across.
+    ladder.py:65 strips tags by substituting a single space, which leaves double
+    spaces behind, and formats author and score unconditionally (lines 38-39),
+    so a node with neither prints the string "None". Both are cosmetic rather
+    than measured, so they are cleaned here instead of carried across.
     """
     pieces: list[str] = []
 
@@ -87,6 +88,13 @@ def flatten_api(url: str, data: Any) -> str:
 def _client() -> Any:
     # ladder.py:49: "random" can pick a profile this primp build rejects
     # (BuilderError chrome_133), so retry before falling back to chrome.
+    #
+    # primp is imported here, not at module scope: it is a browser tool, and the
+    # resident child owes its ready line before it touches one (04-tdd 1.4).
+    # Importing it at the top spends the handshake budget on a library the first
+    # request may not even need.
+    import primp
+
     for _ in range(5):
         try:
             return primp.Client(impersonate="random", impersonate_os="random", follow_redirects=True, timeout=30)

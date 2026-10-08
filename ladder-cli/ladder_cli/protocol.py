@@ -15,7 +15,12 @@ from typing import Any
 
 PROTOCOL = 1
 
-VERDICTS = ("ok", "dead", "blocked")
+# A fourth verdict, "error", is not a property of the page: it means the climb
+# ran out of rungs because a rung malfunctioned, with no page ever judged. It
+# travels beside "blocked" rather than being folded into it, because the caller
+# has to act differently: "the page is defended" and "our machinery broke" are
+# different sentences, and only one of them is worth retrying.
+VERDICTS = ("ok", "dead", "blocked", "error")
 TAB_STATES = ("fresh", "same")
 COOKIE_STATES = ("cold", "jar")
 CACHE_STATES = ("cold", "warm")
@@ -71,7 +76,6 @@ class LadderRequest:
     def parse(cls, payload: Any) -> "LadderRequest":
         if not isinstance(payload, dict):
             raise ProtocolError(f"request must be a JSON object, got {type(payload).__name__}")
-
         unknown = sorted(set(payload) - set(REQUEST_FIELDS))
         if unknown:
             raise ProtocolError(f"unknown field(s): {', '.join(unknown)}")

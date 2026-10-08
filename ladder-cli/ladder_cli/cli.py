@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -19,20 +20,11 @@ from typing import IO, Iterable, Sequence
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
 from .rungs import RUNGS, RungResult, RungVerdict, fetch, judge, network_verdict
 
-# ladder.py:3 budgets every rung at 90s before SIGKILL. Overridable so the
-# budget path can be exercised in a test without waiting a minute and a half.
+# One budget, owned by the code that enforces it: a rung is SIGKILLed at 90s.
+# It used to be overridable from the environment, which made two owners of one
+# deadline (the parent already bounds the whole request) and a tunable no test
+# ever exercised. Tests now inject `timeout_s` instead of exporting an env var.
 DEFAULT_RUNG_TIMEOUT_S = 90.0
-
-
-def rung_timeout_s() -> float:
-    raw = os.environ.get("LADDER_RUNG_TIMEOUT_S")
-    if raw is None or not raw.strip():
-        return DEFAULT_RUNG_TIMEOUT_S
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_RUNG_TIMEOUT_S
-    return value if value > 0 else DEFAULT_RUNG_TIMEOUT_S
 
 
 def run_rung_isolated(
@@ -45,9 +37,9 @@ def run_rung_isolated(
 
     A subprocess is what makes the budget enforceable: it is the thing that can
     be SIGKILLed. The child is started in its own session so the kill reaches
-    whatever it spawned underneath it, matching ladder.py:189.
+    whatever it spawned underneath it, matching ladder.py:180.
     """
-    budget = rung_timeout_s() if timeout_s is None else timeout_s
+    budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s
     command = list(argv) if argv is not None else [sys.executable, "-m", "ladder_cli", "--rung", rung, url]
     process = subprocess.Popen(
         command,
@@ -75,11 +67,27 @@ def run_rung_isolated(
         if isinstance(page, dict) and "text" in page:
             return judge(rung, page)
 
-    message = ((err or "").strip().splitlines() or ["?"])[-1][:160]
+    message = _rung_error_line(err)
     verdict = network_verdict(message)
     if verdict is RungVerdict.DEAD:
         return RungResult(verdict, reason=f"network: {message}")
     return RungResult(verdict, reason=message)
+
+
+# The child writes exactly one of these, but stderr carries other things too: a
+# traceback from a library, a deprecation notice, a SIGKILL note. Taking the
+# last line therefore assumes nothing noisier arrived after it, while taking
+# the last line *shaped like an exception* does not.
+_RUNG_ERROR_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exit|Interrupt|Timeout|Exception|Halt): (?P<detail>.*)$")
+
+
+def _rung_error_line(stderr: str) -> str:
+    """Pull the child's own error line out of whatever it printed."""
+    for line in reversed((stderr or "").splitlines()):
+        match = _RUNG_ERROR_LINE.match(line.strip())
+        if match:
+            return match.group("detail")[:160]
+    return ((stderr or "").strip().splitlines() or ["?"])[-1][:160]
 
 
 def _elapsed_ms(started: float) -> int:
@@ -103,9 +111,12 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
 
     Two verdicts end the climb early and the rest keep going: ``ok`` because the
     page arrived, ``dead`` because a stronger rung cannot revive a domain that
-    does not resolve or a page that says it is parked (ladder.py:196). Blocked,
-    a blown budget, and a rung that malfunctioned all mean try the next one.
-    Exhausting the rungs reports ``blocked``, never an empty success.
+    does not resolve or a page that says it is parked (ladder.py:196). A blown
+    budget and a rung that malfunctioned both mean try the next one.
+
+    Running out of rungs is reported as ``blocked`` (the page defended itself)
+    or as ``error`` when the last rung could not answer at all. Both are honest
+    about the outcome, and they differ in the only part the caller can act on.
 
     The runner defaults by lookup rather than by argument value so a test can
     replace ``run_rung_isolated`` on this module.
@@ -144,6 +155,8 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
             elapsedMs=_elapsed_ms(started),
             warning=f"no rungs available at a ceiling of {request.rungCeiling}",
         )
+    if last.verdict is RungVerdict.ERROR:
+        return _response("error", rung_reached, last, started)
     return _response("blocked", rung_reached, last, started)
 
 

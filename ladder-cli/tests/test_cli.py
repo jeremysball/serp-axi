@@ -172,11 +172,74 @@ def test_a_dns_failure_on_the_first_rung_reads_dead() -> None:
     assert "network" in result.reason
 
 
-def test_an_unexpected_rung_failure_stays_rung_local() -> None:
+def test_an_unexpected_rung_failure_climbs_and_only_surfaces_when_the_rungs_run_out(
+    make_request,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    monkeypatch.setattr(cli, "run_rung_isolated", sequence(RungResult(RungVerdict.ERROR, reason="boom"), RungResult(RungVerdict.ERROR, reason="boom again")))
+
+    stdout = io.StringIO()
+    stdin = io.StringIO(json.dumps(payload(make_request())) + "\n")
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    response = read_lines(stdout)[1]
+    assert response["verdict"] == "error"
+    assert response["rungReached"] == 2
+    assert response["warning"]
+
+
+def test_an_unexpected_rung_failure_reports_blocked_once_a_page_is_actually_defended(
+    make_request,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    runner = sequence(RungResult(RungVerdict.ERROR, reason="boom"), refused())
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    stdout = io.StringIO()
+    stdin = io.StringIO(json.dumps(payload(make_request())) + "\n")
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    assert read_lines(stdout)[1]["verdict"] == "blocked"
+
+
+def test_a_timeout_reads_as_an_error_not_as_the_page_dying() -> None:
+    # The spike mapped a timeout to `dead`, which stopped the climb on a blown
+    # budget. A budget firing is our machinery, never the page, so it must climb.
+    from ladder_cli.rungs import http as rung_http
+
+    assert rung_http.DEAD_NET.search("TimeoutError") is None
+    assert rung_http.DEAD_NET.search("timed out") is None
+    assert rung_http.DEAD_NET.search("DNSError: failed to lookup")
+
+
+def test_the_childs_error_line_is_picked_out_of_stderr_noise() -> None:
+    # The child prints one `Type: message` line, but it is not the last thing on
+    # stderr: a multi-line exception message, or a deprecation notice after it,
+    # used to be mistaken for the error.
+    stderr = (
+        "/usr/lib/ladder_cli/http.py:9: DeprecationWarning: something newer\n"
+        "Traceback (most recent call last):\n"
+        '  File "x", line 1\n'
+        "ValueError: the real reason\nsecond line of the same message\n"
+    )
+    assert cli._rung_error_line(stderr) == "the real reason"
+
+
+def test_a_timeout_on_a_rung_is_reported_as_a_budget_not_as_a_network_death() -> None:
     result = cli.run_rung_isolated(
         "http",
         "https://example.com/article",
         timeout_s=20,
-        argv=[sys.executable, "-c", "import sys; print('ValueError: nope', file=sys.stderr); sys.exit(1)"],
+        argv=[sys.executable, "-c", "import sys; print('TimeoutError: read timed out', file=sys.stderr); sys.exit(1)"],
     )
-    assert result.verdict is RungVerdict.ERROR, "an error must never leave the child as a verdict"
+    assert result.verdict is RungVerdict.ERROR
+    assert "timed out" in result.reason
+
+
+def test_a_browser_tool_is_not_imported_before_anything_needs_it() -> None:
+    # primp is a browser library and rung 1 is the only rung. Importing it at
+    # module scope made the resident child owe its ready line before it had
+    # touched a browser, so the import moved inside the client that uses it.
+    assert "primp" not in sys.modules, "importing the ladder pulled in a browser tool it has not asked for"
