@@ -1,17 +1,34 @@
+import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
-import { fetchViaLadder } from "../ladder.ts";
+import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
+import type { StoredConfig } from "../config.ts";
+import { loadStoredConfig } from "../config.ts";
 
-const SCRAPE_FLAGS: FlagSpec = {
+export const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
   provider: "string",
   "dataset-id": "string",
   ladder: "boolean",
+  "tab-state": "string",
+  "cookie-state": "string",
+  "cache-state": "string",
+  "fingerprint-state": "string",
+  "rung-ceiling": "string",
+  profile: "string",
+  "jar-in": "string",
+  "jar-out": "string",
 };
+
+// The six axes and the jar paths are ladder-only. Rejecting them elsewhere
+// keeps a typo like `--tab-state` from being parsed and then silently ignored.
+// Imported rather than re-listed: the axis table owns the names, so an axis
+// cannot be addable to the wire without becoming addable to the CLI.
+const LADDER_AXIS_FLAGS = LADDER_AXIS_FLAG_NAMES;
 
 const DEFAULT_LIMIT = 1200;
 const FULL_LIMIT = 50000;
@@ -46,7 +63,8 @@ Providers:
   brightdata          Bright Data's dataset scrape API. One or more URLs, synchronous,
                       batched in a single request. Requires BRIGHTDATA_API_KEY.
   ladder (--ladder)   Resident ladder CLI: free, no API key. Exactly one URL.
-                      Binary from SERP_AXI_LADDER_BIN or PATH.
+                      Binary from SERP_AXI_LADDER_BIN, a ladder-cli inside or
+                      beside this package, or PATH.
 
 Flags:
   --full                Return up to 50,000 characters per page instead of the default 1,200.
@@ -56,11 +74,24 @@ Flags:
                          Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
                          Only valid with --provider brightdata.
 
+Ladder axes (only with --ladder; flag beats env beats config beats a --profile
+                bundle, which beats the default):
+  --tab-state <state>          fresh (default) or same
+  --cookie-state <state>       cold (default) or jar; jar needs a path (see below)
+  --cache-state <state>        cold (default) or warm
+  --fingerprint-state <state>  rotate (default) or stable
+  --rung-ceiling <1-5>         Highest rung to attempt. Default 5; hitting it reports blocked.
+  --profile <name>             Named bundle of axes from ladderProfiles in the config file.
+  --jar-in <path>              Cookie jar to load before fetching.
+  --jar-out <path>             Cookie jar to save after fetching.
+                         --cookie-state jar mirrors whichever of these you pass to both.
+
 Examples:
   serp-axi scrape https://example.com/article
   serp-axi scrape https://example.com/article --full
   serp-axi scrape https://example.com https://example.com/1 --provider brightdata
-  serp-axi scrape https://example.com/article --ladder`;
+  serp-axi scrape https://example.com/article --ladder
+  serp-axi scrape https://example.com/article --ladder --tab-state same --cookie-state jar --jar-out ~/cookies.txt`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],
@@ -219,7 +250,17 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
   const { positionals, flags } = parseFlags(args, SCRAPE_FLAGS, "scrape");
 
   if (flags.ladder) {
-    return runLadderScrape(positionals, flags);
+    return runLadderScrape(positionals, flags, process.env);
+  }
+
+  for (const axis of LADDER_AXIS_FLAGS) {
+    if (flags[axis] !== undefined) {
+      throw new SerpAxiError(
+        `--${axis} only applies with --ladder`,
+        "usage",
+        "add --ladder, or drop the axis flag",
+      );
+    }
   }
 
   const provider = parseProvider(flags.provider);
@@ -276,6 +317,11 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
 async function runLadderScrape(
   positionals: string[],
   flags: Record<string, string | boolean>,
+  env: NodeJS.ProcessEnv = process.env,
+  // Injectable rather than read at the call site: a ladder scrape governed
+  // entirely by flags should not depend on the machine's config file being
+  // readable, and a test should not have to fake a home directory to reach one.
+  config: StoredConfig = loadStoredConfig(os.homedir()),
 ): Promise<AxiOutput> {
   if (flags.provider !== undefined) {
     throw new SerpAxiError(
@@ -303,21 +349,28 @@ async function runLadderScrape(
     );
   }
   const url = validateUrl(raw);
-  const bin = nonEmpty(process.env.SERP_AXI_LADDER_BIN) ?? "ladder-cli";
+  const bin = resolveLadderBin(env);
+  const axes = resolveLadderAxes({ flag: flags, env, config });
   let response;
   try {
-    response = await fetchViaLadder(url.toString(), { bin });
+    response = await fetchViaLadder(url.toString(), { bin }, axes);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new SerpAxiError(`ladder scrape failed: ${message}`, "runtime", "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)");
   }
   if (response.verdict !== "ok") {
+    // `error` is not `blocked`: one says the page defended itself, the other
+    // says the climb never got to judge a page at all. Reporting the second as
+    // the first tells the caller to retry a defence that never happened.
+    const note = response.warning ? ` (${response.warning})` : "";
     throw new SerpAxiError(
-      `"${url.toString()}" could not be fetched (ladder verdict: ${response.verdict}, rung ${response.rungReached})`,
+      `"${url.toString()}" could not be fetched (ladder verdict: ${response.verdict}, rung ${response.rungReached})${note}`,
       "runtime",
       response.verdict === "blocked"
         ? "the page is defended; retry later or solve it interactively"
-        : "the page appears dead; check the URL",
+        : response.verdict === "error"
+          ? `the ladder could not fetch the page: ${response.warning ?? "see the runtime error"}`
+          : "the page appears dead; check the URL",
       { verdict: response.verdict, rungReached: response.rungReached },
     );
   }
@@ -338,6 +391,13 @@ async function runLadderScrape(
     output.help = flags.full
       ? `content is capped at ${FULL_LIMIT} characters even with --full`
       : `Run \`serp-axi scrape ${url.toString()} --ladder --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
+  }
+  // The child's own note about how the page arrived (site api, rung used,
+  // anything it thought worth saying). It was parsed, validated, and then
+  // dropped by this branch, which made the field a write-only part of the
+  // protocol.
+  if (response.warning) {
+    output.warning = response.warning;
   }
   return output;
 }

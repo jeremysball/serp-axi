@@ -47,3 +47,18 @@ real SERP so a Kagi redesign surfaces as a test failure.
 
 **When this becomes a real bug:** if Kagi ships a subscription-accessible search
 API, this provider should move to it and this entry should be deleted.
+
+## A `--ladder` timeout reports `error`, not `dead`
+
+**What you see:** a page that cannot be fetched because the rung budget fired
+reports verdict `error` (or `blocked` if a later rung judged the page), while a
+domain that does not resolve reports `dead`. Both come back as a failed scrape.
+
+**Why:** `dead` is terminal on purpose: no browser revives a domain that does not
+resolve, so the climb stops. A timeout is our own 90-second budget firing, which
+says nothing at all about the page, so it climbs instead. Reporting both as
+`dead` would let a blown budget look like a decision about the site.
+
+**When this becomes a real bug:** never. The distinction is the point. What
+should change is that rungs 2 to 5 do not exist yet, so today `error` means "the
+only rung we have could not finish" rather than "every rung could not finish".

@@ -1,0 +1,41 @@
+[build-system]
+# Pinned like every other dependency: an unpinned build requirement means two
+# installs of the same tag can build differently, and nothing in the lockfile
+# pins a build frontend. The floor is the version uv.lock was resolved with.
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ladder-cli"
+version = "0.1.0"
+description = "Resident ladder CLI for serp-axi: one rung per attempt, NDJSON over stdio"
+requires-python = ">=3.11"
+license = "Unlicense"
+dependencies = [
+    "primp==2.0.1",
+]
+
+[project.optional-dependencies]
+# Recorded from the approved TDD section 2.2, pinned to the versions the spikes
+# measured with. Left out of the required set so Phase 2 installs a single pure
+# HTTP client; Phase 3 and Phase 4 add these when their rungs land.
+browsers = [
+    "camoufox==0.5.6",
+    "zendriver==0.17.1",
+    "browserforge==1.2.4",
+]
+audio = [
+    "faster-whisper==1.2.1",
+]
+test = [
+    "pytest==8.3.4",
+]
+
+[project.scripts]
+ladder-cli = "ladder_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ladder_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

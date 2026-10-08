@@ -128,10 +128,24 @@ is completable with flags alone.
 
 ## In progress: scraping escalation ladder
 
-The free SearXNG search path is wired in (`--provider searxng`). The
-escalation ladder for fetching pages behind the links is still being built.
-Nothing about it is wired into a command yet, and no flag or provider accepts
-this path today.
+The free SearXNG search path is wired in (`--provider searxng`). The escalation
+ladder for fetching pages behind the links is live for rung 1.
+
+`--ladder` runs the rung-1 fetch through a resident `ladder-cli` child over
+stdio, free and with no API key. Rungs 2 to 5 (the browser rungs for challenge
+pages and JS shells), and the rung-5 classifier, are not built yet, so a page
+that survives rung 1 reports `blocked` rather than being fetched:
+
+```
+serp-axi scrape https://example.com/article --ladder
+```
+
+Ladder axes (`--tab-state`, `--cookie-state`, `--cache-state`,
+`--fingerprint-state`, `--rung-ceiling`, `--profile`, `--jar-in`, `--jar-out`)
+each read a flag, then an env var, then the config file, then a profile bundle.
+The scored verdicts are `ok`, `dead`, `blocked`, and `error`, where `error`
+means the climb ran out of rungs with no page ever judged. The single rung
+budget is 90 seconds under SIGKILL, inside the request budget of 120 seconds.
 
 The measured results are written up in the project's Linear tracker. The raw
 datasets they cite are in [`spikes/`](spikes/), which explains each one.

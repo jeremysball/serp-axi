@@ -425,3 +425,47 @@ test("runScrape --ladder rejects --provider and multiple URLs", async () => {
     );
   });
 });
+
+test("runScrape rejects a ladder axis flag without --ladder instead of ignoring it", async () => {
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/article", "--tab-state", "same"],
+      (async () => new Response("{}")) as typeof fetch,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /--tab-state only applies with --ladder/);
+      return true;
+    },
+  );
+});
+
+test("runScrape --ladder forwards the resolved axes onto the wire", async () => {
+  await withLadderStub("echo-request", async () => {
+    const output = await runScrape(
+      ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2"],
+      (async () => new Response("{}")) as typeof fetch,
+    );
+    const sent = JSON.parse(output.text as string) as Record<string, unknown>;
+    assert.equal(sent.url, "https://example.com/article");
+    assert.equal(sent.protocol, 1);
+    assert.equal(sent.tabState, "same");
+    assert.equal(sent.rungCeiling, 2);
+  });
+});
+
+test("runScrape --ladder rejects an invalid axis value as a usage error", async () => {
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/article", "--ladder", "--rung-ceiling", "9"],
+      (async () => new Response("{}")) as typeof fetch,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /rung-ceiling "9"/);
+      return true;
+    },
+  );
+});

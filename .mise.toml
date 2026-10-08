@@ -1,5 +1,9 @@
 [tools]
 node = "26.5.1"
+# ladder-cli builds against these; CI installs them through jdx/mise-action, the
+# same path .mise.toml already gives CI for Node.
+python = "3.14"
+uv = "0.12.23"
 
 [tasks.build]
 run = "npm run build"

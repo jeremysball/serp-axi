@@ -45,3 +45,11 @@ jobs:
 
       - name: Run unit tests
         run: npm test
+
+      - name: Run ladder-cli tests
+        # Pins come from uv.lock; --frozen fails the build if the lockfile no
+        # longer matches pyproject.toml, so a drifting pin cannot pass CI
+        # silently. Without this leg pytest would rot unnoticed, which is the
+        # H1/H12 shape the plan exists to avoid.
+        working-directory: ladder-cli
+        run: uv run --frozen --extra test pytest -q
