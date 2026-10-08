@@ -31,6 +31,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:python": "cd ladder-cli && .venv/bin/python -m pytest -q",
     "check": "npm run typecheck && npm test",
     "prepare": "git config core.hooksPath .githooks || true",
     "prepublishOnly": "npm run check && npm run build"

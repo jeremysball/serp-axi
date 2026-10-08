@@ -177,8 +177,28 @@ code rather than against the summary:
    request the moment the child exists.
 2. §1.3's honest-empty rule is enforced in **Phase 2**, parent-side, not
    deferred to Phase 5: `verdict: "ok"` with empty text is a schema violation.
-3. Binary resolution keeps sibling-of-package as specified in §2.2, even though
-   Phase 1 shipped only `SERP_AXI_LADDER_BIN ?? "ladder-cli"`. It is Phase 2 work.
+3. Binary resolution keeps a ladder-cli beside the package as specified in
+   §2.2, and also checks inside it first, because the repo checkout keeps the
+   Python tree at `<package>/ladder-cli`. It is Phase 2 work.
+4. `dead` is terminal; only `blocked` climbs. §2.1's "dead/blocked are rung-local
+   signals, keep climbing" would make `dead` unreachable, since exhaustion always
+   reports `blocked`, contradicting §1.3 and the merged Phase 1 test that asserts
+   `dead` reaches the parent distinctly. The spike already implements the
+   resolution and states why, at `spikes/sample100-2026-10-03/ladder.py:196`: a
+   browser cannot revive a domain that does not resolve or a page that says it is
+   parked. Exhausted rungs still report `blocked`.
+5. The Python tree is a proper `ladder_cli` package under `ladder-cli/`, with the
+   console script `ladder-cli = ladder_cli.cli:main`. The hyphenated directory
+   cannot be an import name, and flat top-level modules called `cli`, `rungs`, and
+   `state` would collide with anything else sharing the venv. This departs from
+   §2.2's flat file listing; §2.2's paths are updated in place.
+
+Open for Phase 3, where it first bites: §1.1 and §2.1 put a 90s SIGKILL budget on
+each rung, which needs a killable process, while §1.4 requires a rung's browser or
+model to construct once per CLI life, which a per-rung subprocess cannot give.
+Long-lived per-rung workers (spawn lazily, kill on a budget breach, respawn on
+next need) satisfy both, but Phase 2 only ships rung 1, where primp's own timeout
+applies, so the choice is not forced yet.
 
 Below, the call path and signatures are aligned to the names Phase 1 actually
 shipped (`LadderClient`, `fetchViaLadder`) rather than the drafted `resolveLadder`.

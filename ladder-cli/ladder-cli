@@ -1,0 +1,16 @@
+#!/bin/sh
+# Repo-checkout launcher for the resident ladder CLI.
+#
+# serp-axi finds this file as <package>/ladder-cli/ladder-cli, so it works
+# without installing the project anywhere. A proper install still provides the
+# ladder-cli console script; this path exists for development and CI.
+set -e
+dir="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -x "$dir/.venv/bin/python" ]; then
+  echo "ladder-cli: missing $dir/.venv/bin/python" >&2
+  echo "ladder-cli: run 'cd ladder-cli && uv sync' (or: uv venv .venv && uv pip install -e '.[test]')" >&2
+  exit 1
+fi
+PYTHONPATH="$dir${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec "$dir/.venv/bin/python" -m ladder_cli "$@"
