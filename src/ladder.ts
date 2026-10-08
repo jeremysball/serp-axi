@@ -1,4 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { StoredConfig } from "./config.ts";
+import { SerpAxiError } from "./errors.ts";
 
 export type LadderVerdict = "ok" | "dead" | "blocked";
 
@@ -10,6 +15,36 @@ export interface LadderResponse {
   engines: string[];
   elapsedMs: number;
   warning: string | null;
+}
+
+export const LADDER_PROTOCOL = 1;
+
+export type LadderTabState = "fresh" | "same";
+export type LadderCookieState = "cold" | "jar";
+export type LadderCacheState = "cold" | "warm";
+export type LadderFingerprintState = "rotate" | "stable";
+export type LadderRungCeiling = 1 | 2 | 3 | 4 | 5;
+
+export interface LadderAxes {
+  tabState: LadderTabState;
+  cookieState: LadderCookieState;
+  cacheState: LadderCacheState;
+  fingerprintState: LadderFingerprintState;
+  rungCeiling: LadderRungCeiling;
+  profile: string | null;
+  jarIn: string | null;
+  jarOut: string | null;
+}
+
+export interface LadderRequest extends LadderAxes {
+  protocol: typeof LADDER_PROTOCOL;
+  url: string;
+}
+
+export interface LadderAxisSources {
+  flag?: Record<string, string | boolean>;
+  env?: NodeJS.ProcessEnv;
+  config?: StoredConfig;
 }
 
 export interface LadderClientOptions {
@@ -29,6 +64,180 @@ export class SerpAxiLadderError extends Error {
 const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_IDLE_MS = 30000;
 
+const LADDER_AXIS_DEFAULTS: LadderAxes = {
+  tabState: "fresh",
+  cookieState: "cold",
+  cacheState: "cold",
+  fingerprintState: "rotate",
+  rungCeiling: 5,
+  profile: null,
+  jarIn: null,
+  jarOut: null,
+};
+
+// Each axis reads flag, then env, then config, then its default. The flag and
+// env names are derived from one table so a new axis cannot drift apart across
+// the three spellings.
+const AXIS_TABLE = {
+  tabState: { flag: "tab-state", env: "SERP_AXI_TAB_STATE", config: "ladderTabState" },
+  cookieState: { flag: "cookie-state", env: "SERP_AXI_COOKIE_STATE", config: "ladderCookieState" },
+  cacheState: { flag: "cache-state", env: "SERP_AXI_CACHE_STATE", config: "ladderCacheState" },
+  fingerprintState: { flag: "fingerprint-state", env: "SERP_AXI_FINGERPRINT_STATE", config: "ladderFingerprintState" },
+  rungCeiling: { flag: "rung-ceiling", env: "SERP_AXI_RUNG_CEILING", config: "ladderRungCeiling" },
+  profile: { flag: "profile", env: "SERP_AXI_PROFILE", config: "ladderProfile" },
+  jarIn: { flag: "jar-in", env: "SERP_AXI_JAR_IN", config: "ladderJarIn" },
+  jarOut: { flag: "jar-out", env: "SERP_AXI_JAR_OUT", config: "ladderJarOut" },
+} as const;
+
+type AxisKey = keyof typeof AXIS_TABLE;
+
+const AXIS_ENUMS: Record<string, readonly string[]> = {
+  tabState: ["fresh", "same"],
+  cookieState: ["cold", "jar"],
+  cacheState: ["cold", "warm"],
+  fingerprintState: ["rotate", "stable"],
+};
+
+// Axis and config validation is a usage error: the caller can fix it by
+// changing a flag, so it must reach the CLI as a SerpAxiError with a help
+// line rather than as a runtime failure. Child and protocol problems stay
+// SerpAxiLadderError and are wrapped as runtime errors by the command.
+function usageError(message: string, help: string): SerpAxiError {
+  return new SerpAxiError(message, "usage", help);
+}
+
+function readRaw(sources: LadderAxisSources, key: AxisKey): { value: string | undefined; origin: "flag" | "env" | null } {
+  const entry = AXIS_TABLE[key];
+  const flagValue = sources.flag?.[entry.flag];
+  if (flagValue !== undefined && flagValue !== true && flagValue !== false) {
+    return { value: String(flagValue), origin: "flag" };
+  }
+  const envValue = sources.env?.[entry.env];
+  if (envValue !== undefined && envValue.length > 0) {
+    return { value: envValue, origin: "env" };
+  }
+  return { value: undefined, origin: null };
+}
+
+function enumValue(key: AxisKey, raw: string, origin: string): string {
+  const allowed = AXIS_ENUMS[key];
+  if (allowed && !allowed.includes(raw)) {
+    throw usageError(`invalid ${AXIS_TABLE[key].flag} "${raw}" from ${origin}`, `must be one of ${allowed.join(", ")}`);
+  }
+  return raw;
+}
+
+function ceilingValue(raw: string, origin: string): LadderRungCeiling {
+  if (!/^[1-5]$/.test(raw)) {
+    throw usageError(`invalid ${AXIS_TABLE.rungCeiling.flag} "${raw}" from ${origin}`, "must be an integer from 1 to 5");
+  }
+  return Number(raw) as LadderRungCeiling;
+}
+
+/**
+ * Resolve the six axes plus jar paths, honoring flag > env > profile > config >
+ * default. Profiles live in the config file as bundles of axis overrides, so the
+ * request schema never grows a seventh axis.
+ */
+export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
+  const profileRead = readRaw(sources, "profile");
+  const profile = profileRead.value ?? null;
+
+  let bundle: Record<string, unknown> = {};
+  if (profile !== null) {
+    const profiles = sources.config?.ladderProfiles;
+    if (profiles !== undefined && (typeof profiles !== "object" || profiles === null)) {
+      throw usageError("config ladderProfiles must be an object", "fix the config file");
+    }
+    const named = (profiles as Record<string, unknown> | undefined)?.[profile];
+    if (named === undefined) {
+      throw usageError(
+        `unknown ladder profile "${profile}"`,
+        "define it under ladderProfiles in the config file, or drop --profile",
+      );
+    }
+    if (typeof named !== "object" || named === null || Array.isArray(named)) {
+      throw usageError(`ladder profile "${profile}" must be an object`, "map axis names to values in the config file");
+    }
+    bundle = named as Record<string, unknown>;
+  }
+
+  const axes: LadderAxes = { ...LADDER_AXIS_DEFAULTS, profile };
+
+  for (const key of ["tabState", "cookieState", "cacheState", "fingerprintState", "rungCeiling"] as const) {
+    const { value, origin } = readRaw(sources, key);
+    const bundled = bundle[key];
+    const fromConfig = sources.config?.[AXIS_TABLE[key].config];
+    const raw =
+      value ??
+      (typeof bundled === "string" ? bundled : undefined) ??
+      (typeof fromConfig === "string" ? fromConfig : undefined);
+    if (raw === undefined) continue;
+    const source = origin ?? (typeof bundled === "string" ? `profile "${profile}"` : "config");
+    axes[key] = (key === "rungCeiling" ? ceilingValue(raw, source) : enumValue(key, raw, source)) as never;
+  }
+
+  for (const key of ["jarIn", "jarOut"] as const) {
+    const { value } = readRaw(sources, key);
+    const bundled = bundle[key];
+    const fromConfig = sources.config?.[AXIS_TABLE[key].config];
+    const raw =
+      value ??
+      (typeof bundled === "string" ? bundled : undefined) ??
+      (typeof fromConfig === "string" ? fromConfig : undefined);
+    axes[key] = raw === undefined || raw.length === 0 ? null : raw;
+  }
+
+  // Sugar, not a new field: `--cookie-state jar` names "persist this jar both
+  // ways" without a caller spelling out jar-in and jar-out separately. It never
+  // invents a path, because a wrong path silently loses the clearance it exists
+  // to keep, so it mirrors whichever path it was given and otherwise refuses.
+  if (axes.cookieState === "jar" && axes.jarIn === null && axes.jarOut === null) {
+    throw usageError(
+      "--cookie-state jar needs a jar path",
+      "pass --jar-out <path> (or --jar-in), which the sugar mirrors both ways",
+    );
+  }
+  if (axes.jarIn === null) axes.jarIn = axes.jarOut;
+  if (axes.jarOut === null) axes.jarOut = axes.jarIn;
+
+  return axes;
+}
+
+export function buildLadderRequest(url: string, axes: LadderAxes): LadderRequest {
+  return { protocol: LADDER_PROTOCOL, url, ...axes };
+}
+
+/**
+ * SERP_AXI_LADDER_BIN always wins so dev and sandboxes can point anywhere.
+ * Otherwise prefer a ladder-cli sitting beside the installed package, and fall
+ * back to whatever PATH offers. The sibling path is only chosen when it exists,
+ * so having it absent never hides a working PATH entry.
+ *
+ * `siblingPath` is split out as a parameter so the three precedence legs can be
+ * tested without rearranging the filesystem the tests run on.
+ */
+export function resolveLadderBin(
+  env: NodeJS.ProcessEnv = process.env,
+  siblingPath: string | null = ladderSiblingPath(),
+): string {
+  const explicit = env.SERP_AXI_LADDER_BIN;
+  if (explicit !== undefined && explicit.length > 0) return explicit;
+  if (siblingPath !== null && existsSync(siblingPath)) return siblingPath;
+  return "ladder-cli";
+}
+
+function ladderSiblingPath(): string | null {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    // src/ in dev, dist/ when installed; both sit directly inside the package.
+    const packageRoot = path.resolve(here, "..");
+    return path.resolve(packageRoot, "..", "ladder-cli");
+  } catch {
+    return null;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -47,11 +256,21 @@ function parseResponse(line: string): LadderResponse {
   if (!isRecord(body) || !isVerdict(body.verdict)) {
     throw new SerpAxiLadderError(`ladder-cli returned a malformed response line: ${line.slice(0, 120)}`);
   }
+  const text = typeof body.text === "string" ? body.text : "";
+  // An ok verdict with no text is not a small success, it is a schema
+  // violation: accepting it would let a rung that silently failed report
+  // success. Reporting it as an error is what keeps `blocked` vs `dead` vs
+  // empty honest, per the verdict-honesty guide.
+  if (body.verdict === "ok" && text.trim().length === 0) {
+    throw new SerpAxiLadderError(
+      `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${line.slice(0, 120)})`,
+    );
+  }
   return {
     verdict: body.verdict,
     rungReached: typeof body.rungReached === "number" ? body.rungReached : 0,
     title: typeof body.title === "string" ? body.title : "",
-    text: typeof body.text === "string" ? body.text : "",
+    text,
     engines: Array.isArray(body.engines) ? body.engines.filter((e): e is string => typeof e === "string") : [],
     elapsedMs: typeof body.elapsedMs === "number" ? body.elapsedMs : 0,
     warning: typeof body.warning === "string" ? body.warning : null,
@@ -59,7 +278,7 @@ function parseResponse(line: string): LadderResponse {
 }
 
 interface Pending {
-  url: string;
+  request: LadderRequest;
   resolve: (response: LadderResponse) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
@@ -95,15 +314,16 @@ export class LadderClient {
     return this.didExit;
   }
 
-  async fetch(url: string): Promise<LadderResponse> {
+  async fetch(url: string, axes?: LadderAxes): Promise<LadderResponse> {
     if (this.closed) {
       throw new SerpAxiLadderError("ladder client is closed");
     }
+    const request = buildLadderRequest(url, axes ?? resolveLadderAxes({}));
     this.ensureSpawned();
     return new Promise<LadderResponse>((resolve, reject) => {
       // No timer here: the timeout covers the upstream call and arms at
       // dispatch, so queued requests never burn budget while waiting.
-      this.queue.push({ url, resolve, reject });
+      this.queue.push({ request, resolve, reject });
       void this.dispatch();
     });
   }
@@ -145,11 +365,11 @@ export class LadderClient {
     pending.timer = setTimeout(() => {
       this.dropPending(
         pending,
-        new SerpAxiLadderError(`ladder-cli timed out after ${timeoutMs} ms for ${pending.url}`),
+        new SerpAxiLadderError(`ladder-cli timed out after ${timeoutMs} ms for ${pending.request.url}`),
       );
     }, timeoutMs);
     try {
-      this.child?.stdin?.write(`${JSON.stringify({ url: pending.url })}\n`);
+      this.child?.stdin?.write(`${JSON.stringify(pending.request)}\n`);
     } catch (error) {
       this.inFlight = null;
       clearTimeout(pending.timer);
@@ -273,6 +493,16 @@ export class LadderClient {
         }
         if (!isRecord(hello) || hello.ready !== true) {
           this.settleReady(new SerpAxiLadderError(`ladder-cli sent an invalid ready line: ${line.slice(0, 120)}`));
+        } else if (hello.protocol !== LADDER_PROTOCOL) {
+          // Fail at the handshake, not at the first garbled request: a stale
+          // installed ladder-cli must name both protocol numbers instead of
+          // silently misparsing everything after this point.
+          this.settleReady(
+            new SerpAxiLadderError(
+              `ladder-cli protocol mismatch: serp-axi speaks protocol ${LADDER_PROTOCOL}, ` +
+                `ladder-cli reported protocol ${JSON.stringify(hello.protocol ?? null)} on its ready line`,
+            ),
+          );
         } else {
           this.settleReady();
         }
@@ -334,10 +564,14 @@ export class LadderClient {
   }
 }
 
-export async function fetchViaLadder(url: string, options: LadderClientOptions): Promise<LadderResponse> {
+export async function fetchViaLadder(
+  url: string,
+  options: LadderClientOptions,
+  axes: LadderAxes = resolveLadderAxes({}),
+): Promise<LadderResponse> {
   const client = new LadderClient(options);
   try {
-    return await client.fetch(url);
+    return await client.fetch(url, axes);
   } finally {
     await client.close();
   }

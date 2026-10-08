@@ -6,6 +6,15 @@ export interface StoredConfig {
   searxngUrl?: unknown;
   searxngEngines?: unknown;
   searchTimeoutMs?: unknown;
+  ladderTabState?: unknown;
+  ladderCookieState?: unknown;
+  ladderCacheState?: unknown;
+  ladderFingerprintState?: unknown;
+  ladderRungCeiling?: unknown;
+  ladderProfile?: unknown;
+  ladderJarIn?: unknown;
+  ladderJarOut?: unknown;
+  ladderProfiles?: unknown;
 }
 
 export function configFilePath(homeDir: string, env: NodeJS.ProcessEnv = process.env): string {

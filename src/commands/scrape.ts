@@ -1,17 +1,40 @@
+import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerpAxiError } from "../errors.ts";
 import { truncate, type AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
-import { fetchViaLadder } from "../ladder.ts";
+import { fetchViaLadder, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
+import { loadStoredConfig } from "../config.ts";
 
 const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
   provider: "string",
   "dataset-id": "string",
   ladder: "boolean",
+  "tab-state": "string",
+  "cookie-state": "string",
+  "cache-state": "string",
+  "fingerprint-state": "string",
+  "rung-ceiling": "string",
+  profile: "string",
+  "jar-in": "string",
+  "jar-out": "string",
 };
+
+// The six axes and the jar paths are ladder-only. Rejecting them elsewhere
+// keeps a typo like `--tab-state` from being parsed and then silently ignored.
+const LADDER_AXIS_FLAGS = [
+  "tab-state",
+  "cookie-state",
+  "cache-state",
+  "fingerprint-state",
+  "rung-ceiling",
+  "profile",
+  "jar-in",
+  "jar-out",
+] as const;
 
 const DEFAULT_LIMIT = 1200;
 const FULL_LIMIT = 50000;
@@ -46,7 +69,8 @@ Providers:
   brightdata          Bright Data's dataset scrape API. One or more URLs, synchronous,
                       batched in a single request. Requires BRIGHTDATA_API_KEY.
   ladder (--ladder)   Resident ladder CLI: free, no API key. Exactly one URL.
-                      Binary from SERP_AXI_LADDER_BIN or PATH.
+                      Binary from SERP_AXI_LADDER_BIN, a ladder-cli beside the
+                      installed package, or PATH.
 
 Flags:
   --full                Return up to 50,000 characters per page instead of the default 1,200.
@@ -56,11 +80,23 @@ Flags:
                          Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
                          Only valid with --provider brightdata.
 
+Ladder axes (only with --ladder; flag beats env beats config beats default):
+  --tab-state <state>          fresh (default) or same
+  --cookie-state <state>       cold (default) or jar; jar needs a path (see below)
+  --cache-state <state>        cold (default) or warm
+  --fingerprint-state <state>  rotate (default) or stable
+  --rung-ceiling <1-5>         Highest rung to attempt. Default 5; hitting it reports blocked.
+  --profile <name>             Named bundle of axes from ladderProfiles in the config file.
+  --jar-in <path>              Cookie jar to load before fetching.
+  --jar-out <path>             Cookie jar to save after fetching.
+                         --cookie-state jar mirrors whichever of these you pass to both.
+
 Examples:
   serp-axi scrape https://example.com/article
   serp-axi scrape https://example.com/article --full
   serp-axi scrape https://example.com https://example.com/1 --provider brightdata
-  serp-axi scrape https://example.com/article --ladder`;
+  serp-axi scrape https://example.com/article --ladder
+  serp-axi scrape https://example.com/article --ladder --tab-state same --cookie-state jar --jar-out ~/cookies.txt`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],
@@ -222,6 +258,16 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
     return runLadderScrape(positionals, flags);
   }
 
+  for (const axis of LADDER_AXIS_FLAGS) {
+    if (flags[axis] !== undefined) {
+      throw new SerpAxiError(
+        `--${axis} only applies with --ladder`,
+        "usage",
+        "add --ladder, or drop the axis flag",
+      );
+    }
+  }
+
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
@@ -303,10 +349,11 @@ async function runLadderScrape(
     );
   }
   const url = validateUrl(raw);
-  const bin = nonEmpty(process.env.SERP_AXI_LADDER_BIN) ?? "ladder-cli";
+  const bin = resolveLadderBin(process.env);
+  const axes = resolveLadderAxes({ flag: flags, env: process.env, config: loadStoredConfig(os.homedir()) });
   let response;
   try {
-    response = await fetchViaLadder(url.toString(), { bin });
+    response = await fetchViaLadder(url.toString(), { bin }, axes);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new SerpAxiError(`ladder scrape failed: ${message}`, "runtime", "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)");

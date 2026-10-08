@@ -1,8 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import os from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { LadderClient, SerpAxiLadderError } from "./ladder.ts";
+import {
+  LadderClient,
+  SerpAxiLadderError,
+  LADDER_PROTOCOL,
+  buildLadderRequest,
+  resolveLadderAxes,
+  resolveLadderBin,
+  type LadderAxes,
+} from "./ladder.ts";
+import type { StoredConfig } from "./config.ts";
 
 const STUB = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -141,4 +152,173 @@ test("idle teardown exits the child after quiet", async () => {
   assert.equal(res.verdict, "ok");
   await ladder.waitForExit(2000);
   assert.equal(ladder.exited, true);
+});
+
+// Approval sensor 1: a stale installed ladder-cli must fail at the handshake
+// with both protocol numbers named, not misparse the requests after it.
+test("a protocol mismatch fails at the handshake and names both sides", async () => {
+  const ladder = client("bad-protocol");
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /protocol mismatch/);
+      assert.match(error.message, /speaks protocol 1/);
+      assert.match(error.message, /reported protocol 2/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+// Approval sensor 2: §1.3 says an ok verdict with no text is a schema
+// violation, never a small success.
+test("verdict ok with empty text is a schema violation, not a success", async () => {
+  const ladder = client("empty-ok");
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /verdict "ok" with empty text/);
+      assert.match(error.message, /schema violation/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("the request on the wire carries protocol plus all nine fields", async () => {
+  const ladder = client("echo-request");
+  try {
+    const res = await ladder.fetch("https://a.example/x", resolveLadderAxes({}));
+    const sent = JSON.parse(res.text) as Record<string, unknown>;
+    assert.deepEqual(
+      Object.keys(sent).sort(),
+      [
+        "cacheState",
+        "cookieState",
+        "fingerprintState",
+        "jarIn",
+        "jarOut",
+        "profile",
+        "protocol",
+        "rungCeiling",
+        "tabState",
+        "url",
+      ],
+    );
+    assert.equal(sent.protocol, LADDER_PROTOCOL);
+    assert.equal(sent.tabState, "fresh");
+    assert.equal(sent.cookieState, "cold");
+    assert.equal(sent.cacheState, "cold");
+    assert.equal(sent.fingerprintState, "rotate");
+    assert.equal(sent.rungCeiling, 5);
+    assert.equal(sent.profile, null);
+    assert.equal(sent.jarIn, null);
+    assert.equal(sent.jarOut, null);
+  } finally {
+    await ladder.close();
+  }
+});
+
+// §1.7 axis-orthogonality sensor: each knob varies while the other five hold
+// defaults, asserting only its own field changes the request. The cookie-state
+// pair carries a jar path in both halves, because a path the sugar needs is
+// held constant rather than being the axis under test.
+const ORTHOGONAL_PAIRS: Array<{ axis: keyof LadderAxes; base: Record<string, string>; delta: Record<string, string> }> = [
+  { axis: "tabState", base: {}, delta: { "tab-state": "same" } },
+  {
+    axis: "cookieState",
+    base: { "jar-out": "/tmp/ladder-jar" },
+    delta: { "jar-out": "/tmp/ladder-jar", "cookie-state": "jar" },
+  },
+  { axis: "cacheState", base: {}, delta: { "cache-state": "warm" } },
+  { axis: "fingerprintState", base: {}, delta: { "fingerprint-state": "stable" } },
+  { axis: "rungCeiling", base: {}, delta: { "rung-ceiling": "3" } },
+  { axis: "profile", base: {}, delta: { profile: "cautious" } },
+];
+
+const PROFILE_CONFIG: StoredConfig = { ladderProfiles: { cautious: {} } };
+
+test("each of the six axes varies the request alone", () => {
+  for (const { axis, base, delta } of ORTHOGONAL_PAIRS) {
+    const before = buildLadderRequest("https://a.example/x", resolveLadderAxes({ flag: base, config: PROFILE_CONFIG }));
+    const after = buildLadderRequest("https://a.example/x", resolveLadderAxes({ flag: delta, config: PROFILE_CONFIG }));
+    const differing = Object.keys(before).filter(
+      (key) =>
+        JSON.stringify((before as unknown as Record<string, unknown>)[key]) !==
+        JSON.stringify((after as unknown as Record<string, unknown>)[key]),
+    );
+    assert.deepEqual(differing, [axis], `${axis} changed ${JSON.stringify(differing)}`);
+  }
+});
+
+test("resolution precedence is flag, then env, then profile, then config, then default", () => {
+  assert.equal(
+    resolveLadderAxes({
+      flag: { "tab-state": "same" },
+      env: { SERP_AXI_TAB_STATE: "fresh" },
+      config: { ladderTabState: "fresh" },
+    }).tabState,
+    "same",
+    "flag must beat env",
+  );
+  assert.equal(
+    resolveLadderAxes({ env: { SERP_AXI_TAB_STATE: "same" }, config: { ladderTabState: "fresh" } }).tabState,
+    "same",
+    "env must beat config",
+  );
+  assert.equal(
+    resolveLadderAxes({ config: { ladderTabState: "same" } }).tabState,
+    "same",
+    "config must beat the default",
+  );
+  assert.equal(resolveLadderAxes({}).tabState, "fresh", "the documented default must stand");
+});
+
+test("a profile bundle expands into exactly its named axes", () => {
+  const axes = resolveLadderAxes({
+    flag: { profile: "cautious" },
+    config: { ladderProfiles: { cautious: { cacheState: "warm", rungCeiling: "2" } } },
+  });
+  assert.equal(axes.profile, "cautious");
+  assert.equal(axes.cacheState, "warm");
+  assert.equal(axes.rungCeiling, 2);
+  assert.equal(axes.tabState, "fresh");
+  assert.equal(axes.cookieState, "cold");
+});
+
+test("an invalid axis value names the axis, the value, and its source", () => {
+  assert.throws(() => resolveLadderAxes({ env: { SERP_AXI_TAB_STATE: "sideways" } }), /tab-state "sideways" from env/);
+  assert.throws(() => resolveLadderAxes({ flag: { "rung-ceiling": "9" } }), /rung-ceiling "9" from flag/);
+});
+
+test("an unknown profile is a usage error that names the config file", () => {
+  assert.throws(
+    () => resolveLadderAxes({ flag: { profile: "nope" }, config: { ladderProfiles: {} } }),
+    /unknown ladder profile "nope"/,
+  );
+});
+
+test("--cookie-state jar refuses to invent a path and mirrors a given one", () => {
+  assert.throws(() => resolveLadderAxes({ flag: { "cookie-state": "jar" } }), /needs a jar path/);
+  const axes = resolveLadderAxes({ flag: { "cookie-state": "jar", "jar-out": "/tmp/j.txt" } });
+  assert.equal(axes.jarIn, "/tmp/j.txt");
+  assert.equal(axes.jarOut, "/tmp/j.txt");
+});
+
+// Approval sensor 3: env beats sibling beats PATH, and an absent sibling never
+// hides a working PATH entry.
+test("binary resolution prefers env, then an existing sibling, then PATH", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ladder-bin-"));
+  try {
+    const sibling = path.join(dir, "ladder-cli");
+    writeFileSync(sibling, "", { mode: 0o755 });
+
+    assert.equal(resolveLadderBin({ SERP_AXI_LADDER_BIN: "/custom/ladder" }, sibling), "/custom/ladder");
+    assert.equal(resolveLadderBin({}, sibling), sibling);
+    assert.equal(resolveLadderBin({}, path.join(dir, "absent")), "ladder-cli");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

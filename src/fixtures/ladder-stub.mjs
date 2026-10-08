@@ -1,5 +1,5 @@
-// Test double for ladder-cli: speaks the Phase 1 NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|slow
+// Test double for ladder-cli: speaks the NDJSON contract.
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request
 import readline from "node:readline";
 
 const modeIndex = process.argv.indexOf("--mode");
@@ -10,7 +10,9 @@ if (mode === "die-before-ready") {
   process.exit(1);
 }
 
-process.stdout.write(JSON.stringify({ ready: true, protocol: 1 }) + "\n");
+// A mismatched protocol must fail at the handshake, so this mode announces a
+// protocol the parent does not speak before any request is read.
+process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 1 }) + "\n");
 
 const input = readline.createInterface({ input: process.stdin });
 
@@ -46,6 +48,22 @@ input.on("line", async (line) => {
   if (mode === "dead") {
     process.stdout.write(
       JSON.stringify({ verdict: "dead", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, warning: null }) + "\n",
+    );
+    return;
+  }
+  // §1.3: an ok verdict with no text is a schema violation, not a small
+  // success. This mode reproduces exactly that shape.
+  if (mode === "empty-ok") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, warning: null }) + "\n",
+    );
+    return;
+  }
+  // Echo the request back as the page text so a test can assert what the
+  // parent actually put on the wire, not just what it resolved locally.
+  if (mode === "echo-request") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: JSON.stringify(request), engines: [], elapsedMs: 1, warning: null }) + "\n",
     );
     return;
   }
