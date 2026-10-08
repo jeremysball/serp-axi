@@ -210,31 +210,39 @@ export function buildLadderRequest(url: string, axes: LadderAxes): LadderRequest
 
 /**
  * SERP_AXI_LADDER_BIN always wins so dev and sandboxes can point anywhere.
- * Otherwise prefer a ladder-cli sitting beside the installed package, and fall
- * back to whatever PATH offers. The sibling path is only chosen when it exists,
- * so having it absent never hides a working PATH entry.
+ * Otherwise the first candidate that actually exists wins, and PATH is the
+ * fallback. Candidates are checked for existence rather than assumed, so an
+ * absent ladder-cli never hides a working PATH entry.
  *
- * `siblingPath` is split out as a parameter so the three precedence legs can be
- * tested without rearranging the filesystem the tests run on.
+ * `candidates` is a parameter so the precedence legs are testable without
+ * rearranging the filesystem the tests run on.
  */
 export function resolveLadderBin(
   env: NodeJS.ProcessEnv = process.env,
-  siblingPath: string | null = ladderSiblingPath(),
+  candidates: string[] | null = defaultLadderBinCandidates(),
 ): string {
   const explicit = env.SERP_AXI_LADDER_BIN;
   if (explicit !== undefined && explicit.length > 0) return explicit;
-  if (siblingPath !== null && existsSync(siblingPath)) return siblingPath;
+  for (const candidate of candidates ?? []) {
+    if (existsSync(candidate)) return candidate;
+  }
   return "ladder-cli";
 }
 
-function ladderSiblingPath(): string | null {
+function defaultLadderBinCandidates(): string[] {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
     // src/ in dev, dist/ when installed; both sit directly inside the package.
     const packageRoot = path.resolve(here, "..");
-    return path.resolve(packageRoot, "..", "ladder-cli");
+    return [
+      // The repo checkout keeps the Python tree inside the package, and a
+      // published package can too if ladder-cli ships with it.
+      path.join(packageRoot, "ladder-cli", "ladder-cli"),
+      // Otherwise a ladder-cli installed beside this package.
+      path.resolve(packageRoot, "..", "ladder-cli"),
+    ];
   } catch {
-    return null;
+    return [];
   }
 }
 

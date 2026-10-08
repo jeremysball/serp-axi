@@ -315,9 +315,14 @@ test("binary resolution prefers env, then an existing sibling, then PATH", () =>
     const sibling = path.join(dir, "ladder-cli");
     writeFileSync(sibling, "", { mode: 0o755 });
 
-    assert.equal(resolveLadderBin({ SERP_AXI_LADDER_BIN: "/custom/ladder" }, sibling), "/custom/ladder");
-    assert.equal(resolveLadderBin({}, sibling), sibling);
-    assert.equal(resolveLadderBin({}, path.join(dir, "absent")), "ladder-cli");
+    assert.equal(resolveLadderBin({ SERP_AXI_LADDER_BIN: "/custom/ladder" }, [sibling]), "/custom/ladder");
+    assert.equal(resolveLadderBin({}, [sibling]), sibling);
+    assert.equal(
+      resolveLadderBin({}, [path.join(dir, "absent"), sibling]),
+      sibling,
+      "the first candidate that exists wins",
+    );
+    assert.equal(resolveLadderBin({}, [path.join(dir, "absent")]), "ladder-cli");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

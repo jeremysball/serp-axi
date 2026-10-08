@@ -242,11 +242,14 @@ ladder-cli/state/*.py   jars.py, profiles.py
 ladder-cli/tests/        rung unit tests + fixture replay (final.jsonl, q6_rows.jsonl) + ledger-presence test
 ```
 
-How the TS dist finds the child: `ladder-cli` resolves to a sibling of the
-installed package, overridable by `SERP_AXI_LADDER_BIN` (exact binary path,
-highest precedence, for dev and sandboxes). The npm `postinstall` does not
-fetch Python; if the binary is missing at first scrape, the error names the
-env var and the docs page, and exits 1 as a failed request.
+How the TS dist finds the child: `SERP_AXI_LADDER_BIN` is an exact binary path
+and always wins (dev and sandboxes). Otherwise the first existing candidate is
+taken, in order: `<package>/ladder-cli/ladder-cli` (the repo checkout, and a
+published package if `ladder-cli` ships with it), then `<package>/../ladder-cli`
+(a sibling install), then whatever `PATH` offers. Candidates are checked for
+existence so an absent one never hides a working `PATH` entry. The npm
+`postinstall` does not fetch Python; if the binary is missing at first scrape,
+the error names the env var and the docs page, and exits 1 as a failed request.
 
 ### 2.3 Types and signatures
 

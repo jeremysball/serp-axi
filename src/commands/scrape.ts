@@ -69,8 +69,8 @@ Providers:
   brightdata          Bright Data's dataset scrape API. One or more URLs, synchronous,
                       batched in a single request. Requires BRIGHTDATA_API_KEY.
   ladder (--ladder)   Resident ladder CLI: free, no API key. Exactly one URL.
-                      Binary from SERP_AXI_LADDER_BIN, a ladder-cli beside the
-                      installed package, or PATH.
+                      Binary from SERP_AXI_LADDER_BIN, a ladder-cli inside or
+                      beside this package, or PATH.
 
 Flags:
   --full                Return up to 50,000 characters per page instead of the default 1,200.
