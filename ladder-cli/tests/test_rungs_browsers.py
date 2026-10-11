@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from ladder_cli.rungs import RungVerdict, browser_judge, http
+from ladder_cli.rungs import RungVerdict, browser_judge, http, network_verdict, normalize_page_text
 
 
 def page(title: str, text: str, status: int | None = 200) -> dict:
@@ -80,3 +80,52 @@ def test_a_short_shell_on_a_browser_rung_is_judged_by_length_alone() -> None:
     result = browser_judge(page("App", shell(700)))
     assert result.verdict is RungVerdict.BLOCKED
     assert "under the measured floor" in result.reason
+
+
+def test_run_blanks_are_collapsed_at_the_fetch_boundary_not_inside_the_judge() -> None:
+    """ladder.py:114 normalised in the rung child, before the record was written.
+
+    So the 800-character floor and the 600-character challenge window were both
+    measured against the collapsed string. This is why the normalization belongs
+    to the fetch rather than to the judge: a rung that hands its judge the raw
+    innerText reads whitespace as content, and the two measured thresholds move
+    onto text the run never saw.
+    """
+    padded = "Body text.\n" + "\n" * 900
+    assert len(padded) > 800, "the padding alone must be enough to clear the floor"
+
+    # What the rung hands its judge is the collapsed string...
+    assert len(normalize_page_text(padded)) < 800
+    assert browser_judge(page("Title", normalize_page_text(padded))).verdict is RungVerdict.BLOCKED
+
+    # ...so a rung that skips it reads the padding as a page and stops the climb.
+    raw = browser_judge(page("Title", padded))
+    assert raw.verdict is RungVerdict.OK, "raw text reads as a page, which is the regression"
+    assert raw.reason == f"{len(padded)} chars"
+
+
+def test_normalization_is_idempotent_and_has_no_leading_or_trailing_space() -> None:
+    assert normalize_page_text("\n\n  Body  \n\n\n") == "Body"
+    assert normalize_page_text(None) == ""
+    assert normalize_page_text("Body") == "Body"
+
+
+def test_a_gone_domain_is_dead_on_rung_one_only() -> None:
+    """ladder.py:192 gates the same mapping on the rung, so this must too.
+
+    No browser revives a domain that does not resolve, so rung 1 reads it ``dead``
+    and stops. A browser rung that cannot connect failed *itself*, and reading
+    that as ``dead`` would stop the climb on exactly the signal that says to keep
+    going: a stronger rung is allowed an answer.
+    """
+    message = "DNSError: failed to lookup address"
+
+    assert network_verdict(message, "http") is RungVerdict.DEAD, "rung 1 is final"
+    assert network_verdict(message, "camoufox") is RungVerdict.ERROR, "rung 2 climbs"
+    assert network_verdict(message, "zendriver_cf") is RungVerdict.ERROR
+    assert network_verdict(message, "zendriver_headed_cf") is RungVerdict.ERROR
+
+
+def test_a_browser_rungs_own_failure_climbs_rather_than_finishing_the_climb() -> None:
+    assert network_verdict("TimeoutError: navigation timed out", "camoufox") is RungVerdict.ERROR
+    assert network_verdict("something nobody mapped", "zendriver_cf") is RungVerdict.ERROR

@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import STRIP_JS, RungResult, browser_judge
+from . import STRIP_JS, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:15 rung name `zendriver_cf`
 HEADLESS = True
@@ -83,10 +83,10 @@ async def _fetch(url: str, options: dict[str, Any]) -> dict[str, Any]:
             pass
         await tab.sleep(SETTLE_S)
         title, text = await tab.evaluate(TEXT_EXPRESSION)
-        return {"title": title or "", "text": text or "", "status": None}
+        return {"title": title or "", "text": normalize_page_text(text), "status": None}
     finally:
         await browser.stop()
 
 
-def judge(page: dict[str, Any]) -> RungResult:
-    return browser_judge(page)
+# One binding, not three restatements; see camoufox.judge.
+judge = browser_judge

@@ -7,8 +7,7 @@ numbers.
 
 from __future__ import annotations
 
-import sys
-
+from conftest import inject_module
 from ladder_cli.rungs import RungVerdict, zendriver
 from ladder_cli.state import profiles
 
@@ -97,7 +96,7 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
 
         async def evaluate(self, expression: str) -> tuple[str, str]:
             calls.append(("evaluate", expression))
-            return ("Title", "body text")
+            return ("Title", "Body text.\n" + "\n" * 900)
 
     class FakeBrowser:
         async def get(self, url: str) -> FakeTab:
@@ -113,14 +112,14 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
             calls.append(("start", kwargs))
             return FakeBrowser()
 
-    monkeypatch.setitem(sys.modules, "zendriver", FakeZendriver)
-    monkeypatch.setenv(profiles.ROOT_ENV, str(tmp_path))
+    inject_module(monkeypatch, "zendriver", FakeZendriver)
+    monkeypatch.chdir(tmp_path)
 
     page = zendriver.fetch("https://example.com/")
 
-    assert page == {"title": "Title", "text": "body text", "status": None}
+    assert page == {"title": "Title", "text": "Body text.", "status": None}, "blanks collapsed, as ladder.py:114 did"
     assert calls == [
-        ("start", {"user_data_dir": str(tmp_path / "zd"), **zendriver.launch_options()}),
+        ("start", {"user_data_dir": str(tmp_path / "profiles" / "zd"), **zendriver.launch_options()}),
         ("get", "https://example.com/"),
         ("sleep", 6),
         ("verify_cf", {"click_delay": 3, "timeout": 20}),
@@ -136,7 +135,7 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     class FakeBrowser:
         async def get(self, url: str):
-            seen["profile"] = sorted(p.name for p in (tmp_path).iterdir())
+            seen["profile"] = sorted(p.name for p in (tmp_path / "profiles").iterdir())
 
             class Tab:
                 async def sleep(self, seconds: float) -> None: ...
@@ -154,10 +153,10 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
             seen["dir"] = kwargs["user_data_dir"]
             return FakeBrowser()
 
-    monkeypatch.setitem(sys.modules, "zendriver", FakeZendriver)
-    monkeypatch.setenv(profiles.ROOT_ENV, str(tmp_path))
+    inject_module(monkeypatch, "zendriver", FakeZendriver)
+    monkeypatch.chdir(tmp_path)
 
     zendriver.fetch("https://example.com/")
 
-    assert seen["dir"] == str(tmp_path / "zd")
+    assert seen["dir"] == str(tmp_path / "profiles" / "zd")
     assert seen["profile"] == ["zd"]

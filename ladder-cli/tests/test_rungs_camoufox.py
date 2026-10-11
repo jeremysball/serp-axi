@@ -8,9 +8,9 @@ asserted and the launch itself stays a thin wrapper.
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 
+from conftest import inject_module
 from ladder_cli.rungs import camoufox
 
 
@@ -56,7 +56,7 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
 
         def evaluate(self, expression: str) -> tuple[str, str]:
             calls.append(("evaluate", expression))
-            return ("Title", "body text")
+            return ("Title", "Body text.\n" + "\n" * 900)
 
     class FakeBrowser:
         def new_page(self) -> FakePage:
@@ -74,13 +74,13 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
         def __exit__(self, *exc: object) -> None:
             calls.append(("exit",))
 
-    fake_sync_api = SimpleNamespace(Camoufox=FakeCamoufox)
-    monkeypatch.setitem(sys.modules, "camoufox", SimpleNamespace(sync_api=fake_sync_api))
-    monkeypatch.setitem(sys.modules, "camoufox.sync_api", fake_sync_api)
+    inject_module(monkeypatch, "camoufox.sync_api", SimpleNamespace(Camoufox=FakeCamoufox))
 
     page = camoufox.fetch("https://example.com/")
 
-    assert page == {"title": "Title", "text": "body text", "status": 200}
+    assert page == {"title": "Title", "text": "Body text.", "status": 200}, (
+        "the run collapsed blanks before recording (ladder.py:114), so the floor saw 10 chars not 911"
+    )
     assert calls == [
         ("launch", {"headless": True, "humanize": True}),
         ("enter",),
@@ -102,7 +102,7 @@ def test_a_navigation_that_returns_no_response_leaves_the_status_unknown(monkeyp
         def wait_for_timeout(self, ms: int) -> None: ...
 
         def evaluate(self, expression: str) -> tuple[str, str]:
-            return ("Title", "body text")
+            return ("Title", "  padded  ")
 
     class FakeBrowser:
         def new_page(self) -> FakePage:
@@ -116,11 +116,9 @@ def test_a_navigation_that_returns_no_response_leaves_the_status_unknown(monkeyp
 
         def __exit__(self, *exc: object) -> None: ...
 
-    fake_sync_api = SimpleNamespace(Camoufox=FakeCamoufox)
-    monkeypatch.setitem(sys.modules, "camoufox", SimpleNamespace(sync_api=fake_sync_api))
-    monkeypatch.setitem(sys.modules, "camoufox.sync_api", fake_sync_api)
+    inject_module(monkeypatch, "camoufox.sync_api", SimpleNamespace(Camoufox=FakeCamoufox))
 
-    assert camoufox.fetch("https://example.com/") == {"title": "Title", "text": "body text", "status": None}
+    assert camoufox.fetch("https://example.com/") == {"title": "Title", "text": "padded", "status": None}
 
 
 def test_the_browser_is_closed_even_when_the_page_raises(monkeypatch) -> None:
@@ -149,9 +147,7 @@ def test_the_browser_is_closed_even_when_the_page_raises(monkeypatch) -> None:
         def __exit__(self, *exc: object) -> None:
             state["closed"] = True
 
-    fake_sync_api = SimpleNamespace(Camoufox=FakeCamoufox)
-    monkeypatch.setitem(sys.modules, "camoufox", SimpleNamespace(sync_api=fake_sync_api))
-    monkeypatch.setitem(sys.modules, "camoufox.sync_api", fake_sync_api)
+    inject_module(monkeypatch, "camoufox.sync_api", SimpleNamespace(Camoufox=FakeCamoufox))
 
     try:
         camoufox.fetch("https://example.com/")

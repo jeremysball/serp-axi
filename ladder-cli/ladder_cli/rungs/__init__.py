@@ -15,6 +15,7 @@ looking at raw HTML.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol as TypingProtocol
@@ -51,6 +52,24 @@ class RungModule(TypingProtocol):
     def fetch(self, url: str) -> dict[str, Any]: ...
 
     def judge(self, page: dict[str, Any]) -> RungResult: ...
+
+
+def normalize_page_text(text: str | None) -> str:
+    """Collapse runs of blank lines and strip, the shape the run recorded.
+
+    ladder.py:114 `re.sub(r"\\n\\s*\\n+", "\\n\\n", text or "").strip()` ran in
+    the rung child before the record was written, so the 800-character floor and
+    the 600-character challenge window were both measured against the collapsed
+    string. Skipping it moves both thresholds onto text the run never saw: a
+    page held open by whitespace padding reads as ``ok`` where the run read
+    ``thin``, and a marker pushed past character 600 of padding reads as no
+    marker at all.
+    """
+    import re
+
+    import re
+
+    return re.sub(r"\n\s*\n+", "\n\n", text or "").strip()
 
 
 def browser_judge(page: dict[str, Any]) -> RungResult:
@@ -107,15 +126,21 @@ def judge(rung: str, page: dict[str, Any]) -> RungResult:
     return MODULES[rung].judge(page)
 
 
-def network_verdict(message: str) -> RungVerdict:
+def network_verdict(message: str, rung: str) -> RungVerdict:
     """Map a child that produced no record at all.
 
     A DNS or TLS failure on rung 1 is final: no browser revives a domain that
-    does not resolve, so it reads ``dead``. A timeout is deliberately absent
-    from that set, because our budget firing is not the page's doing. Anything
-    else is the rung malfunctioning, which climbs rather than being reported to
-    the caller.
+    does not resolve, so it reads ``dead``. Every other rung reads such a
+    failure as itself having malfunctioned, which climbs rather than being
+    reported to the caller.
+
+    The scoping is not decoration. The spike gates the same mapping on the rung
+    (ladder.py:192, ``v = "dead" if rung == "http" and DEAD_NET.search(err)
+    else "error"``) and this function is the reason it has to take one: a
+    browser rung that cannot resolve is a browser rung that failed, not a page
+    that is gone, and reading it as ``dead`` would stop the climb on the one
+    signal that says to keep going.
     """
-    if http.DEAD_NET.search(message):
+    if rung == "http" and http.DEAD_NET.search(message):
         return RungVerdict.DEAD
     return RungVerdict.ERROR

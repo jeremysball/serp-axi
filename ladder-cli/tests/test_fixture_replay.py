@@ -4,8 +4,15 @@ Each case is a row the 100-domain run actually produced at rungs 2 to 4,
 replayed against the deterministic verdict it recorded in its ``regex``
 baseline. The page text was never checked in, only what the run recorded about
 it (character count, status, and whether a bot-check marker was in reach), so
-each case rebuilds a page carrying exactly those facts and no more. Where the
-run recorded no character count, the case says so instead of inventing one.
+each case rebuilds a page carrying exactly those facts and no more.
+
+Two facts the run did not record are marked rather than reconstructed, because
+a number that looks measured and is not is worse than a gap: rows with no
+recorded character count carry the ``UNRECORDED`` placeholder body, and rows
+where only the status was recorded carry ``None`` rather than a 200 nobody
+observed. Neither is load-bearing for the verdict the case asserts, and
+pretending otherwise would let this file drift from the evidence without
+anything noticing.
 
 Where the run's Jev classifier disagreed with that baseline, the case names the
 row. Those disagreements are the classifier's job, which lands in Phase 5;
@@ -16,9 +23,9 @@ from __future__ import annotations
 
 import pytest
 
-from ladder_cli.rungs import RungVerdict, camoufox, headed, zendriver
+from ladder_cli.rungs import MODULES, RungVerdict, camoufox, headed, zendriver
 
-MODULES = {"camoufox": camoufox, "zendriver_cf": zendriver, "zendriver_headed_cf": headed}
+MODULES_BY_WIRE = {name: module for name, module in MODULES.items() if name != "http"}
 
 # The spike's words -> ours. "thin" is the run's fourth word; it is not a
 # distinct outcome for a caller, so it climbs like any other unmet page.
@@ -31,14 +38,15 @@ VERDICTS = {
 
 CHALLENGE_TEXT = "Just a moment... checking your browser before you continue."
 BODY = "page body content "
+UNRECORDED = "length the run did not record "
 
 
 def build(chars: int | None, status: int | None, challenge: bool) -> dict:
-    filler = CHALLENGE_TEXT if challenge else BODY
-    length = chars if chars is not None else 1200
+    """A page carrying the recorded facts, with unrecorded ones marked as such."""
+    filler = CHALLENGE_TEXT if challenge else (BODY if chars is not None else UNRECORDED)
     return {
         "title": "Recorded",
-        "text": (filler * (length // len(filler) + 1))[:length],
+        "text": (filler * (chars // len(filler) + 1))[:chars] if chars is not None else filler,
         "status": status,
     }
 
@@ -49,9 +57,9 @@ def build(chars: int | None, status: int | None, challenge: bool) -> dict:
 # so those rows carry None rather than a 200 the run never observed.
 RECORDED = [
     # rung 2, camoufox
-    ("https://t77772.com/", "camoufox", 6924, 200, False, "ok", "content"),
-    ("https://burgerkingrus.ru/", "camoufox", 8636, 200, False, "ok", "content"),
-    ("https://edwardburtynsky.com/", "camoufox", 113, 200, False, "thin", "content"),
+    ("https://t77772.com/", "camoufox", 6924, None, False, "ok", "content"),
+    ("https://burgerkingrus.ru/", "camoufox", 8636, None, False, "ok", "content"),
+    ("https://edwardburtynsky.com/", "camoufox", 113, None, False, "thin", "content"),
     ("https://sdfeiyate.com/", "camoufox", None, 403, False, "blocked", None),
     ("https://789p.moe/", "camoufox", None, 403, False, "blocked", None),
     # rung 3, zendriver + Turnstile click
@@ -68,7 +76,7 @@ RECORDED = [
 def test_a_recorded_row_reads_the_same_way_it_did_in_the_measured_run(
     url: str, rung: str, chars: int | None, status: int | None, challenge: bool, spike: str, jev: str | None
 ) -> None:
-    result = MODULES[rung].judge(build(chars, status, challenge))
+    result = MODULES_BY_WIRE[rung].judge(build(chars, status, challenge))
     assert result.verdict is VERDICTS[spike], f"{url} at {rung}: the run recorded {spike}, got {result.verdict.value}"
     assert result.status == status
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import STRIP_JS, RungResult, browser_judge
+from . import STRIP_JS, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:71 `Camoufox(headless=True, humanize=True)`: `humanize` is the
 # build's own human-like input shaping, and it is the point of reaching for
@@ -50,10 +50,12 @@ def fetch(url: str) -> dict[str, Any]:
         title, text = page.evaluate(STRIP_JS)
         return {
             "title": title or "",
-            "text": text or "",
+            "text": normalize_page_text(text),
             "status": response.status if response else None,
         }
 
 
-def judge(page: dict[str, Any]) -> RungResult:
-    return browser_judge(page)
+# One binding, not three restatements. The browser rungs share a judge because
+# they see the same thing; re-wrapping it per rung would give each one its own
+# copy to drift from.
+judge = browser_judge

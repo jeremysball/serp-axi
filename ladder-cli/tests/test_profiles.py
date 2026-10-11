@@ -45,12 +45,12 @@ def test_the_profiles_directory_is_created_by_warming(tmp_path: Path) -> None:
     assert root.is_dir()
 
 
-def test_the_root_can_be_pointed_elsewhere_without_a_chdir(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv(profiles.ROOT_ENV, str(tmp_path))
-    assert profiles.root() == tmp_path
+def test_the_root_is_absolute_not_left_to_the_childs_cwd(monkeypatch, tmp_path: Path) -> None:
+    """The spike's ``os.path.abspath`` half, which the comment here cites.
 
-
-def test_the_root_defaults_to_the_measured_location(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.delenv(profiles.ROOT_ENV, raising=False)
+    A relative store is resolved by the browser against its own CWD, so the
+    warmed directory and the directory Chromium opens drift apart.
+    """
     monkeypatch.chdir(tmp_path)
-    assert profiles.root() == Path("profiles")
+    assert profiles.root() == tmp_path / "profiles"
+    assert profiles.root().is_absolute()
