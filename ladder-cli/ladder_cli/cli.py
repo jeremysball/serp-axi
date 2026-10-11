@@ -68,7 +68,7 @@ def run_rung_isolated(
             return judge(rung, page)
 
     message = _rung_error_line(err)
-    verdict = network_verdict(message)
+    verdict = network_verdict(message, rung)
     if verdict is RungVerdict.DEAD:
         return RungResult(verdict, reason=f"network: {message}")
     return RungResult(verdict, reason=message)
