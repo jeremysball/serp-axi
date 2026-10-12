@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import IO, Iterable, Sequence
 
@@ -106,6 +107,49 @@ def _response(verdict: str, rung_reached: int, result: RungResult, started: floa
     )
 
 
+def _run_rung_inline(rung: str, url: str) -> RungResult:
+    """One rung in this process, mapped the way the subprocess path maps it."""
+    try:
+        page = fetch(rung, url)
+    except Exception as error:  # noqa: BLE001 - a failed rung, never a hang
+        message = f"{type(error).__name__}: {error}"
+        return RungResult(network_verdict(message, rung), reason=message)
+    return judge(rung, page)
+
+
+def _run_rung(rung: str, url: str, runner) -> RungResult:
+    """Rung 5 runs here; rungs 1 to 4 run in their own killable subprocess.
+
+    The split is about what the budget is for. Rungs 1 to 4 launch a browser or
+    make a network fetch, and a hung one is the hazard the 90s SIGKILL bounds,
+    so they keep their own process.
+
+    Rung 5 does neither: it transcribes a clip already on disk. It runs in the
+    resident child so the model it builds on first audio need is still loaded on
+    the next fetch, which is the rung's whole point. A subprocess would rebuild
+    the model per fetch and the construction would never amortize, because
+    `python -m ladder_cli --rung whisper <url>` is a new interpreter every time.
+    """
+    if rung != "whisper":
+        return runner(rung, url)
+    budget = DEFAULT_RUNG_TIMEOUT_S
+    if not (hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()):
+        return _run_rung_inline(rung, url)
+
+    def _expire(_signum, _frame) -> None:
+        raise TimeoutError(f"rung {rung} exceeded its {budget:g}s budget")
+
+    previous = signal.signal(signal.SIGALRM, _expire)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    try:
+        return _run_rung_inline(rung, url)
+    except TimeoutError as error:
+        return RungResult(RungVerdict.BLOCKED, reason=str(error))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
     """Climb the ladder for one request.
 
@@ -129,7 +173,7 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
 
     for index, rung in enumerate(RUNGS[: request.rungCeiling]):
         rung_reached = index + 1
-        last = runner(rung, request.url)
+        last = _run_rung(rung, request.url, runner)
         if last.verdict is RungVerdict.OK and not last.text.strip():
             # Asserted by both sides; converting rather than crashing keeps the
             # resident child alive across a bad response.

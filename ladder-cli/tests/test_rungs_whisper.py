@@ -158,3 +158,83 @@ def test_the_judge_is_the_browser_rungs_own() -> None:
     result = whisper.judge({"title": "Gone", "text": "nope", "status": 404})
     assert result.verdict is RungVerdict.DEAD
 
+
+
+def _request(**overrides) -> object:
+    from ladder_cli.protocol import LadderRequest
+
+    payload = {
+        "protocol": 1,
+        "url": "https://example.com/",
+        "tabState": "fresh",
+        "cookieState": "cold",
+        "cacheState": "cold",
+        "fingerprintState": "rotate",
+        "rungCeiling": 5,
+        "profile": None,
+        "jarIn": None,
+        "jarOut": None,
+    }
+    payload.update(overrides)
+    return LadderRequest.parse(payload)
+
+
+def test_rung_five_is_never_sent_to_the_killable_subprocess(monkeypatch) -> None:
+    """The mechanism the whole claim rests on.
+
+    A subprocess runner means `python -m ladder_cli --rung whisper <url>`, a new
+    interpreter per fetch, so any model it builds dies with it. If whisper ever
+    reaches the runner, the once-per-life guarantee is gone and nothing here
+    would notice.
+    """
+    from ladder_cli.cli import dispatch
+    from ladder_cli.rungs import RungResult, RungVerdict
+
+    seen: list[str] = []
+
+    def spy(rung: str, url: str) -> RungResult:
+        seen.append(rung)
+        return RungResult(RungVerdict.BLOCKED, reason="subprocess")
+
+    monkeypatch.setattr(whisper, "fetch", lambda url: {"title": "t", "text": "x" * 900, "status": 200})
+
+    dispatch(_request(), runner=spy)
+
+    assert "whisper" not in seen, "rung 5 went to the subprocess and its model died with it"
+    assert seen == ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]
+
+
+def test_the_model_is_built_once_across_fetches_in_the_resident_child(monkeypatch) -> None:
+    """Two fetches that both need audio must not pay the construction twice.
+
+    This is the amortization the phase is for. It only holds because both
+    fetches run in the same long-lived process, which the test above pins; here
+    we pin the consequence.
+    """
+    from ladder_cli.cli import dispatch
+    from ladder_cli.rungs import RungResult, RungVerdict
+
+    class FakeModel:
+        def transcribe(self, path, **kwargs):
+            return ([Simple(text=f"Heard {path}")], None)
+
+    builds: list[dict] = []
+    monkeypatch.setattr(whisper, "_build", lambda **kwargs: builds.append(kwargs) or FakeModel())
+
+    def fetch_needing_audio(url: str) -> dict:
+        # A fetch that answers an audio clip transcribes it, which loads the model.
+        whisper.answer_rounds(["clip-1.mp3", "clip-2.mp3"])
+        return {"title": "t", "text": "x" * 900, "status": 200}
+
+    monkeypatch.setattr(whisper, "fetch", fetch_needing_audio)
+
+    def never(rung: str, url: str):
+        # Rungs 1 to 4 are meant to be isolated. Only whisper reaching here is a bug.
+        if rung == "whisper":
+            raise AssertionError("whisper must not be isolated")
+        return RungResult(RungVerdict.BLOCKED, reason="subprocess")
+
+    dispatch(_request(), runner=never)
+    dispatch(_request(), runner=never)
+
+    assert len(builds) == 1, f"the model was constructed {len(builds)} times across two fetches"
