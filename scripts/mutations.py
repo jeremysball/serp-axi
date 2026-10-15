@@ -174,6 +174,14 @@ BELIEFS: list[Belief] = [
         why='"evil-example.com".endswith("example.com") is true: lookalikes get in.',
     ),
     Belief(
+        name="the browser rungs agree on a verdict",
+        path=LADDER / "ladder_cli/rungs/whisper.py",
+        old="judge = browser_judge",
+        new='judge = lambda page: browser_judge({"title": "", "text": "", "status": 404})',
+        test="tests/test_fixture_replay.py::test_the_browser_rungs_apply_one_set_of_rules",
+        why="A page judged twice must not read differently because it climbed twice.",
+    ),
+    Belief(
         name="the filter refuses a URL it cannot scope rather than crashing",
         path=LADDER / "ladder_cli/state/jars.py",
         old=(
