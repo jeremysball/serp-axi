@@ -155,3 +155,20 @@ def test_a_multi_label_public_suffix_is_not_treated_as_the_base_domain() -> None
 
     # The target's own cookies still travel.
     assert jars.keeps("cf_clearance", ".bbc.co.uk", "https://www.bbc.co.uk/")
+
+
+def test_a_url_the_filter_cannot_scope_is_rejected_rather_than_crashed() -> None:
+    """LadderRequest.parse accepts any non-empty string, so anything can arrive.
+
+    keeps() took the host with `url.split("/")[2]`, which raises IndexError on a
+    scheme-less URL and keeps a `:port` inside the scope it computes. A filter
+    that cannot tell what site it is scoping to must refuse the cookie, not
+    crash, and must not silently widen or narrow the match either.
+    """
+    # No scheme: the host is not the third slash-separated field.
+    assert jars.keeps("cf_clearance", ".example.com", "example.com") is False
+    assert jars.keeps("cf_clearance", ".example.com", "") is False
+
+    # A port is not part of the scope and must not defeat a legitimate match.
+    assert jars.keeps("cf_clearance", ".example.com", "https://example.com:8443/") is True
+    assert jars.keeps("cf_clearance", ".example.com", "https://user:pass@example.com/") is True

@@ -174,6 +174,18 @@ BELIEFS: list[Belief] = [
         why='"evil-example.com".endswith("example.com") is true: lookalikes get in.',
     ),
     Belief(
+        name="the filter refuses a URL it cannot scope rather than crashing",
+        path=LADDER / "ladder_cli/state/jars.py",
+        old=(
+            '    if "://" not in url:' + chr(10)
+            + "        return None" + chr(10)
+            + "    return urlparse(url).hostname"
+        ),
+        new='    return url.split("/")[2]',
+        test="tests/test_jars.py::test_a_url_the_filter_cannot_scope_is_rejected_rather_than_crashed",
+        why="A raw string split raises IndexError on a scheme-less URL and keeps :port in the scope.",
+    ),
+    Belief(
         name="a multi-label public suffix is not the base domain",
         path=LADDER / "ladder_cli/state/jars.py",
         old='    if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_SUFFIXES:',

@@ -21,6 +21,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 # solver_probe.py:27 `KEEP = ("cf_clearance", "_px3", "_pxhd", "datadome")`.
 # The four defence cookies the measured run carried; anything else is a
@@ -105,17 +106,36 @@ def base_domain(host: str) -> str:
     return ".".join(labels[-2:])
 
 
+def _host_of(url: str) -> str | None:
+    """The host a URL scopes to, or None when it cannot be determined.
+
+    urllib.parse returns the hostname with the port and userinfo already
+    stripped, which is exactly the thing the scope is computed over. The
+    measured code took `url.split("/")[2]`, which raises IndexError on a
+    scheme-less URL and leaves `:8443` inside the scope so an explicit port
+    defeats a legitimate match. LadderRequest.parse accepts any non-empty
+    string, so refusing what cannot be scoped is the only safe answer: a filter
+    that cannot say what site it is guarding must not say yes.
+    """
+    if "://" not in url:
+        return None
+    return urlparse(url).hostname
+
+
 def keeps(name: str, domain: str, url: str) -> bool:
     """Whether one cookie may travel with a fetch for ``url``.
 
-    solver_probe.py:31, with one correction and the reason recorded: the spike
+    solver_probe.py:31, with two corrections and the reason recorded: the spike
     filtered on ``domain.lstrip(".").endswith(base)``, and ``"evil-example.com"
     .endswith("example.com")`` is true, so a cookie scoped to a lookalike domain
-    passed the filter. The match has to stop at a label boundary.
+    passed the filter. The match has to stop at a label boundary. And the host
+    came from a raw string split that crashed on a URL without a scheme.
     """
     if name not in KEEP:
         return False
-    host = re.sub(r"^www\.", "", url.split("/")[2]).lower()
+    host = _host_of(url)
+    if host is None:
+        return False
     base = base_domain(host)
     scope = domain.lstrip(".").lower()
     return scope == base or scope.endswith("." + base)
