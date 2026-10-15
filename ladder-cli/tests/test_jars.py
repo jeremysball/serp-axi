@@ -135,3 +135,23 @@ def test_replay_alone_is_still_expected_to_stay_blocked() -> None:
     """
     assert jars.JAR_REPLAY_EXPECTATION == "blocked"
     assert jars.JAR_REPLAY_RESCUES is False
+
+
+def test_a_multi_label_public_suffix_is_not_treated_as_the_base_domain() -> None:
+    """co.uk is a public suffix, not a site. Taking two labels makes it the base.
+
+    The measured filter scoped a cookie to `base_domain(host)`, and taking the
+    last two labels turns `www.bbc.co.uk` into `co.uk`. Every defence cookie
+    scoped to any `.co.uk` sibling then passes the filter and travels with the
+    fetch, which is the same class of bug as the lookalike domain one label
+    further out.
+    """
+    assert jars.base_domain("www.bbc.co.uk") == "bbc.co.uk"
+    assert jars.base_domain("news.bbc.co.uk") == "bbc.co.uk"
+
+    # A sibling under the same public suffix is a different site.
+    assert not jars.keeps("cf_clearance", ".other.co.uk", "https://www.bbc.co.uk/")
+    assert not jars.keeps("cf_clearance", ".co.uk", "https://www.bbc.co.uk/")
+
+    # The target's own cookies still travel.
+    assert jars.keeps("cf_clearance", ".bbc.co.uk", "https://www.bbc.co.uk/")

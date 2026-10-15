@@ -58,14 +58,51 @@ class Cookie:
     same_site: str | None = None
 
 
-def base_domain(host: str) -> str:
-    """The registrable-ish base of a host: the last two labels.
+# Two-label public suffixes. The measured filter took the last two labels as the
+# base, which turns `www.bbc.co.uk` into `co.uk` and lets every `.co.uk`
+# sibling's defence cookies travel with the fetch. A registrable domain sits
+# directly above one of these, so it takes one more label.
+#
+# This is a table, not the Public Suffix List, and that is deliberate: a PSL
+# dependency is a heavier change than this filter warrants, and a host under an
+# unlisted suffix degrades to the two-label rule (a narrower scope than measured)
+# rather than to a wrongly wide one. Widening is the failure that matters here.
+MULTI_LABEL_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
+        "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
+        "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp",
+        "com.br", "net.br", "org.br", "gov.br",
+        "com.cn", "net.cn", "org.cn", "gov.cn",
+        "com.mx", "org.mx", "gob.mx",
+        "co.in", "net.in", "org.in", "gov.in",
+        "co.za", "org.za", "gov.za",
+        "com.tr", "org.tr", "gov.tr",
+        "com.tw", "org.tw", "gov.tw",
+        "com.hk", "org.hk", "gov.hk",
+        "com.sg", "org.sg", "gov.sg",
+        "co.kr", "or.kr", "go.kr",
+        "com.ar", "org.ar", "gob.ar",
+        "com.pl", "org.pl", "gov.pl",
+    }
+)
 
-    solver_probe.py:30 `".".join(host.split(".")[-2:])`, with the scheme and
-    path stripped the way solver_probe.py:29 does for its own URLs.
+
+def base_domain(host: str) -> str:
+    """The registrable base of a host: above a public suffix, not below it.
+
+    solver_probe.py:30 `".".join(host.split(".")[-2:])` is the measured rule, and
+    it is right for a two-label registrable domain and wrong for a host under a
+    two-label public suffix. Corrected here with the reason recorded beside it:
+    the allowlist and the base-domain scope are measured, this predicate is the
+    part that got the scope wrong.
     """
     host = re.sub(r"^www\.", "", host.split("/")[0]).lower()
-    return ".".join(host.split(".")[-2:])
+    labels = host.split(".")
+    if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
 
 
 def keeps(name: str, domain: str, url: str) -> bool:
