@@ -82,12 +82,21 @@ def test_a_recorded_row_reads_the_same_way_it_did_in_the_measured_run(
 
 
 @pytest.mark.parametrize("url,rung,chars,status,challenge,spike,jev", RECORDED)
-def test_all_three_browser_rungs_apply_one_set_of_rules(
+def test_the_browser_rungs_apply_one_set_of_rules(
     url: str, rung: str, chars: int | None, status: int | None, challenge: bool, spike: str, jev: str | None
 ) -> None:
-    """A page judged twice must not read differently because it climbed twice."""
+    """A page judged twice must not read differently because it climbed twice.
+
+    This sweeps the browser rungs, not every module. `http` is deliberately a
+    different rule set (rungs/__init__.py:12-13): rung 1 is the cheap fetch and
+    its verdicts come from the network, not from reading a page. Sweeping all of
+    MODULES.values() made this test fail for a reason unrelated to its purpose
+    the moment http's judge diverged as designed, and it stopped naming what it
+    covers when rung 5 joined the registry.
+    """
     page = build(chars, status, challenge)
-    verdicts = {module.judge(page).verdict for module in MODULES.values()}
+    browser = [module for name, module in MODULES.items() if name != "http"]
+    verdicts = {module.judge(page).verdict for module in browser}
     assert len(verdicts) == 1, f"the browser rungs disagree about {url}"
 
 

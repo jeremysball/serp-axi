@@ -131,18 +131,54 @@ is completable with flags alone.
 The free SearXNG search path is wired in (`--provider searxng`). The escalation
 ladder for fetching pages behind the links is live for rung 1.
 
-`--ladder` runs the rung-1 fetch through a resident `ladder-cli` child over
-stdio, free and with no API key. Rungs 2 to 5 (the browser rungs for challenge
-pages and JS shells), and the rung-5 classifier, are not built yet, so a page
-that survives rung 1 reports `blocked` rather than being fetched:
+`--ladder` runs the fetch through a resident `ladder-cli` child over stdio, free
+and with no API key. The climb has five rungs and escalates only as far as it
+needs to:
+
+| rung | what it does | state |
+| --- | --- | --- |
+| 1 | site API where one exists, else `primp` with browser impersonation | live |
+| 2 | Camoufox, a patched Firefox with `humanize` | live |
+| 3 | zendriver with a Turnstile click | live |
+| 4 | headed Chromium under Xvfb | live |
+| 5 | Whisper `base.en` on an audio reCAPTCHA, the rung-4 fallback | audio half built, browser half pending |
+
+So a page that rung 1 answers is fetched at rung 1's cost, and a page behind a
+challenge is tried in a browser. Rung 5's audio solve is not wired yet, so an
+audio reCAPTCHA comes back `blocked` rather than being answered.
 
 ```
 serp-axi scrape https://example.com/article --ladder
 ```
 
-Ladder axes (`--tab-state`, `--cookie-state`, `--cache-state`,
-`--fingerprint-state`, `--rung-ceiling`, `--profile`, `--jar-in`, `--jar-out`)
-each read a flag, then an env var, then the config file, then a profile bundle.
+## Ladder flags
+
+These only work with `--ladder`, and they are rejected elsewhere so a typo is
+never parsed and silently ignored. Each resolves flag, then env, then config
+file, then a `--profile` bundle.
+
+| flag | values | what it sets |
+| --- | --- | --- |
+| `--tab-state` | `fresh` (default), `same` | whether the tab is new |
+| `--cookie-state` | `cold` (default), `jar` | `jar` is sugar for a jar in and out on one path |
+| `--cache-state` | `cold` (default), `warm` | whether the cache is kept |
+| `--fingerprint-state` | `rotate` (default), `stable` | whether the fingerprint is held |
+| `--rung-ceiling` | `1` to `5` (default `5`) | highest rung to attempt; hitting it reports `blocked` |
+| `--profile` | a name from `ladderProfiles` | a named bundle of the axes above |
+| `--jar-in` | a path | cookie jar to load before fetching |
+| `--jar-out` | a path | cookie jar to save after fetching |
+
+`--jar-in` and `--jar-out` stay separate from `--cookie-state` on purpose.
+Replay is a known-unmet goal: the measured run loaded a jar into a fresh
+browser three times and every one came back a challenge page. Keeping the two
+paths separate is what lets a caller find out for itself whether replay helped
+that site.
+
+Jar contents are filtered before they are written and again before they are
+loaded, to the four defence cookies (`cf_clearance`, `_px3`, `_pxhd`,
+`datadome`) scoped to the target's base domain. A warmed profile holds every
+site's cookies, so only the target's own leave with the fetch.
+
 The scored verdicts are `ok`, `dead`, `blocked`, and `error`, where `error`
 means the climb ran out of rungs with no page ever judged. The single rung
 budget is 90 seconds under SIGKILL, inside the request budget of 120 seconds.

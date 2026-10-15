@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol as TypingProtocol
 
-# Dependency order. Phase 4 adds whisper for audio challenges.
-RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")
+# Dependency order. Rung 5 is the rung-4 fallback, so it comes last.
+RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf", "whisper")
 
 # ladder.py:18. Drop the elements that are not the page, then read what is left.
 # Camoufox's Playwright calls it for you; zendriver has to be handed a call
@@ -108,13 +108,14 @@ def browser_judge(page: dict[str, Any]) -> RungResult:
 # would start a cycle. ``http`` comes first because browser_judge reads the
 # page-shape vocabulary it owns.
 from . import http  # noqa: E402
-from . import camoufox, headed, zendriver  # noqa: E402
+from . import camoufox, headed, whisper, zendriver  # noqa: E402
 
 MODULES: dict[str, RungModule] = {
     "http": http,
     "camoufox": camoufox,
     "zendriver_cf": zendriver,
     "zendriver_headed_cf": headed,
+    "whisper": whisper,
 }
 
 

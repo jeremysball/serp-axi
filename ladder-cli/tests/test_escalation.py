@@ -18,8 +18,11 @@ from ladder_cli.rungs import MODULES, RUNGS, RungVerdict
 
 
 def test_the_climb_starts_cheap_and_only_reaches_for_a_browser_when_it_must() -> None:
-    # ladder.py:15 `RUNGS = ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]`
-    assert RUNGS == ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")
+    # ladder.py:15 `RUNGS = ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]`.
+    # One more than the spike: 04-tdd 1.4 puts Whisper in the ladder as the
+    # rung-4 fallback, which the measured run kept as a separate harness.
+    assert RUNGS == ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf", "whisper")
+    assert len(RUNGS) == 5, "rungCeiling 5 must have a rung 5 to stop at"
 
 
 def test_rung_one_is_still_the_only_free_rung() -> None:
