@@ -53,3 +53,12 @@ jobs:
         # H1/H12 shape the plan exists to avoid.
         working-directory: ladder-cli
         run: uv run --frozen --extra test pytest -q
+
+      - name: Run the named mutation gate
+        # A green suite only says the tests that exist still pass. This leg says
+        # which BELIEFS that suite holds, falsifies each one in turn, and fails
+        # the build when a belief survives (a hollow test, asserted but not
+        # enforced) or when a belief can no longer be applied (the code moved and
+        # the claim did not). This is the check that a passing suite cannot
+        # perform on itself.
+        run: python3 scripts/mutations.py
