@@ -40,7 +40,11 @@ export function createAppOptions(
       "THIS IS GOOGLE. Runs real Google Search via Serper, Bright Data (api.brightdata.com), " +
       "or free via a SearXNG instance (--provider searxng, no API key), live search results " +
       "(title/link/snippet). Also searches Kagi (kagi.com) with --provider kagi, against your own " +
-      "subscription. Plus page-scrape text extraction via Serper or Bright Data.",
+      "subscription. Plus page-scrape text extraction via Serper or Bright Data.\n" +
+      "\n" +
+      "This is TOON: every command emits TOON (Token-Oriented Object Notation), not JSON. Decode with:\n" +
+      "  node --input-type=module -e 'import {readFileSync} from \"node:fs\"; import {decode} from \"@toon-format/toon\"; console.log(JSON.stringify(decode(readFileSync(0,\"utf8\"))))'\n" +
+      "(needs @toon-format/toon on the resolution path — e.g. run it inside a serp-axi repo checkout, or npm i @toon-format/toon first)",
     version: VERSION,
     execPath: fileURLToPath(execUrl),
     homeDir: overrides.homeDir ?? os.homedir(),
