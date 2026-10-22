@@ -115,7 +115,7 @@ def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monk
     monkeypatch.setattr(headed, "display_is_free", lambda number: number != _own_slot())
     monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
     monkeypatch.delenv("DISPLAY", raising=False)
-    monkeypatch.setattr(zendriver, "climb", lambda url, options: {"title": "", "text": "", "status": None})
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"title": "", "text": "", "status": None})
 
     with headed.display("https://example.com/", headed.launch_options()):
         seen["slot"] = int(process.argv[1].lstrip(":"))
@@ -181,7 +181,7 @@ def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(mon
         headed.fetch("https://example.com/")
 
 
-def _boom(url: str, options: dict) -> dict:
+def _boom(url: str, options: dict, ctx=None) -> dict:
     raise AssertionError("the climb must not start against a display that died")
 
 
@@ -238,7 +238,7 @@ def test_the_display_is_reaped_on_success_too(monkeypatch) -> None:
     monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
     monkeypatch.delenv("DISPLAY", raising=False)
 
-    def fake_climb(url: str, options: dict) -> dict:
+    def fake_climb(url: str, options: dict, ctx=None) -> dict:
         seen["url"] = url
         seen["options"] = options
         seen["display"] = os.environ.get("DISPLAY")

@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from . import RungResult, zendriver
+from . import RungContext, RungResult, zendriver
 
 # ladder.py:82 `headless=not headed` with headed True
 HEADLESS = False
@@ -67,7 +67,7 @@ def xvfb_command(number: int) -> list[str]:
 
 
 @contextlib.contextmanager
-def display(url: str, options: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def display(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> Iterator[dict[str, Any]]:
     """Bring up a private display, and take it down again afterwards.
 
     Xvfb is spawned, given the measured settle, and *checked* before the
@@ -86,7 +86,7 @@ def display(url: str, options: dict[str, Any]) -> Iterator[dict[str, Any]]:
     try:
         _await_display(number, process)
         os.environ["DISPLAY"] = f":{number}"
-        yield zendriver.climb(url, options)
+        yield zendriver.climb(url, options, ctx)
     finally:
         if previous is None:
             os.environ.pop("DISPLAY", None)
@@ -119,9 +119,9 @@ def launch_options() -> dict[str, Any]:
     return {**zendriver.launch_options(), "headless": HEADLESS}
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise."""
-    with display(url, launch_options()) as page:
+    with display(url, launch_options(), ctx) as page:
         return page
 
 

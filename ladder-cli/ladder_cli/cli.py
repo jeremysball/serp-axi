@@ -14,11 +14,13 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 from typing import IO, Iterable, Sequence
 
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
-from .rungs import RUNGS, RungResult, RungVerdict, fetch, judge, network_verdict
+from .rungs import RUNGS, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
 
 # One budget, owned by the code that enforces it: a rung is SIGKILLed at 90s.
 # It used to be overridable from the environment, which made two owners of one
@@ -27,20 +29,61 @@ from .rungs import RUNGS, RungResult, RungVerdict, fetch, judge, network_verdict
 DEFAULT_RUNG_TIMEOUT_S = 90.0
 
 
+def _jar_args(ctx: RungContext | None) -> list[str]:
+    """The child's jar flags, omitted when the request carries no jar."""
+    if ctx is None:
+        return []
+    args: list[str] = []
+    if ctx.jar_in is not None:
+        args += ["--jar-in", str(ctx.jar_in)]
+    if ctx.jar_out is not None:
+        args += ["--jar-out", str(ctx.jar_out)]
+    return args
+
+
+def _context_from(args: Sequence[str]) -> RungContext:
+    """Read the jar flags the parent appended to the child's argv."""
+    jar_in: Path | None = None
+    jar_out: Path | None = None
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag in ("--jar-in", "--jar-out") and index + 1 < len(args):
+            value = args[index + 1]
+            if flag == "--jar-in":
+                jar_in = Path(value)
+            else:
+                jar_out = Path(value)
+            index += 2
+            continue
+        index += 1
+    return RungContext(jar_in=jar_in, jar_out=jar_out)
+
+
 def run_rung_isolated(
     rung: str,
     url: str,
     timeout_s: float | None = None,
     argv: Sequence[str] | None = None,
+    ctx: RungContext | None = None,
 ) -> RungResult:
     """Run one rung as a subprocess under a hard time budget.
 
     A subprocess is what makes the budget enforceable: it is the thing that can
     be SIGKILLed. The child is started in its own session so the kill reaches
     whatever it spawned underneath it, matching ladder.py:180.
+
+    The jar flags are part of the child's argv because the jar is per request
+    and the child's own arguments are how one request's paths reach it. A
+    custom ``argv`` is a complete command (the tests use one to fake a child),
+    so it is passed through untouched.
     """
     budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s
-    command = list(argv) if argv is not None else [sys.executable, "-m", "ladder_cli", "--rung", rung, url]
+    command = (
+        list(argv)
+        if argv is not None
+        else [sys.executable, "-m", "ladder_cli", "--rung", rung, url, *_jar_args(ctx)]
+    )
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -106,6 +149,49 @@ def _response(verdict: str, rung_reached: int, result: RungResult, started: floa
     )
 
 
+def _run_rung_inline(rung: str, url: str, ctx: RungContext | None = None) -> RungResult:
+    """One rung in this process, mapped the way the subprocess path maps it."""
+    try:
+        page = fetch(rung, url, ctx)
+    except Exception as error:  # noqa: BLE001 - a failed rung, never a hang
+        message = f"{type(error).__name__}: {error}"
+        return RungResult(network_verdict(message, rung), reason=message)
+    return judge(rung, page)
+
+
+def _run_rung(rung: str, url: str, runner, ctx: RungContext | None = None) -> RungResult:
+    """Rung 5 runs here; rungs 1 to 4 run in their own killable subprocess.
+
+    The split is about what the budget is for. Rungs 1 to 4 launch a browser or
+    make a network fetch, and a hung one is the hazard the 90s SIGKILL bounds,
+    so they keep their own process.
+
+    Rung 5 does neither: it transcribes a clip already on disk. It runs in the
+    resident child so the model it builds on first audio need is still loaded on
+    the next fetch, which is the rung's whole point. A subprocess would rebuild
+    the model per fetch and the construction would never amortize, because
+    `python -m ladder_cli --rung whisper <url>` is a new interpreter every time.
+    """
+    if rung != "whisper":
+        return runner(rung, url, ctx=ctx)
+    budget = DEFAULT_RUNG_TIMEOUT_S
+    if not (hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()):
+        return _run_rung_inline(rung, url, ctx)
+
+    def _expire(_signum, _frame) -> None:
+        raise TimeoutError(f"rung {rung} exceeded its {budget:g}s budget")
+
+    previous = signal.signal(signal.SIGALRM, _expire)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    try:
+        return _run_rung_inline(rung, url, ctx)
+    except TimeoutError as error:
+        return RungResult(RungVerdict.BLOCKED, reason=str(error))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
     """Climb the ladder for one request.
 
@@ -123,13 +209,17 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
     """
     if runner is None:
         runner = run_rung_isolated
+    ctx = RungContext(
+        jar_in=Path(request.jarIn) if request.jarIn is not None else None,
+        jar_out=Path(request.jarOut) if request.jarOut is not None else None,
+    )
     started = time.monotonic()
     rung_reached = 0
     last: RungResult | None = None
 
     for index, rung in enumerate(RUNGS[: request.rungCeiling]):
         rung_reached = index + 1
-        last = runner(rung, request.url)
+        last = _run_rung(rung, request.url, runner, ctx)
         if last.verdict is RungVerdict.OK and not last.text.strip():
             # Asserted by both sides; converting rather than crashing keeps the
             # resident child alive across a bad response.
@@ -160,9 +250,9 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
     return _response("blocked", rung_reached, last, started)
 
 
-def _run_rung_child(rung: str, url: str, stdout: IO[str], stderr: IO[str]) -> int:
+def _run_rung_child(rung: str, url: str, stdout: IO[str], stderr: IO[str], ctx: RungContext | None = None) -> int:
     try:
-        page = fetch(rung, url)
+        page = fetch(rung, url, ctx)
     except Exception as error:  # noqa: BLE001 - the parent maps the message, not the type
         print(f"{type(error).__name__}: {error}", file=stderr, flush=True)
         return 1
@@ -201,7 +291,7 @@ def main(
     stderr = sys.stderr if stderr is None else stderr
 
     if len(args) >= 3 and args[0] == "--rung":
-        return _run_rung_child(args[1], args[2], stdout, stderr)
+        return _run_rung_child(args[1], args[2], stdout, stderr, _context_from(args[3:]))
 
     # Readiness is announced before the first read, so no caller ever sleeps a
     # fixed interval and hopes. Anything the parent writes before this line is

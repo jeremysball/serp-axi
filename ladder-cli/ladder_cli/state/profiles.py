@@ -6,9 +6,10 @@ kept one user-data directory per headed-ness (ladder.py:82), not one per
 request.
 
 One directory per *named* profile is not here on purpose. A rung is handed a
-URL and nothing else (``fetch(url)``), so it cannot tell which ``--profile``
-the caller asked for; that split belongs where the request is known, and
-putting a half of it here would leave a layout nothing reads.
+URL and a request context (``fetch(url, ctx)``), and that context carries the
+two jar paths but not the ``--profile`` name; so a rung cannot tell which named
+profile the caller asked for. That split belongs where the request is known,
+and putting a half of it here would leave a layout nothing reads.
 """
 
 from __future__ import annotations

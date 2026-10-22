@@ -119,13 +119,16 @@ port would shell out to Python for the hard parts.
 
 - Warmed browser profiles, one directory per profile, reused across requests
   for the CLI's whole life.
-- Cookie jars (`<name>.cookies.dat`), written because Chrome flushes lazily
+- Cookie jars (`<name>.cookies.json`), written because Chrome flushes lazily
   and `stop()` kills first (verified comment at
   `spikes/scrape-2026-10-03/harness/solver_probe.py:85`). Jar contents stay
   filtered to the target's base domain against the `cf_clearance / _px3 /
   _pxhd / datadome` allowlist (verified at `solver_probe.py:27-33`), which is
   why there is no per-host scoping knob: the leakage it would prevent is not
-  reachable, and per-host persistence reintroduces the same-tab failure.
+  reachable, and per-host persistence reintroduces the same-tab failure. The
+  measured run reused zendriver's own `<name>.cookies.dat`, which is a pickle;
+  this module writes JSON, so it takes a JSON name rather than claiming that
+  path (phase 4 correction).
 - The Whisper model weights, loaded once per CLI life.
 - No database, no queue, no cache service. There are no stored-data queries
   to index; this section exists to say so explicitly.

@@ -13,9 +13,11 @@ from the page, not from a code.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
-from . import STRIP_JS, RungResult, browser_judge, normalize_page_text
+from ..state import jars, profiles
+from . import RungContext, STRIP_JS, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:15 rung name `zendriver_cf`
 HEADLESS = True
@@ -48,33 +50,86 @@ def cf_options() -> dict[str, Any]:
     return {"click_delay": CF_CLICK_DELAY_S, "timeout": CF_TIMEOUT_S}
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise."""
-    return climb(url, launch_options())
+    return climb(url, launch_options(), ctx)
 
 
-def climb(url: str, options: dict[str, Any]) -> dict[str, Any]:
+def prepare_profile(headed: bool) -> Path:
+    """Warm the profile this head uses, then clear a killed run's locks.
+
+    H4 (solver_probe.py:35): a SIGKILLed browser leaves its profile lock behind
+    and the next launch stalls on a lock whose owner is already gone, which
+    reads as a hang rather than a stale file. The spike cleared the locks before
+    every launch (solver_probe.py:122) and this is the production path that
+    does the same, rather than a helper the suite tested and nothing called.
+    """
+    user_data_dir = profiles.warm(profiles.zendriver_dir(profiles.root(), headed=headed))
+    jars.clear_locks(user_data_dir)
+    return user_data_dir
+
+
+def climb(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> dict[str, Any]:
     """The fetch rungs 3 and 4 share; only the launch options differ.
 
     Public because rung 4 is this same climb with a different head, and a
     sibling reaching for a private name would be the two halves drifting apart
     under cover of a name that says "not yours".
     """
-    return asyncio.run(_fetch(url, options))
+    return asyncio.run(_fetch(url, options, ctx))
 
 
-async def _fetch(url: str, options: dict[str, Any]) -> dict[str, Any]:
+def _jar_cookie(cookie: Any) -> jars.Cookie:
+    """A browser cookie as the jar's own record, keeping what replay needs."""
+    same_site = getattr(cookie, "same_site", None)
+    return jars.Cookie(
+        name=cookie.name,
+        domain=cookie.domain,
+        value=cookie.value,
+        expires=getattr(cookie, "expires", None),
+        secure=bool(getattr(cookie, "secure", False)),
+        same_site=getattr(same_site, "value", same_site),
+        path=getattr(cookie, "path", "/") or "/",
+        http_only=bool(getattr(cookie, "http_only", False)),
+    )
+
+
+def _cookie_param(cookie: jars.Cookie) -> Any:
+    """A jar record as a CDP ``CookieParam``, the shape ``set_all`` sends.
+
+    Deferred like every other zendriver touch so importing this module does not
+    require the browser extra. A jar field the CDP type cannot represent is
+    raised rather than dropped: a silently narrowed cookie is a replay that
+    looks like it ran and did not.
+    """
+    from zendriver.cdp.network import CookieParam, CookieSameSite, TimeSinceEpoch
+
+    fields: dict[str, Any] = {
+        "name": cookie.name,
+        "value": cookie.value,
+        "domain": cookie.domain,
+        "path": cookie.path,
+        "secure": cookie.secure,
+        "http_only": cookie.http_only,
+    }
+    if cookie.expires is not None:
+        fields["expires"] = TimeSinceEpoch(cookie.expires)
+    if cookie.same_site is not None:
+        fields["same_site"] = CookieSameSite(cookie.same_site)
+    return CookieParam(**fields)
+
+
+async def _fetch(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> dict[str, Any]:
     import zendriver
 
-    from ..state import profiles
-
     headed = not options["headless"]
-    # ladder.py:82 `user_data_dir=os.path.abspath(f"profiles/zd{'_headed' if headed else ''}")`.
-    # Warmed once and reused for the CLI's whole life, so the second request on a
-    # profile does not pay the first one's cold start.
-    user_data_dir = profiles.warm(profiles.zendriver_dir(profiles.root(), headed=headed))
+    user_data_dir = prepare_profile(headed)
     browser = await zendriver.start(user_data_dir=str(user_data_dir), **options)
     try:
+        if ctx is not None and ctx.jar_in is not None:
+            carried = jars.load(ctx.jar_in, url)
+            if carried:
+                await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])
         tab = await browser.get(url)
         await tab.sleep(SETTLE_S)
         try:
@@ -83,6 +138,11 @@ async def _fetch(url: str, options: dict[str, Any]) -> dict[str, Any]:
             pass
         await tab.sleep(SETTLE_S)
         title, text = await tab.evaluate(TEXT_EXPRESSION)
+        if ctx is not None and ctx.jar_out is not None:
+            # Before stop(): Chrome flushes cookies lazily and stop() kills it
+            # first (solver_probe.py:85), which is why the jar exists at all.
+            earned = await browser.cookies.get_all()
+            jars.save(ctx.jar_out, (_jar_cookie(cookie) for cookie in earned), url)
         return {"title": title or "", "text": normalize_page_text(text), "status": None}
     finally:
         await browser.stop()
