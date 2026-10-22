@@ -17,7 +17,7 @@ def sequence(*results: RungResult):
     queue = list(results)
     calls: list[str] = []
 
-    def fake(rung: str, url: str) -> RungResult:
+    def fake(rung: str, url: str, ctx=None) -> RungResult:
         calls.append(rung)
         return queue.pop(0)
 
@@ -243,3 +243,85 @@ def test_a_browser_tool_is_not_imported_before_anything_needs_it() -> None:
     # module scope made the resident child owe its ready line before it had
     # touched a browser, so the import moved inside the client that uses it.
     assert "primp" not in sys.modules, "importing the ladder pulled in a browser tool it has not asked for"
+
+
+def test_the_requests_jar_paths_reach_the_runner(make_request, monkeypatch) -> None:
+    """The parent sent `jarIn`/`jarOut` and dispatch dropped them on the floor.
+
+    README documented both flags as working while no rung read either field.
+    This pins the first hop: the request's paths become the context the runner
+    is given.
+    """
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake(rung: str, url: str, ctx=None) -> RungResult:
+        seen["ctx"] = ctx
+        return ok_result()
+
+    monkeypatch.setattr(cli, "RUNGS", ("http",))
+
+    cli.dispatch(make_request(jarIn="/work/in.cookies.json", jarOut="/work/out.cookies.json"), runner=fake)
+
+    assert seen["ctx"] == RungContext(
+        jar_in=Path("/work/in.cookies.json"),
+        jar_out=Path("/work/out.cookies.json"),
+    )
+
+
+def test_an_isolated_child_is_told_the_jars_on_its_command_line(monkeypatch) -> None:
+    """A subprocess cannot see the parent's memory; its argv is the handoff."""
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    commands: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            commands.append(command)
+            self.pid = 4242
+
+        def communicate(self, timeout: float | None = None):
+            return ('{"title": "T", "text": "body", "status": 200}\n', "")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", FakeProcess)
+
+    cli.run_rung_isolated(
+        "http",
+        "https://example.com/",
+        timeout_s=5,
+        ctx=RungContext(jar_in=Path("/j/in.json"), jar_out=Path("/j/out.json")),
+    )
+    cli.run_rung_isolated("http", "https://example.com/", timeout_s=5)
+
+    assert commands[0][-4:] == ["--jar-in", "/j/in.json", "--jar-out", "/j/out.json"]
+    assert "--jar-in" not in commands[1], "no jar, no flags: the child's argv stays what it was"
+
+
+def test_the_rung_child_reads_the_jar_flags_back_without_mistaking_them_for_the_url(monkeypatch) -> None:
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake_child(rung, url, stdout, stderr, ctx=None):
+        seen["call"] = (rung, url, ctx)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_rung_child", fake_child)
+
+    cli.main(
+        ["--rung", "http", "https://example.com/", "--jar-in", "/j/in.json", "--jar-out", "/j/out.json"],
+        stdout=io.StringIO(),
+    )
+
+    assert seen["call"] == (
+        "http",
+        "https://example.com/",
+        RungContext(jar_in=Path("/j/in.json"), jar_out=Path("/j/out.json")),
+    )

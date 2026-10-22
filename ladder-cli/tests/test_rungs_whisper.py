@@ -128,6 +128,26 @@ def test_the_measured_loop_stops_at_three_clips_no_matter_how_many_are_offered(m
     assert answers == ["clip cl0", "clip cl1", "clip cl2"]
 
 
+def test_the_round_budget_does_not_drain_a_lazy_clip_producer(monkeypatch) -> None:
+    """`list(clips)[:3]` materialised the whole producer before slicing it.
+
+    A challenge offering more clips than the three the run answers would pay to
+    discover every one of them. `islice` reads exactly the budget.
+    """
+    monkeypatch.setattr(whisper, "transcribe", lambda path: f"Clip {path}")
+    pulled: list[int] = []
+
+    def clips():
+        for index in range(10):
+            pulled.append(index)
+            yield f"cl{index}"
+
+    answers = whisper.answer_rounds(clips())
+
+    assert answers == ["clip cl0", "clip cl1", "clip cl2"]
+    assert pulled == [0, 1, 2], f"the producer was pulled {len(pulled)} times for a 3-round budget"
+
+
 def test_a_model_that_fails_to_build_does_not_leave_a_broken_rung_hanging(monkeypatch) -> None:
     """A missing optional dependency is a rung that cannot answer, not a crash.
 
@@ -192,11 +212,11 @@ def test_rung_five_is_never_sent_to_the_killable_subprocess(monkeypatch) -> None
 
     seen: list[str] = []
 
-    def spy(rung: str, url: str) -> RungResult:
+    def spy(rung: str, url: str, ctx=None) -> RungResult:
         seen.append(rung)
         return RungResult(RungVerdict.BLOCKED, reason="subprocess")
 
-    monkeypatch.setattr(whisper, "fetch", lambda url: {"title": "t", "text": "x" * 900, "status": 200})
+    monkeypatch.setattr(whisper, "fetch", lambda url, ctx=None: {"title": "t", "text": "x" * 900, "status": 200})
 
     dispatch(_request(), runner=spy)
 
@@ -221,14 +241,14 @@ def test_the_model_is_built_once_across_fetches_in_the_resident_child(monkeypatc
     builds: list[dict] = []
     monkeypatch.setattr(whisper, "_build", lambda **kwargs: builds.append(kwargs) or FakeModel())
 
-    def fetch_needing_audio(url: str) -> dict:
+    def fetch_needing_audio(url: str, ctx=None) -> dict:
         # A fetch that answers an audio clip transcribes it, which loads the model.
         whisper.answer_rounds(["clip-1.mp3", "clip-2.mp3"])
         return {"title": "t", "text": "x" * 900, "status": 200}
 
     monkeypatch.setattr(whisper, "fetch", fetch_needing_audio)
 
-    def never(rung: str, url: str):
+    def never(rung: str, url: str, ctx=None):
         # Rungs 1 to 4 are meant to be isolated. Only whisper reaching here is a bug.
         if rung == "whisper":
             raise AssertionError("whisper must not be isolated")

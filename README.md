@@ -129,7 +129,8 @@ is completable with flags alone.
 ## In progress: scraping escalation ladder
 
 The free SearXNG search path is wired in (`--provider searxng`). The escalation
-ladder for fetching pages behind the links is live for rung 1.
+ladder for fetching pages behind the links is live for rungs 1 to 4; rung 5's
+audio solve is not wired yet.
 
 `--ladder` runs the fetch through a resident `ladder-cli` child over stdio, free
 and with no API key. The climb has five rungs and escalates only as far as it
@@ -165,14 +166,19 @@ file, then a `--profile` bundle.
 | `--fingerprint-state` | `rotate` (default), `stable` | whether the fingerprint is held |
 | `--rung-ceiling` | `1` to `5` (default `5`) | highest rung to attempt; hitting it reports `blocked` |
 | `--profile` | a name from `ladderProfiles` | a named bundle of the axes above |
-| `--jar-in` | a path | cookie jar to load before fetching |
-| `--jar-out` | a path | cookie jar to save after fetching |
+| `--jar-in` | a path | cookie jar loaded into the first browser rung that runs |
+| `--jar-out` | a path | cookie jar saved by that browser before it stops |
 
 `--jar-in` and `--jar-out` stay separate from `--cookie-state` on purpose.
 Replay is a known-unmet goal: the measured run loaded a jar into a fresh
 browser three times and every one came back a challenge page. Keeping the two
 paths separate is what lets a caller find out for itself whether replay helped
 that site.
+
+A jar only travels through a browser: rung 1 has no cookies, so a climb that
+rung 1 answers reads no jar in and writes no jar out. The file is JSON, named
+`<name>.cookies.json`; zendriver's own `.cookies.dat` is a pickle and the two
+never share a path.
 
 Jar contents are filtered before they are written and again before they are
 loaded, to the four defence cookies (`cf_clearance`, `_px3`, `_pxhd`,
@@ -233,7 +239,8 @@ after that goes through OIDC only.
 - `search` (all four providers, including SearXNG) and `scrape` are exercised
   against their endpoints in this repo's test suite; Serper, Bright Data,
   Kagi, and a local SearXNG were run live during development.
-- The fetch escalation ladder is measured but not implemented.
+- The fetch escalation ladder is implemented for rungs 1 to 4 (browser rungs
+  need the `browsers` extra); rung 5's browser half is pending.
   See "In progress" above.
 - No npm-registry version check is implemented yet (`update` is a static
   reminder, not a live lookup).

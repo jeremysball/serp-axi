@@ -77,6 +77,27 @@ def test_a_jar_round_trips_so_the_caller_can_find_out_whether_replay_helps(tmp_p
     assert jars.load(path, "https://example.com/") == out
 
 
+def test_a_replayed_cookie_keeps_its_path_and_http_only_flag(tmp_path: Path) -> None:
+    """A `cf_clearance` replayed without its path is not the cookie earned.
+
+    zendriver's `CookieParam` carries both, so a jar that dropped them would
+    still load and still be wrong in a way no other test would see.
+    """
+    earned = jars.Cookie(
+        name="cf_clearance",
+        domain=".example.com",
+        value="cleared",
+        secure=True,
+        same_site="Lax",
+        path="/account",
+        http_only=True,
+    )
+    path = jars.path_for(tmp_path, "warm")
+    jars.save(path, [earned], "https://example.com/")
+
+    assert jars.load(path, "https://example.com/") == [earned]
+
+
 def test_loading_a_jar_re_applies_the_filter_rather_than_trusting_the_file(tmp_path: Path) -> None:
     """A jar is data on disk; anything can widen one by hand."""
     import json
@@ -98,9 +119,13 @@ def test_a_jar_written_for_one_site_is_not_replayed_onto_another(tmp_path: Path)
     assert jars.load(path, "https://other.com/") == [], "the filter runs at load time too"
 
 
-def test_the_jar_path_is_named_after_the_profile() -> None:
-    # solver_probe.py:86 `os.path.join(PROFILES, name + ".cookies.dat")`
-    assert jars.path_for(Path("/p"), "zendriver_cf") == Path("/p") / "zendriver_cf.cookies.dat"
+def test_the_jar_path_is_named_after_the_profile_and_says_json() -> None:
+    """The measured run reused zendriver's `.cookies.dat`, which is a pickle.
+
+    This module writes JSON, so it takes a JSON name: two formats must not
+    claim one path, and a jar a human opens should say which format it is.
+    """
+    assert jars.path_for(Path("/p"), "zendriver_cf") == Path("/p") / "zendriver_cf.cookies.json"
 
 
 def test_a_killed_browser_leaves_no_lock_behind_for_the_next_launch(tmp_path: Path) -> None:

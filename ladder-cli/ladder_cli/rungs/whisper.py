@@ -21,9 +21,10 @@ comes back ``blocked``, exactly as rung 4 left it.
 from __future__ import annotations
 
 import re
+from itertools import islice
 from typing import Any
 
-from . import RungResult, browser_judge
+from . import RungContext, RungResult, browser_judge
 
 # q5_audio.py:44 `WhisperModel("base.en", device="cpu", compute_type="int8")`.
 # The small English model on CPU in int8: the clip is short spoken digits and
@@ -101,11 +102,16 @@ def answer_rounds(clips: Any) -> list[str]:
     The measured loop's shape (q5_audio.py:42-48): one clip per round, each
     transcribed and typed back, stopping at three because the challenge
     sometimes asks for more than one and three is where the run stopped.
+
+    ``islice`` reads exactly the budget and no more. Materializing the iterable
+    first (``list(clips)[:MAX_ROUNDS]``) drained a lazy producer past the
+    three-round budget, so a challenge that offered more clips paid to discover
+    them even though the run never answered one.
     """
-    return [answer_for(transcribe(clip)) for clip in list(clips)[:MAX_ROUNDS]]
+    return [answer_for(transcribe(clip)) for clip in islice(clips, MAX_ROUNDS)]
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise.
 
     Rung 5 is rung 4's fallback rather than a different fetcher: it climbs to
@@ -116,7 +122,7 @@ def fetch(url: str) -> dict[str, Any]:
     """
     from . import headed
 
-    return headed.fetch(url)
+    return headed.fetch(url, ctx)
 
 
 judge = browser_judge

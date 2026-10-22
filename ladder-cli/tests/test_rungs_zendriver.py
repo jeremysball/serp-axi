@@ -66,7 +66,7 @@ def test_fetch_climbs_with_its_own_declared_options(monkeypatch) -> None:
     """
     seen: dict = {}
 
-    def fake_climb(url: str, options: dict) -> dict:
+    def fake_climb(url: str, options: dict, ctx=None) -> dict:
         seen["climb"] = (url, options)
         return {"title": "Recorded", "text": "body", "status": None}
 
@@ -160,3 +160,134 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     assert seen["dir"] == str(tmp_path / "profiles" / "zd")
     assert seen["profile"] == ["zd"]
+
+
+def test_a_stale_profile_lock_is_cleared_before_the_browser_starts(tmp_path, monkeypatch) -> None:
+    """H4: a SIGKILLed browser leaves a lock the next launch stalls on.
+
+    `jars.clear_locks` was tested on its own and called by nothing, which is a
+    helper passing while the launch path it was written for still hangs. This
+    calls the launch path's own preparation, so the wiring is what is asserted.
+    """
+    monkeypatch.chdir(tmp_path)
+    profile = profiles.zendriver_dir(profiles.root(), headed=False)
+    profile.mkdir(parents=True)
+    (profile / "SingletonLock").write_text("stale")
+
+    prepared = zendriver.prepare_profile(headed=False)
+
+    assert prepared == profile
+    assert not (profile / "SingletonLock").exists()
+
+
+def test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """`jarIn`/`jarOut` were sent by the parent and read by no rung.
+
+    The order matters on both ends: a jar loaded after the page arrives replays
+    nothing, and cookies read after `stop()` are the lazy-flush loss the jar
+    exists to prevent (solver_probe.py:85).
+    """
+    from types import SimpleNamespace
+
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    calls: list = []
+    sent: list = []
+
+    class FakeCookie:
+        name = "cf_clearance"
+        domain = ".example.com"
+        value = "earned"
+        expires = 1735689600.0
+        secure = True
+        same_site = "Lax"
+        path = "/"
+        http_only = True
+
+    class FakeCookies:
+        async def set_all(self, params: list) -> None:
+            calls.append("set_all")
+            sent.extend(params)
+
+        async def get_all(self) -> list:
+            calls.append("get_all")
+            browsing = SimpleNamespace(name="sessionid", domain=".example.com", value="browsing")
+            return [FakeCookie(), browsing]
+
+    class FakeBrowser:
+        cookies = FakeCookies()
+
+        async def get(self, url: str):
+            calls.append("get")
+
+            class Tab:
+                async def sleep(self, seconds: float) -> None: ...
+                async def verify_cf(self, **kwargs: object) -> None: ...
+                async def evaluate(self, expression: str) -> tuple[str, str]:
+                    return ("Title", "body text")
+
+            return Tab()
+
+        async def stop(self) -> None:
+            calls.append("stop")
+
+    class FakeZendriver:
+        @staticmethod
+        async def start(**kwargs: object) -> FakeBrowser:
+            return FakeBrowser()
+
+    class FakeCookieParam(dict):
+        def __init__(self, **fields: object) -> None:
+            super().__init__(**fields)
+
+    class FakeSameSite:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    class FakeTime(float):
+        pass
+
+    inject_module(monkeypatch, "zendriver", FakeZendriver)
+    inject_module(
+        monkeypatch,
+        "zendriver.cdp.network",
+        SimpleNamespace(CookieParam=FakeCookieParam, CookieSameSite=FakeSameSite, TimeSinceEpoch=FakeTime),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    jar_in = tmp_path / "in.cookies.json"
+    jar_out = tmp_path / "out.cookies.json"
+    jars.save(
+        jar_in,
+        [
+            jars.Cookie(
+                name="cf_clearance",
+                domain=".example.com",
+                value="carried",
+                secure=True,
+                same_site="Strict",
+                path="/account",
+                http_only=True,
+            )
+        ],
+        "https://example.com/",
+    )
+
+    zendriver.fetch(
+        "https://example.com/",
+        RungContext(jar_in=jar_in, jar_out=jar_out),
+    )
+
+    assert calls == ["set_all", "get", "get_all", "stop"], "load, fetch, save, then stop"
+    assert sent[0]["name"] == "cf_clearance"
+    assert sent[0]["value"] == "carried"
+    assert sent[0]["path"] == "/account"
+    assert sent[0]["http_only"] is True
+    assert sent[0]["same_site"].value == "Strict"
+    saved = jars.load(jar_out, "https://example.com/")
+    assert [cookie.value for cookie in saved] == ["earned"]
+    assert saved[0].path == "/" and saved[0].http_only is True

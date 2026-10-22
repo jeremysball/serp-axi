@@ -13,7 +13,7 @@ import re
 import urllib.parse
 from typing import Any
 
-from . import RungResult, RungVerdict
+from . import RungContext, RungResult, RungVerdict
 
 # ladder.py:16
 CHALLENGE = re.compile(
@@ -104,11 +104,13 @@ def _client() -> Any:
     return primp.Client(impersonate="chrome", follow_redirects=True, timeout=30)
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise.
 
     Nothing verdict-shaped is decided here: the caller judges, so one page
     representation feeds one set of rules regardless of how it was fetched.
+    ``ctx`` is accepted and ignored: rung 1 has no browser and therefore no
+    cookie jar to load or save.
     """
     api = api_url(url)
     response = _client().get(api or url, headers={"User-Agent": USER_AGENT} if api else None)

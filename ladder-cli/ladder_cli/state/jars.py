@@ -12,6 +12,11 @@ loaded a jar into a fresh browser 3/3 times and every one came back a challenge
 page, so ``JAR_REPLAY_RESCUES`` is ``False`` and the separate ``jarIn`` and
 ``jarOut`` request fields exist so a caller can find out for itself
 (04-tdd 1.8, want 4).
+
+The file is JSON and is named ``<name>.cookies.json``. The measured run reused
+``<name>.cookies.dat``, which is the path zendriver's own cookie file defaults
+to and that file is a pickle (``CookieJar.save``); two formats must not claim
+one path, and this module's own format is JSON, so the name says so.
 """
 
 from __future__ import annotations
@@ -49,6 +54,9 @@ class Cookie:
 
     ``domain`` is kept as the browser wrote it, leading dot included, because
     the scoping predicate below is the thing that decides what a domain means.
+    ``path`` and ``http_only`` are carried because replaying a ``cf_clearance``
+    cookie without its path or its HttpOnly flag is not the cookie that was
+    earned.
     """
 
     name: str
@@ -57,6 +65,8 @@ class Cookie:
     expires: float | None = None
     secure: bool = False
     same_site: str | None = None
+    path: str = "/"
+    http_only: bool = False
 
 
 # Two-label public suffixes. The measured filter took the last two labels as the
@@ -154,11 +164,13 @@ def filter_cookies(cookies: Iterable[Cookie], url: str) -> list[Cookie]:
 
 
 def path_for(profile_dir: Path, name: str) -> Path:
-    """The measured jar name: one jar per profile, beside the profile.
+    """The jar path: one jar per profile, beside the profile, named for JSON.
 
-    solver_probe.py:86 `os.path.join(PROFILES, name + ".cookies.dat")`.
+    solver_probe.py:86 wrote the measured run's zendriver pickle to
+    ``<name>.cookies.dat``. This module writes JSON, so it takes a JSON name and
+    never claims the path zendriver's own save/load owns.
     """
-    return profile_dir / f"{name}.cookies.dat"
+    return profile_dir / f"{name}.cookies.json"
 
 
 def save(path: Path, cookies: Iterable[Cookie], url: str) -> int:
@@ -199,6 +211,8 @@ def load(path: Path, url: str) -> list[Cookie]:
             expires=item.get("expires"),
             secure=bool(item.get("secure", False)),
             same_site=item.get("same_site"),
+            path=str(item.get("path") or "/"),
+            http_only=bool(item.get("http_only", False)),
         )
         for item in raw
         if isinstance(item, dict)

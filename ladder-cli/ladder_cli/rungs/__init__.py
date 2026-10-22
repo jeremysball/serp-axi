@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol as TypingProtocol
 
 # Dependency order. Rung 5 is the rung-4 fallback, so it comes last.
@@ -48,8 +49,27 @@ class RungResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class RungContext:
+    """The per-request state a rung needs beyond the URL.
+
+    Only the two jar paths today. They live here rather than on a module global
+    because a rung's fetch is per request and the resident child answers many
+    requests over its life: a global would leak one caller's jar into the next
+    caller's fetch.
+
+    ``jar_in`` is loaded into the first browser rung that runs, and ``jar_out``
+    is written from that browser before it stops. Rung 1 has no cookie jar, so a
+    climb that rung 1 answers writes nothing; that is the honest outcome, not a
+    silent failure.
+    """
+
+    jar_in: Path | None = None
+    jar_out: Path | None = None
+
+
 class RungModule(TypingProtocol):
-    def fetch(self, url: str) -> dict[str, Any]: ...
+    def fetch(self, url: str, ctx: RungContext | None = None) -> dict[str, Any]: ...
 
     def judge(self, page: dict[str, Any]) -> RungResult: ...
 
@@ -65,10 +85,6 @@ def normalize_page_text(text: str | None) -> str:
     ``thin``, and a marker pushed past character 600 of padding reads as no
     marker at all.
     """
-    import re
-
-    import re
-
     return re.sub(r"\n\s*\n+", "\n\n", text or "").strip()
 
 
@@ -119,8 +135,8 @@ MODULES: dict[str, RungModule] = {
 }
 
 
-def fetch(rung: str, url: str) -> dict[str, Any]:
-    return MODULES[rung].fetch(url)
+def fetch(rung: str, url: str, ctx: RungContext | None = None) -> dict[str, Any]:
+    return MODULES[rung].fetch(url, ctx)
 
 
 def judge(rung: str, page: dict[str, Any]) -> RungResult:
