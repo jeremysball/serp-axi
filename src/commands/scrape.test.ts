@@ -389,6 +389,7 @@ test("runScrape --ladder returns rung text with no API key", async () => {
     );
     assert.equal(output.verdict, "ok");
     assert.equal(output.rungReached, 1);
+    assert.deepEqual(output.links, [{ url: "https://example.com/linked", text: "Linked" }]);
     assert.match(output.text as string, /example\.com\/article/);
   });
 });
@@ -449,7 +450,7 @@ test("runScrape --ladder forwards the resolved axes onto the wire", async () => 
     );
     const sent = JSON.parse(output.text as string) as Record<string, unknown>;
     assert.equal(sent.url, "https://example.com/article");
-    assert.equal(sent.protocol, 1);
+    assert.equal(sent.protocol, 2);
     assert.equal(sent.tabState, "same");
     assert.equal(sent.rungCeiling, 2);
   });

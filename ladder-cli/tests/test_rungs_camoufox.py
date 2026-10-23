@@ -54,8 +54,10 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
         def wait_for_timeout(self, ms: int) -> None:
             calls.append(("wait", ms))
 
-        def evaluate(self, expression: str) -> tuple[str, str]:
+        def evaluate(self, expression: str):
             calls.append(("evaluate", expression))
+            if expression == camoufox.LINKS_JS:
+                return [{"url": "https://example.com/", "text": "Home"}]
             return ("Title", "Body text.\n" + "\n" * 900)
 
     class FakeBrowser:
@@ -78,9 +80,12 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
 
     page = camoufox.fetch("https://example.com/")
 
-    assert page == {"title": "Title", "text": "Body text.", "status": 200}, (
-        "the run collapsed blanks before recording (ladder.py:114), so the floor saw 10 chars not 911"
-    )
+    assert page == {
+        "title": "Title",
+        "text": "Body text.",
+        "status": 200,
+        "links": [{"url": "https://example.com/", "text": "Home"}],
+    }, "the run collapsed blanks before recording (ladder.py:114), so the floor saw 10 chars not 911"
     assert calls == [
         ("launch", {"headless": True, "humanize": True}),
         ("enter",),
@@ -88,6 +93,7 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
         ("goto", "https://example.com/", {"wait_until": "domcontentloaded", "timeout": 30000}),
         ("wait", 12000),
         ("evaluate", camoufox.STRIP_JS),
+        ("evaluate", camoufox.LINKS_JS),
         ("exit",),
     ]
 
@@ -101,7 +107,9 @@ def test_a_navigation_that_returns_no_response_leaves_the_status_unknown(monkeyp
 
         def wait_for_timeout(self, ms: int) -> None: ...
 
-        def evaluate(self, expression: str) -> tuple[str, str]:
+        def evaluate(self, expression: str):
+            if expression == camoufox.LINKS_JS:
+                return []
             return ("Title", "  padded  ")
 
     class FakeBrowser:
@@ -118,7 +126,12 @@ def test_a_navigation_that_returns_no_response_leaves_the_status_unknown(monkeyp
 
     inject_module(monkeypatch, "camoufox.sync_api", SimpleNamespace(Camoufox=FakeCamoufox))
 
-    assert camoufox.fetch("https://example.com/") == {"title": "Title", "text": "padded", "status": None}
+    assert camoufox.fetch("https://example.com/") == {
+        "title": "Title",
+        "text": "padded",
+        "status": None,
+        "links": [],
+    }
 
 
 def test_the_browser_is_closed_even_when_the_page_raises(monkeypatch) -> None:

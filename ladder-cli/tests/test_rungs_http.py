@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ladder_cli.rungs import RungVerdict, http
+from ladder_cli.rungs import RungVerdict, http, normalize_links, normalize_page_text
 
 
 def page(title: str, text: str, status: int | None = 200) -> dict:
@@ -101,3 +101,49 @@ def test_flatten_api_does_not_render_missing_metadata_as_the_word_none() -> None
     flat = http.flatten_api("https://example.com", {"title": "a thread with no author"})
     assert flat == "a thread with no author"
     assert "None" not in flat
+
+
+def test_anchor_parser_reads_nested_text_and_entities() -> None:
+    parser = http._AnchorParser()
+    parser.feed('<a href="/a">A &amp; <b>B</b></a><a>no href</a><a href="https://x.test/c">C</a>')
+    assert parser.links == [
+        {"url": "/a", "text": "A & B"},
+        {"url": "https://x.test/c", "text": "C"},
+    ]
+
+
+def test_links_resolve_relative_urls_and_drop_non_navigational_ones() -> None:
+    links = normalize_links(
+        [
+            {"url": "/a", "text": " A "},
+            {"url": "https://example.com/a", "text": "duplicate"},
+            {"url": "javascript:void(0)", "text": "no"},
+            {"url": "https://example.com/b", "text": "B\n line"},
+        ],
+        "https://example.com/page",
+    )
+    assert links == [
+        {"url": "https://example.com/a", "text": "A"},
+        {"url": "https://example.com/b", "text": "B line"},
+    ]
+
+
+def test_judge_carries_the_links_it_was_given() -> None:
+    links = [{"url": "https://example.com/a", "text": "A"}]
+    result = http.judge({"title": "An article", "text": article(), "status": 200, "links": links})
+    assert result.verdict is RungVerdict.OK
+    assert result.links == links
+
+
+def test_browser_text_normalization_strips_layout_whitespace() -> None:
+    assert normalize_page_text("  a  \n\n\n  b\t c  ") == "a\n\nb c"
+
+
+def test_html_extraction_decodes_entities_and_collapses_source_whitespace() -> None:
+    page = http.extract_html(
+        "<title>T</title><body>\n  A &amp; B\n\n <a href='/x'>X &amp; Y</a></body>",
+        200,
+        "https://example.com/p",
+    )
+    assert page["text"] == "T A & B X & Y"
+    assert page["links"] == [{"url": "https://example.com/x", "text": "X & Y"}]

@@ -11,7 +11,7 @@ from ladder_cli.protocol import LadderRequest, LadderResponse, ProtocolError
 
 def valid_payload() -> dict[str, object]:
     return {
-        "protocol": 1,
+        "protocol": 2,
         "url": "https://example.com/article",
         "tabState": "fresh",
         "cookieState": "cold",
@@ -48,8 +48,8 @@ def test_a_missing_field_is_rejected() -> None:
 
 def test_a_protocol_mismatch_names_both_sides() -> None:
     payload = valid_payload()
-    payload["protocol"] = 2
-    with pytest.raises(ProtocolError, match=r"speaks protocol 1.*declares 2"):
+    payload["protocol"] = 1
+    with pytest.raises(ProtocolError, match=r"speaks protocol 2.*declares 1"):
         LadderRequest.parse(payload)
 
 
@@ -106,6 +106,43 @@ def test_a_refusal_may_carry_empty_text() -> None:
         warning="status 403",
     )
     decoded = json.loads(response.encode())
-    assert decoded["protocol"] == 1
+    assert decoded["protocol"] == 2
     assert decoded["verdict"] == "blocked"
     assert decoded["warning"] == "status 403"
+
+
+def test_links_round_trip_through_the_response() -> None:
+    response = LadderResponse(
+        verdict="ok",
+        rungReached=1,
+        title="Example",
+        text="body",
+        engines=[],
+        elapsedMs=1,
+        warning=None,
+        links=[{"url": "https://example.com/a", "text": "A"}],
+    )
+    decoded = json.loads(response.encode())
+    assert decoded["links"] == [{"url": "https://example.com/a", "text": "A"}]
+
+
+@pytest.mark.parametrize(
+    ("link", "message"),
+    [
+        ("https://example.com/a", "must be an object"),
+        ({"url": "", "text": ""}, "url .* must be a non-empty string"),
+        ({"url": "https://example.com/a", "text": 1}, "text .* must be a string"),
+    ],
+)
+def test_a_malformed_link_is_rejected(link: object, message: str) -> None:
+    with pytest.raises(ProtocolError, match=message):
+        LadderResponse(
+            verdict="ok",
+            rungReached=1,
+            title="",
+            text="body",
+            engines=[],
+            elapsedMs=1,
+            warning=None,
+            links=[link],
+        )

@@ -44,7 +44,7 @@ def read_lines(stdout: io.StringIO) -> list[dict]:
 def test_the_ready_line_precedes_every_response_and_declares_the_protocol() -> None:
     stdout = io.StringIO()
     cli.main([], stdin=io.StringIO(""), stdout=stdout)
-    assert read_lines(stdout) == [{"ready": True, "protocol": 1}]
+    assert read_lines(stdout) == [{"ready": True, "protocol": 2}]
 
 
 def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypatch) -> None:
@@ -58,7 +58,7 @@ def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypat
     lines = read_lines(stdout)
     assert lines[0]["ready"] is True
     response = lines[1]
-    assert response["protocol"] == 1
+    assert response["protocol"] == 2
     assert response["verdict"] == "ok"
     assert response["rungReached"] == 1
     assert response["text"] == "clear enough to read"
@@ -121,7 +121,7 @@ def test_a_rung_reporting_ok_with_no_text_is_refused_not_propagated(make_request
 
 def test_a_refused_request_is_answered_and_the_loop_carries_on(make_request, monkeypatch) -> None:
     broken = payload(make_request())
-    broken["protocol"] = 2
+    broken["protocol"] = 1
     stdin = io.StringIO(json.dumps(broken) + "\n" + json.dumps(payload(make_request())) + "\n")
     stdout = io.StringIO()
     monkeypatch.setattr(cli, "run_rung_isolated", sequence(ok_result()))
@@ -243,3 +243,21 @@ def test_a_browser_tool_is_not_imported_before_anything_needs_it() -> None:
     # module scope made the resident child owe its ready line before it had
     # touched a browser, so the import moved inside the client that uses it.
     assert "primp" not in sys.modules, "importing the ladder pulled in a browser tool it has not asked for"
+
+
+def test_u2028_in_page_text_does_not_split_the_rung_record() -> None:
+    # U+2028 LINE SEPARATOR is legal inside a JSON string but is a line break
+    # to str.splitlines(). The regression is a page whose text contains it
+    # reading as a rung that produced no record at all.
+    script = (
+        "import json; "
+        "print(json.dumps({'title': 'T', 'status': 200, "
+        "'text': 'before\\u2028' + 'word ' * 200}, ensure_ascii=False))"
+    )
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=10,
+        argv=[sys.executable, "-c", script],
+    )
+    assert result.verdict is RungVerdict.OK
