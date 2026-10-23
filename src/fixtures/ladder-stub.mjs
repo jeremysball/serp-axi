@@ -32,7 +32,7 @@ if (mode === "silent") {
 
   // A mismatched protocol must fail at the handshake, so this mode announces a
   // protocol the parent does not speak before any request is read.
-  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 1 }) + "\n");
+  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 3 : 2 }) + "\n");
 }
 
 // A silent child never reaches the read loop, so it cannot be woken by stdin
@@ -70,13 +70,13 @@ input.on("line", async (line) => {
   }
   if (mode === "blocked") {
     process.stdout.write(
-      JSON.stringify({ verdict: "blocked", rungReached: 4, title: "", text: "", engines: [], elapsedMs: 1, warning: null }) + "\n",
+      JSON.stringify({ verdict: "blocked", rungReached: 4, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
     );
     return;
   }
   if (mode === "dead") {
     process.stdout.write(
-      JSON.stringify({ verdict: "dead", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, warning: null }) + "\n",
+      JSON.stringify({ verdict: "dead", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
     );
     return;
   }
@@ -84,7 +84,15 @@ input.on("line", async (line) => {
   // success. This mode reproduces exactly that shape.
   if (mode === "empty-ok") {
     process.stdout.write(
-      JSON.stringify({ verdict: "ok", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, warning: null }) + "\n",
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
+    return;
+  }
+  // A protocol-2 response without links is a schema violation, not an empty
+  // result: the caller must be told the pair is stale, not handed [].
+  if (mode === "missing-links") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "body", engines: [], elapsedMs: 1, warning: null }) + "\n",
     );
     return;
   }
@@ -92,7 +100,7 @@ input.on("line", async (line) => {
   // verdict, not "blocked": the caller has to answer differently.
   if (mode === "error") {
     process.stdout.write(
-      JSON.stringify({ verdict: "error", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, warning: "boom: primp refused" }) + "\n",
+      JSON.stringify({ verdict: "error", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: "boom: primp refused" }) + "\n",
     );
     return;
   }
@@ -100,12 +108,12 @@ input.on("line", async (line) => {
   // parent actually put on the wire, not just what it resolved locally.
   if (mode === "echo-request") {
     process.stdout.write(
-      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: JSON.stringify(request), engines: [], elapsedMs: 1, warning: null }) + "\n",
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: JSON.stringify(request), engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
     );
     return;
   }
   const text = await bodyFor(url);
   process.stdout.write(
-    JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text, engines: [], elapsedMs: 1, warning: null }) + "\n",
+    JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text, engines: [], elapsedMs: 1, links: [{ url: "https://example.com/linked", text: "Linked" }], warning: null }) + "\n",
   );
 });

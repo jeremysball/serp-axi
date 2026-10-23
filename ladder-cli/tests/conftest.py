@@ -19,7 +19,7 @@ def make_request():
 
     def build(**overrides: object) -> LadderRequest:
         fields: dict[str, object] = {
-            "protocol": 1,
+            "protocol": 2,
             "url": "https://example.com/article",
             "tabState": "fresh",
             "cookieState": "cold",

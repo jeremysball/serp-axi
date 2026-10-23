@@ -58,7 +58,11 @@ def run_rung_isolated(
         process.communicate()
         return RungResult(RungVerdict.BLOCKED, reason=f"rung {rung} exceeded its {budget:g}s budget")
 
-    lines = [line for line in (out or "").splitlines() if line.startswith("{")]
+    # Split on LF only, never str.splitlines(): U+2028 LINE SEPARATOR is legal
+    # inside a JSON string, and splitlines() treats it as a line break. A page
+    # with that character in its text would otherwise be cut mid-string and
+    # read as a rung that produced no record at all.
+    lines = [line for line in (out or "").split("\n") if line.startswith("{")]
     if lines:
         try:
             page = json.loads(lines[-1])
@@ -103,6 +107,7 @@ def _response(verdict: str, rung_reached: int, result: RungResult, started: floa
         engines=[],
         elapsedMs=_elapsed_ms(started),
         warning=result.reason or None,
+        links=result.links,
     )
 
 

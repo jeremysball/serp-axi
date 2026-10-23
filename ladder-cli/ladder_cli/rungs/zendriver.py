@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import STRIP_JS, RungResult, browser_judge, normalize_page_text
+from . import LINKS_JS, STRIP_JS, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:15 rung name `zendriver_cf`
 HEADLESS = True
@@ -31,6 +31,7 @@ SETTLE_S = 6
 # uncalled arrow function as ``{}``, so the extraction has to be wrapped in a
 # call. Playwright calls it for you; here it is called explicitly.
 TEXT_EXPRESSION = f"({STRIP_JS})()"
+LINKS_EXPRESSION = f"({LINKS_JS})()"
 
 
 def launch_options() -> dict[str, Any]:
@@ -83,7 +84,13 @@ async def _fetch(url: str, options: dict[str, Any]) -> dict[str, Any]:
             pass
         await tab.sleep(SETTLE_S)
         title, text = await tab.evaluate(TEXT_EXPRESSION)
-        return {"title": title or "", "text": normalize_page_text(text), "status": None}
+        links = await tab.evaluate(LINKS_EXPRESSION)
+        return {
+            "title": title or "",
+            "text": normalize_page_text(text),
+            "status": None,
+            "links": links,
+        }
     finally:
         await browser.stop()
 
