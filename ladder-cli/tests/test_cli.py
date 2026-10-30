@@ -16,12 +16,15 @@ def sequence(*results: RungResult):
     """A runner that answers in order and records which rungs it was asked for."""
     queue = list(results)
     calls: list[str] = []
+    jars: list[tuple[str | None, str | None]] = []
 
-    def fake(rung: str, url: str) -> RungResult:
+    def fake(rung: str, url: str, *, jar_in: str | None = None, jar_out: str | None = None) -> RungResult:
         calls.append(rung)
+        jars.append((jar_in, jar_out))
         return queue.pop(0)
 
     fake.calls = calls
+    fake.jars = jars
     return fake
 
 
@@ -261,3 +264,65 @@ def test_u2028_in_page_text_does_not_split_the_rung_record() -> None:
         argv=[sys.executable, "-c", script],
     )
     assert result.verdict is RungVerdict.OK
+
+
+def test_jar_paths_reach_the_runner_with_the_request(make_request, monkeypatch, tmp_path) -> None:
+    runner = sequence(ok_result("clear enough to read"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    jar_in = tmp_path / "in.jar"
+    jar_out = tmp_path / "out.jar"
+    stdin = io.StringIO(json.dumps(payload(make_request(jarIn=str(jar_in), jarOut=str(jar_out)))) + "\n")
+    stdout = io.StringIO()
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    assert runner.calls == ["http"]
+    assert runner.jars == [(str(jar_in), str(jar_out))], "the request's jar paths are the runner's to pass on"
+
+
+def test_the_child_command_carries_jar_flags(monkeypatch, tmp_path) -> None:
+    jar = tmp_path / "session.jar"
+    page = json.dumps({"title": "T", "text": "word " * 200, "status": 200})
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            captured["command"] = list(command)
+
+        def communicate(self, timeout=None):
+            return (page + "\n", "")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", FakeProcess)
+
+    result = cli.run_rung_isolated("http", "https://example.com/x", jar_in=str(jar), jar_out=str(jar))
+
+    assert result.verdict is RungVerdict.OK
+    assert captured["command"][-4:] == ["--jar-in", str(jar), "--jar-out", str(jar)]
+
+    captured.clear()
+    cli.run_rung_isolated("http", "https://example.com/x")
+    assert "--jar-in" not in captured["command"], "a cold request spawns no jar flags"
+
+
+def test_child_mode_parses_jar_flags(monkeypatch, tmp_path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_fetch(rung, url, *, jar_in=None, jar_out=None):
+        seen.update(rung=rung, url=url, jar_in=jar_in, jar_out=jar_out)
+        return {"title": "T", "text": "word " * 200, "status": 200, "links": []}
+
+    monkeypatch.setattr(cli, "fetch", fake_fetch)
+
+    jar_in = tmp_path / "in.jar"
+    jar_out = tmp_path / "out.jar"
+    code = cli.main(
+        ["--rung", "http", "https://example.com/x", "--jar-in", str(jar_in), "--jar-out", str(jar_out)]
+    )
+
+    assert code == 0
+    assert seen == {
+        "rung": "http",
+        "url": "https://example.com/x",
+        "jar_in": str(jar_in),
+        "jar_out": str(jar_out),
+    }

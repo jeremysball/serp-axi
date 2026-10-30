@@ -32,6 +32,9 @@ def run_rung_isolated(
     url: str,
     timeout_s: float | None = None,
     argv: Sequence[str] | None = None,
+    *,
+    jar_in: str | None = None,
+    jar_out: str | None = None,
 ) -> RungResult:
     """Run one rung as a subprocess under a hard time budget.
 
@@ -41,6 +44,14 @@ def run_rung_isolated(
     """
     budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s
     command = list(argv) if argv is not None else [sys.executable, "-m", "ladder_cli", "--rung", rung, url]
+    if argv is None:
+        # Jar state belongs to the rung child's own process: the HTTP rung reads
+        # and merges the caller's jar, browser rungs keep their state in their
+        # profile dirs, so the flags are only ever consumed by rung 1.
+        if jar_in:
+            command += ["--jar-in", jar_in]
+        if jar_out:
+            command += ["--jar-out", jar_out]
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -134,7 +145,7 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
 
     for index, rung in enumerate(RUNGS[: request.rungCeiling]):
         rung_reached = index + 1
-        last = runner(rung, request.url)
+        last = runner(rung, request.url, jar_in=request.jarIn, jar_out=request.jarOut)
         if last.verdict is RungVerdict.OK and not last.text.strip():
             # Asserted by both sides; converting rather than crashing keeps the
             # resident child alive across a bad response.
@@ -165,9 +176,17 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
     return _response("blocked", rung_reached, last, started)
 
 
-def _run_rung_child(rung: str, url: str, stdout: IO[str], stderr: IO[str]) -> int:
+def _run_rung_child(
+    rung: str,
+    url: str,
+    stdout: IO[str],
+    stderr: IO[str],
+    *,
+    jar_in: str | None = None,
+    jar_out: str | None = None,
+) -> int:
     try:
-        page = fetch(rung, url)
+        page = fetch(rung, url, jar_in=jar_in, jar_out=jar_out)
     except Exception as error:  # noqa: BLE001 - the parent maps the message, not the type
         print(f"{type(error).__name__}: {error}", file=stderr, flush=True)
         return 1
@@ -206,7 +225,17 @@ def main(
     stderr = sys.stderr if stderr is None else stderr
 
     if len(args) >= 3 and args[0] == "--rung":
-        return _run_rung_child(args[1], args[2], stdout, stderr)
+        jar_in, jar_out = None, None
+        rest = args[3:]
+        for flag in ("--jar-in", "--jar-out"):
+            if flag in rest:
+                index = rest.index(flag)
+                if index + 1 < len(rest):
+                    if flag == "--jar-in":
+                        jar_in = rest[index + 1]
+                    else:
+                        jar_out = rest[index + 1]
+        return _run_rung_child(args[1], args[2], stdout, stderr, jar_in=jar_in, jar_out=jar_out)
 
     # Readiness is announced before the first read, so no caller ever sleeps a
     # fixed interval and hopes. Anything the parent writes before this line is

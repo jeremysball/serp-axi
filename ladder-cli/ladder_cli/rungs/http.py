@@ -9,10 +9,12 @@ dependency.
 
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from html import unescape
 from html.parser import HTMLParser
+from http.cookiejar import Cookie, MozillaCookieJar
 from typing import Any
 
 from . import RungResult, RungVerdict, normalize_links
@@ -168,20 +170,131 @@ def extract_html(html: str, status: int | None, final_url: str) -> dict[str, Any
     }
 
 
-def fetch(url: str) -> dict[str, Any]:
+def _load_jar_cookies(jar_in: str, url: str) -> dict[str, str]:
+    """Cookies the caller's jar holds for this URL's host, as primp wants them.
+
+    A jar the caller named but never wrote (a cold start on the first request of
+    a sequence) is an empty read, not an error: the file appears on the save of
+    that same first request.
+    """
+    jar = MozillaCookieJar(jar_in)
+    if not os.path.exists(jar_in):
+        return {}
+    jar.load(ignore_discard=True, ignore_expires=True)
+    host = urllib.parse.urlparse(url).hostname or ""
+    matching: dict[str, str] = {}
+    for cookie in jar:
+        domain = (cookie.domain or "").lstrip(".")
+        if domain and (host == domain or host.endswith("." + domain)) and cookie.value is not None:
+            matching[cookie.name] = cookie.value
+    return matching
+
+
+def _save_jar_cookies(jar_out: str, url: str, cookies: dict[str, str]) -> None:
+    """Merge this host's fresh cookies into the caller's jar, keeping other hosts.
+
+    Entries are keyed by exact stored domain, so a rewrite replaces only the
+    host this request visited and leaves every other site's cookies untouched.
+    """
+    jar = MozillaCookieJar(jar_out)
+    kept: list[Cookie] = []
+    if os.path.exists(jar_out):
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            host = urllib.parse.urlparse(url).hostname or ""
+            kept = [c for c in jar if c.domain.lstrip(".") != host]
+        except OSError:
+            kept = []
+    jar.clear()
+    for cookie in kept:
+        jar.set_cookie(cookie)
+    domain = urllib.parse.urlparse(url).hostname or ""
+    for name, value in cookies.items():
+        jar.set_cookie(
+            Cookie(
+                0,
+                name,
+                value,
+                None,
+                False,
+                domain,
+                False,
+                domain.startswith("."),
+                "/",
+                True,
+                False,
+                None,
+                False,
+                None,
+                None,
+                {},
+            )
+        )
+    jar.save(ignore_discard=True, ignore_expires=True)
+
+
+def _walled(page: dict[str, Any]) -> bool:
+    """Whether a 200 answer is a defence page rather than the requested content.
+
+    The two shapes the parity measurements kept producing: a challenge marker,
+    or a body below the rung-1 shell floor (LinkedIn's signup wall renders 413
+    characters at status 200). Both are cheap local reads on the extracted page.
+    """
+    text = page.get("text") or ""
+    title = page.get("title") or ""
+    return bool(CHALLENGE.search(f"{title} {text[:600]}")) or len(text) < SHELL_FLOOR
+
+
+def fetch(url: str, *, jar_in: str | None = None, jar_out: str | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise.
 
     Nothing verdict-shaped is decided here: the caller judges, so one page
     representation feeds one set of rules regardless of how it was fetched.
+
+    Two capabilities the 2026-10-30 parity measurements against an unblocker
+    service isolated as the HTTP-level gap (findings: warmup and TLS were both
+    present; rotation and the retry loop were not):
+
+    - a caller-provided Netscape jar rides on the request and its fresh cookies
+      are merged back, so a caller can warm a session across requests the way
+      the browser rungs' profile dirs already do; and
+    - a walled 200 answer is retried once on a freshly built client, so the
+      second identity is not the first one's TLS fingerprint or its response
+      cookies - the caller's jar still rides on the retry.
     """
     api = api_url(url)
-    response = _client().get(api or url, headers={"User-Agent": USER_AGENT} if api else None)
-    status = response.status_code
+    jar_cookies = _load_jar_cookies(jar_in, url) if jar_in else {}
+    page: dict[str, Any] = {}
+    client: Any = None
+    final_url = url
+    for attempt in (1, 2):
+        # A fresh client per attempt is the point, not waste: primp draws a new
+        # impersonation each build, so the retry arrives as a different browser.
+        client = _client()
+        if jar_cookies:
+            client.set_cookies(url, jar_cookies)
+        response = client.get(api or url, headers={"User-Agent": USER_AGENT} if api else None)
+        status = response.status_code
 
-    if api and status == 200:
-        return {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
+        if api and status == 200:
+            page = {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
+            final_url = str(getattr(response, "url", "") or url)
+            break
 
-    return extract_html(response.text, status, str(getattr(response, "url", "") or url))
+        final_url = str(getattr(response, "url", "") or url)
+        page = extract_html(response.text, status, final_url)
+        if attempt == 1 and status == 200 and _walled(page):
+            continue
+        break
+
+    if jar_out and client is not None:
+        try:
+            fresh = client.get_cookies(final_url)
+        except Exception:  # noqa: BLE001 - a cookie read must not discard a fetched page
+            fresh = {}
+        if isinstance(fresh, dict):
+            _save_jar_cookies(jar_out, final_url, fresh)
+    return page
 
 
 def judge(page: dict[str, Any]) -> RungResult:

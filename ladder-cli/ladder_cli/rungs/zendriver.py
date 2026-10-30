@@ -49,7 +49,9 @@ def cf_options() -> dict[str, Any]:
     return {"click_delay": CF_CLICK_DELAY_S, "timeout": CF_TIMEOUT_S}
 
 
-def fetch(url: str) -> dict[str, Any]:
+    # Cookie state is the profile dir here, not a jar: the parent only passes
+    # jar paths where the HTTP rung is the stateful party.
+def fetch(url: str, *, jar_in: str | None = None, jar_out: str | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise."""
     return climb(url, launch_options())
 

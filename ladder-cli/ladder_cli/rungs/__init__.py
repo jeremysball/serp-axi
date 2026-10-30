@@ -62,7 +62,13 @@ class RungResult:
 
 
 class RungModule(TypingProtocol):
-    def fetch(self, url: str) -> dict[str, Any]: ...
+    def fetch(
+        self,
+        url: str,
+        *,
+        jar_in: str | None = None,
+        jar_out: str | None = None,
+    ) -> dict[str, Any]: ...
 
     def judge(self, page: dict[str, Any]) -> RungResult: ...
 
@@ -168,8 +174,14 @@ MODULES: dict[str, RungModule] = {
 }
 
 
-def fetch(rung: str, url: str) -> dict[str, Any]:
-    return MODULES[rung].fetch(url)
+def fetch(
+    rung: str,
+    url: str,
+    *,
+    jar_in: str | None = None,
+    jar_out: str | None = None,
+) -> dict[str, Any]:
+    return MODULES[rung].fetch(url, jar_in=jar_in, jar_out=jar_out)
 
 
 def judge(rung: str, page: dict[str, Any]) -> RungResult:

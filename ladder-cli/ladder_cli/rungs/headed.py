@@ -119,7 +119,9 @@ def launch_options() -> dict[str, Any]:
     return {**zendriver.launch_options(), "headless": HEADLESS}
 
 
-def fetch(url: str) -> dict[str, Any]:
+    # Cookie state is the profile dir here, not a jar: the parent only passes
+    # jar paths where the HTTP rung is the stateful party.
+def fetch(url: str, *, jar_in: str | None = None, jar_out: str | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise."""
     with display(url, launch_options()) as page:
         return page
