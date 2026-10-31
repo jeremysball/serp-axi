@@ -94,8 +94,10 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
         async def verify_cf(self, **kwargs: object) -> None:
             calls.append(("verify_cf", kwargs))
 
-        async def evaluate(self, expression: str) -> tuple[str, str]:
+        async def evaluate(self, expression: str):
             calls.append(("evaluate", expression))
+            if expression == zendriver.LINKS_EXPRESSION:
+                return [{"url": "https://example.com/", "text": "Home"}]
             return ("Title", "Body text.\n" + "\n" * 900)
 
     class FakeBrowser:
@@ -117,7 +119,12 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
 
     page = zendriver.fetch("https://example.com/")
 
-    assert page == {"title": "Title", "text": "Body text.", "status": None}, "blanks collapsed, as ladder.py:114 did"
+    assert page == {
+        "title": "Title",
+        "text": "Body text.",
+        "status": None,
+        "links": [{"url": "https://example.com/", "text": "Home"}],
+    }, "blanks collapsed, as ladder.py:114 did"
     assert calls == [
         ("start", {"user_data_dir": str(tmp_path / "profiles" / "zd"), **zendriver.launch_options()}),
         ("get", "https://example.com/"),
@@ -125,6 +132,7 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
         ("verify_cf", {"click_delay": 3, "timeout": 20}),
         ("sleep", 6),
         ("evaluate", zendriver.TEXT_EXPRESSION),
+        ("evaluate", zendriver.LINKS_EXPRESSION),
         ("stop",),
     ], "a settle is missing on one side of the click"
 
@@ -140,7 +148,9 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
             class Tab:
                 async def sleep(self, seconds: float) -> None: ...
                 async def verify_cf(self, **kwargs: object) -> None: ...
-                async def evaluate(self, expression: str) -> tuple[str, str]:
+                async def evaluate(self, expression: str):
+                    if expression == zendriver.LINKS_EXPRESSION:
+                        return []
                     return ("Title", "body text")
 
             return Tab()
@@ -160,3 +170,14 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     assert seen["dir"] == str(tmp_path / "profiles" / "zd")
     assert seen["profile"] == ["zd"]
+
+
+def test_the_no_sandbox_opt_out_reads_its_environment(monkeypatch) -> None:
+    # Sandbox containers cannot run a sandboxed Chrome: the opt-out is
+    # LADDER_ZENDRIVER_SANDBOX=0, and it must not leak into the default run.
+    monkeypatch.delenv("LADDER_ZENDRIVER_SANDBOX", raising=False)
+    assert "sandbox" not in zendriver.launch_options()
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "0")
+    assert zendriver.launch_options()["sandbox"] is False
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "1")
+    assert "sandbox" not in zendriver.launch_options()

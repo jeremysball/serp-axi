@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
-from . import RungResult, RungVerdict
+from . import RungResult, RungVerdict, normalize_links
 
 # ladder.py:16
 CHALLENGE = re.compile(
@@ -42,6 +44,44 @@ DEAD_STATUS = {404, 410, 521, 522, 523, 525, 526, 530}
 THIN_CHARS = 800
 # ladder.py:59
 USER_AGENT = "serp-axi-research/0.1"
+
+
+class _AnchorParser(HTMLParser):
+    """Collect anchors and their text without pulling in an HTML dependency.
+
+    ``convert_charrefs`` is on by default, so ``&amp;`` in an href arrives as a
+    literal ``&`` and the parent can use the URL as-is. Anchors may contain
+    nested inline tags, which is why text is gathered from every data node until
+    the closing ``a``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str]] = []
+        self._href: str | None = None
+        self._text: list[str] = []
+
+    def _flush(self) -> None:
+        if self._href is not None:
+            self.links.append({"url": self._href, "text": "".join(self._text)})
+        self._href = None
+        self._text = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        self._flush()
+        href = dict(attrs).get("href")
+        if href:
+            self._href = href
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a":
+            self._flush()
 
 
 def api_url(url: str) -> str | None:
@@ -104,6 +144,30 @@ def _client() -> Any:
     return primp.Client(impersonate="chrome", follow_redirects=True, timeout=30)
 
 
+def extract_html(html: str, status: int | None, final_url: str) -> dict[str, Any]:
+    """Turn raw HTML into the page shape every rung reports.
+
+    Entity decoding happens after tag stripping, so an escaped ``&lt;script&gt;``
+    in prose stays text instead of becoming a tag that is then removed. Source
+    whitespace is layout, not content, and is collapsed so the character floors
+    measure prose rather than indentation.
+    """
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    title = (title_match.group(1) if title_match else "") or ""
+    parser = _AnchorParser()
+    parser.feed(html)
+    body = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    body = re.sub(r"<[^>]+>", " ", body)
+    body = unescape(body)
+    body = re.sub(r"\s+", " ", body).strip()
+    return {
+        "title": title.strip(),
+        "text": body,
+        "status": status,
+        "links": normalize_links(parser.links, final_url),
+    }
+
+
 def fetch(url: str) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise.
 
@@ -115,15 +179,9 @@ def fetch(url: str) -> dict[str, Any]:
     status = response.status_code
 
     if api and status == 200:
-        return {"title": "api", "text": flatten_api(url, response.json()), "status": status}
+        return {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
 
-    html = response.text
-    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
-    title = (title_match.group(1) if title_match else "") or ""
-    body = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
-    body = re.sub(r"<[^>]+>", " ", body)
-    body = re.sub(r"[ \t]+", " ", body)
-    return {"title": title.strip(), "text": body, "status": status}
+    return extract_html(response.text, status, str(getattr(response, "url", "") or url))
 
 
 def judge(page: dict[str, Any]) -> RungResult:
@@ -141,15 +199,16 @@ def judge(page: dict[str, Any]) -> RungResult:
     status = page.get("status")
     title = page.get("title") or ""
     text = page.get("text") or ""
+    links = page.get("links") or []
 
     if title == "api":
         return RungResult(RungVerdict.OK, title, text, status, "site api")
     if status in DEAD_STATUS:
-        return RungResult(RungVerdict.DEAD, title, text, status, f"status {status}")
+        return RungResult(RungVerdict.DEAD, title, text, status, f"status {status}", links=links)
     if isinstance(status, int) and status >= 400:
-        return RungResult(RungVerdict.BLOCKED, title, text, status, f"status {status}")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, f"status {status}", links=links)
     if CHALLENGE.search(f"{title} {text[:600]}"):
-        return RungResult(RungVerdict.BLOCKED, title, text, status, "challenge marker")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, "challenge marker", links=links)
     if len(text.replace(title, "", 1).strip()) < SHELL_FLOOR:
         return RungResult(
             RungVerdict.BLOCKED,
@@ -157,9 +216,10 @@ def judge(page: dict[str, Any]) -> RungResult:
             text,
             status,
             f"{len(text)} chars, under rung-1 floor",
+            links=links,
         )
     if JS_SHELL.search(text):
-        return RungResult(RungVerdict.BLOCKED, title, text, status, "js shell (loading marker)")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, "js shell (loading marker)", links=links)
     if len(text) < THIN_CHARS:
-        return RungResult(RungVerdict.BLOCKED, title, text, status, f"{len(text)} chars")
-    return RungResult(RungVerdict.OK, title, text, status, f"{len(text)} chars")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, f"{len(text)} chars", links=links)
+    return RungResult(RungVerdict.OK, title, text, status, f"{len(text)} chars", links=links)

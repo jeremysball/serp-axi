@@ -381,6 +381,7 @@ async function runLadderScrape(
     url: url.toString(),
     verdict: response.verdict,
     rungReached: response.rungReached,
+    links: response.links,
   };
   if (response.title) {
     output.title = response.title;

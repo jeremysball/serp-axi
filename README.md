@@ -129,16 +129,23 @@ is completable with flags alone.
 ## In progress: scraping escalation ladder
 
 The free SearXNG search path is wired in (`--provider searxng`). The escalation
-ladder for fetching pages behind the links is live for rung 1.
+ladder for fetching pages behind the links is live through rung 4: rung 1's
+HTTP fetch plus the Camoufox and zendriver browser rungs for challenge pages and
+JS shells. Rung 5 and its classifier are not built yet.
 
-`--ladder` runs the rung-1 fetch through a resident `ladder-cli` child over
-stdio, free and with no API key. Rungs 2 to 5 (the browser rungs for challenge
-pages and JS shells), and the rung-5 classifier, are not built yet, so a page
-that survives rung 1 reports `blocked` rather than being fetched:
+`--ladder` runs the climb through a resident `ladder-cli` child over stdio,
+free and with no API key:
 
 ```
 serp-axi scrape https://example.com/article --ladder
 ```
+
+The ladder response carries `links` alongside `text`: absolute, deduplicated
+anchors in document order with their anchor text, capped at 200. Rung 1 reads
+them from the raw HTML, resolving relative URLs against the final URL after
+redirects; browser rungs read `a.href` from the live DOM. Text is whitespace-
+normalized before either is returned, so source indentation and blank-line
+padding do not show up as content.
 
 Ladder axes (`--tab-state`, `--cookie-state`, `--cache-state`,
 `--fingerprint-state`, `--rung-ceiling`, `--profile`, `--jar-in`, `--jar-out`)

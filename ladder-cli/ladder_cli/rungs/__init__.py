@@ -16,7 +16,8 @@ looking at raw HTML.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import urllib.parse
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol as TypingProtocol
 
@@ -30,6 +31,17 @@ STRIP_JS = (
     "() => { document.querySelectorAll('script,style,noscript')"
     ".forEach(e => e.remove()); return [document.title, document.body.innerText] }"
 )
+# Anchors are read from the live DOM, not from the stripped text. ``a.href``
+# resolves relative URLs the same way a click would, so the parent gets links it
+# can follow without re-resolving them against the final page URL.
+LINKS_JS = (
+    "() => Array.from(document.querySelectorAll('a[href]'))"
+    ".map(a => ({ url: a.href, text: (a.innerText || a.textContent || '').trim() }))"
+)
+# A page can carry thousands of anchors, most of them navigation chrome. The
+# cap keeps one response bounded without hiding the links a caller came for.
+MAX_LINKS = 200
+MAX_LINK_TEXT = 200
 
 
 class RungVerdict(Enum):
@@ -46,6 +58,7 @@ class RungResult:
     text: str = ""
     status: int | None = None
     reason: str = ""
+    links: list[dict[str, str]] = field(default_factory=list)
 
 
 class RungModule(TypingProtocol):
@@ -55,7 +68,7 @@ class RungModule(TypingProtocol):
 
 
 def normalize_page_text(text: str | None) -> str:
-    """Collapse runs of blank lines and strip, the shape the run recorded.
+    """Collapse whitespace noise while keeping paragraph breaks.
 
     ladder.py:114 `re.sub(r"\\n\\s*\\n+", "\\n\\n", text or "").strip()` ran in
     the rung child before the record was written, so the 800-character floor and
@@ -64,12 +77,47 @@ def normalize_page_text(text: str | None) -> str:
     page held open by whitespace padding reads as ``ok`` where the run read
     ``thin``, and a marker pushed past character 600 of padding reads as no
     marker at all.
+
+    ``innerText`` preserves the page's visual line breaks, including lines that
+    are only indentation from the source. Trimming each line and collapsing
+    repeated blank runs removes that noise without flattening real paragraphs.
     """
-    import re
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in normalized.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
-    import re
 
-    return re.sub(r"\n\s*\n+", "\n\n", text or "").strip()
+def normalize_links(entries: Any, base_url: str | None = None) -> list[dict[str, str]]:
+    """Dedupe, absolutize, and bound the anchors a rung reports.
+
+    Rung 1 reads raw ``href`` values, which may be relative, so ``base_url`` is
+    the final URL after redirects. Browser rungs already hand back absolute
+    ``a.href`` values and pass no base. Non-navigational schemes are dropped
+    rather than reported as links the caller cannot fetch.
+    """
+    if not isinstance(entries, list):
+        return []
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_url = entry.get("url")
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            continue
+        url = raw_url.strip()
+        if base_url:
+            url = urllib.parse.urljoin(base_url, url)
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or url in seen:
+            continue
+        seen.add(url)
+        raw_text = entry.get("text")
+        text = re.sub(r"\s+", " ", raw_text).strip()[:MAX_LINK_TEXT] if isinstance(raw_text, str) else ""
+        links.append({"url": url, "text": text})
+        if len(links) >= MAX_LINKS:
+            break
+    return links
 
 
 def browser_judge(page: dict[str, Any]) -> RungResult:
@@ -85,13 +133,14 @@ def browser_judge(page: dict[str, Any]) -> RungResult:
     status = page.get("status")
     title = page.get("title") or ""
     text = page.get("text") or ""
+    links = normalize_links(page.get("links"))
 
     if status in http.DEAD_STATUS:
-        return RungResult(RungVerdict.DEAD, title, text, status, f"status {status}")
+        return RungResult(RungVerdict.DEAD, title, text, status, f"status {status}", links=links)
     if isinstance(status, int) and status >= 400:
-        return RungResult(RungVerdict.BLOCKED, title, text, status, f"status {status}")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, f"status {status}", links=links)
     if http.CHALLENGE.search(f"{title} {text[:600]}"):
-        return RungResult(RungVerdict.BLOCKED, title, text, status, "challenge marker")
+        return RungResult(RungVerdict.BLOCKED, title, text, status, "challenge marker", links=links)
     if len(text) < http.THIN_CHARS:
         return RungResult(
             RungVerdict.BLOCKED,
@@ -99,8 +148,9 @@ def browser_judge(page: dict[str, Any]) -> RungResult:
             text,
             status,
             f"{len(text)} chars, under the measured floor",
+            links=links,
         )
-    return RungResult(RungVerdict.OK, title, text, status, f"{len(text)} chars")
+    return RungResult(RungVerdict.OK, title, text, status, f"{len(text)} chars", links=links)
 
 
 # Imported last: each rung module imports RungResult, RungVerdict, STRIP_JS and

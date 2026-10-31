@@ -169,8 +169,31 @@ test("a protocol mismatch fails at the handshake and names both sides", async ()
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
       assert.ok(error instanceof SerpAxiLadderError);
       assert.match(error.message, /protocol mismatch/);
-      assert.match(error.message, /speaks protocol 1/);
-      assert.match(error.message, /reported protocol 2/);
+      assert.match(error.message, /speaks protocol 2/);
+      assert.match(error.message, /reported protocol 3/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("links survive the response parse", async () => {
+  const ladder = client("ok");
+  try {
+    const res = await ladder.fetch("https://a.example/x");
+    assert.deepEqual(res.links, [{ url: "https://example.com/linked", text: "Linked" }]);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a protocol-2 response without links is a schema violation", async () => {
+  const ladder = client("missing-links");
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /without a links array/);
       return true;
     });
   } finally {
