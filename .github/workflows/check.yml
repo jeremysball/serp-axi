@@ -46,6 +46,16 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Install Bubblewrap for the mutation sandbox
+        # GitHub's ubuntu-latest image does not ship bwrap, and Ubuntu 24.04+
+        # restricts unprivileged user namespaces via AppArmor; the knob relax
+        # is guarded because the kernel may not expose it, and the verify step
+        # right below is the real gate on the capability.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+
       - name: Verify mutation sandbox support
         run: |
           if ! command -v bwrap >/dev/null; then
