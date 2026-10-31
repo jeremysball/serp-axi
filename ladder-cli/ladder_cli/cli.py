@@ -45,13 +45,11 @@ def run_rung_isolated(
     budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s
     command = list(argv) if argv is not None else [sys.executable, "-m", "ladder_cli", "--rung", rung, url]
     if argv is None:
-        # Jar state belongs to the rung child's own process: the HTTP rung reads
-        # and merges the caller's jar, browser rungs keep their state in their
-        # profile dirs, so the flags are only ever consumed by rung 1.
+        prefix = "--http-jar" if rung == "http" else "--jar"
         if jar_in:
-            command += ["--jar-in", jar_in]
+            command += [f"{prefix}-in", jar_in]
         if jar_out:
-            command += ["--jar-out", jar_out]
+            command += [f"{prefix}-out", jar_out]
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -145,7 +143,12 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
 
     for index, rung in enumerate(RUNGS[: request.rungCeiling]):
         rung_reached = index + 1
-        last = runner(rung, request.url, jar_in=request.jarIn, jar_out=request.jarOut)
+        jar_in, jar_out = None, None
+        if rung == "http":
+            jar_in, jar_out = request.httpJarIn, request.httpJarOut
+        elif rung in ("zendriver_cf", "zendriver_headed_cf"):
+            jar_in, jar_out = request.jarIn, request.jarOut
+        last = runner(rung, request.url, jar_in=jar_in, jar_out=jar_out)
         if last.verdict is RungVerdict.OK and not last.text.strip():
             # Asserted by both sides; converting rather than crashing keeps the
             # resident child alive across a bad response.
@@ -227,11 +230,12 @@ def main(
     if len(args) >= 3 and args[0] == "--rung":
         jar_in, jar_out = None, None
         rest = args[3:]
-        for flag in ("--jar-in", "--jar-out"):
+        prefix = "--http-jar" if args[1] == "http" else "--jar"
+        for flag in (f"{prefix}-in", f"{prefix}-out"):
             if flag in rest:
                 index = rest.index(flag)
                 if index + 1 < len(rest):
-                    if flag == "--jar-in":
+                    if flag == f"{prefix}-in":
                         jar_in = rest[index + 1]
                     else:
                         jar_out = rest[index + 1]

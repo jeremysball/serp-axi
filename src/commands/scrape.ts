@@ -22,6 +22,8 @@ export const SCRAPE_FLAGS: FlagSpec = {
   profile: "string",
   "jar-in": "string",
   "jar-out": "string",
+  "http-jar-in": "string",
+  "http-jar-out": "string",
 };
 
 // The six axes and the jar paths are ladder-only. Rejecting them elsewhere
@@ -74,7 +76,7 @@ Flags:
                          Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
                          Only valid with --provider brightdata.
 
-Ladder axes (only with --ladder; flag beats env beats config beats a --profile
+Ladder axes (only with --ladder; flag beats env beats a --profile bundle beats config;
                 bundle, which beats the default):
   --tab-state <state>          fresh (default) or same
   --cookie-state <state>       cold (default) or jar; jar needs a path (see below)
@@ -82,9 +84,11 @@ Ladder axes (only with --ladder; flag beats env beats config beats a --profile
   --fingerprint-state <state>  rotate (default) or stable
   --rung-ceiling <1-5>         Highest rung to attempt. Default 5; hitting it reports blocked.
   --profile <name>             Named bundle of axes from ladderProfiles in the config file.
-  --jar-in <path>              Cookie jar to load before fetching.
-  --jar-out <path>             Cookie jar to save after fetching.
-                         --cookie-state jar mirrors whichever of these you pass to both.
+  --jar-in <path>              Filtered browser JSON cookie jar to load.
+  --jar-out <path>             Filtered browser JSON cookie jar to save.
+                          --cookie-state jar mirrors whichever of these you pass to both.
+  --http-jar-in <path>         Full-session Netscape cookie jar for HTTP rung 1 only.
+  --http-jar-out <path>        Save HTTP-session cookies; never mirrored or converted.
 
 Examples:
   serp-axi scrape https://example.com/article

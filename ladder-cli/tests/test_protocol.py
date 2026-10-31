@@ -11,7 +11,7 @@ from ladder_cli.protocol import LadderRequest, LadderResponse, ProtocolError
 
 def valid_payload() -> dict[str, object]:
     return {
-        "protocol": 2,
+        "protocol": 3,
         "url": "https://example.com/article",
         "tabState": "fresh",
         "cookieState": "cold",
@@ -21,6 +21,8 @@ def valid_payload() -> dict[str, object]:
         "profile": None,
         "jarIn": None,
         "jarOut": None,
+        "httpJarIn": None,
+        "httpJarOut": None,
     }
 
 
@@ -30,6 +32,16 @@ def test_a_request_with_the_documented_defaults_parses() -> None:
     assert request.tabState == "fresh"
     assert request.rungCeiling == 5
     assert request.profile is None
+
+
+@pytest.mark.parametrize("field", ["jarIn", "jarOut", "httpJarIn", "httpJarOut"])
+def test_each_jar_path_is_nullable_but_not_an_untyped_value(field):
+    payload = valid_payload()
+    payload[field] = "session.path"
+    assert getattr(LadderRequest.parse(payload), field) == "session.path"
+    payload[field] = 42
+    with pytest.raises(ProtocolError, match=field + " must be a string or null"):
+        LadderRequest.parse(payload)
 
 
 def test_a_field_the_parent_never_sends_is_rejected_not_ignored() -> None:
@@ -49,7 +61,7 @@ def test_a_missing_field_is_rejected() -> None:
 def test_a_protocol_mismatch_names_both_sides() -> None:
     payload = valid_payload()
     payload["protocol"] = 1
-    with pytest.raises(ProtocolError, match=r"speaks protocol 2.*declares 1"):
+    with pytest.raises(ProtocolError, match=r"speaks protocol 3.*declares 1"):
         LadderRequest.parse(payload)
 
 
@@ -106,7 +118,7 @@ def test_a_refusal_may_carry_empty_text() -> None:
         warning="status 403",
     )
     decoded = json.loads(response.encode())
-    assert decoded["protocol"] == 2
+    assert decoded["protocol"] == 3
     assert decoded["verdict"] == "blocked"
     assert decoded["warning"] == "status 403"
 

@@ -32,7 +32,7 @@ if (mode === "silent") {
 
   // A mismatched protocol must fail at the handshake, so this mode announces a
   // protocol the parent does not speak before any request is read.
-  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 3 : 2 }) + "\n");
+  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 3 }) + "\n");
 }
 
 // A silent child never reaches the read loop, so it cannot be woken by stdin
@@ -88,7 +88,7 @@ input.on("line", async (line) => {
     );
     return;
   }
-  // A protocol-2 response without links is a schema violation, not an empty
+  // A protocol-3 response without links is a schema violation, not an empty
   // result: the caller must be told the pair is stale, not handed [].
   if (mode === "missing-links") {
     process.stdout.write(

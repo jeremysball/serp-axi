@@ -148,11 +148,30 @@ normalized before either is returned, so source indentation and blank-line
 padding do not show up as content.
 
 Ladder axes (`--tab-state`, `--cookie-state`, `--cache-state`,
-`--fingerprint-state`, `--rung-ceiling`, `--profile`, `--jar-in`, `--jar-out`)
-each read a flag, then an env var, then the config file, then a profile bundle.
+`--fingerprint-state`, `--rung-ceiling`, `--profile`, `--jar-in`, `--jar-out`,
+`--http-jar-in`, `--http-jar-out`)
+each read a flag, then an env var, then a profile bundle, then the config file.
 The scored verdicts are `ok`, `dead`, `blocked`, and `error`, where `error`
 means the climb ran out of rungs with no page ever judged. The single rung
 budget is 90 seconds under SIGKILL, inside the request budget of 120 seconds.
+
+Cookie jars are separate, with no automatic conversion between formats:
+
+- `--jar-in` / `--jar-out` are reserved for filtered browser JSON jars. HTTP
+  never reads or writes them. `--cookie-state jar` mirrors only these paths.
+- `--http-jar-in` / `--http-jar-out` load/save full-session Netscape jars on
+  HTTP rung 1 only. Neither path implies the other. Treat these files as
+  credentials: they can contain authentication cookies, not just clearance.
+- HTTP settings also accept `SERP_AXI_HTTP_JAR_IN` / `SERP_AXI_HTTP_JAR_OUT`,
+  config keys `ladderHttpJarIn` / `ladderHttpJarOut`, and profile members
+  `httpJarIn` / `httpJarOut`.
+
+HTTP replay checks domain, path, Secure and expiry attributes, captures cookies
+on redirect hops, and preserves unrelated stored cookies when saving. Netscape
+jars cannot retain SameSite. A blocked HTTP response gets one fresh-client retry;
+its random fingerprint can repeat and it does not change the source IP.
+The parent and child must both speak protocol 3; an older installed child fails
+at the ready handshake instead of ignoring the separate HTTP fields.
 
 The measured results are written up in the project's Linear tracker. The raw
 datasets they cite are in [`spikes/`](spikes/), which explains each one.

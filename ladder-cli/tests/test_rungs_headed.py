@@ -143,7 +143,7 @@ def test_a_rung_four_page_is_judged_by_the_browser_rules() -> None:
     assert result.verdict is RungVerdict.DEAD
 
 
-def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polled(monkeypatch) -> None:
+def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polled(monkeypatch, tmp_path) -> None:
     """ladder.py:109's `time.sleep(1.5)` is the floor, not the whole answer.
 
     The readiness poll turns it into a floor, which is the point of the poll;
@@ -151,6 +151,7 @@ def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polle
     wait and win nothing, since a lock that has not appeared yet has not appeared.
     """
     slept: list[float] = []
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
     monkeypatch.setattr(headed, "display_is_free", lambda number: True)
     monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: FakeProcess())
     monkeypatch.setattr(headed.time, "sleep", lambda seconds: slept.append(seconds))
@@ -162,7 +163,7 @@ def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polle
     assert slept[0] == headed.XVFB_SETTLE_S, "the measured settle is spent before polling"
 
 
-def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(monkeypatch) -> None:
+def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(monkeypatch, tmp_path) -> None:
     """Silence is not readiness: a display with no lock is a dead display.
 
     The spike's fixed 1.5s sleep stays the floor (XVFB_SETTLE_S) but cannot tell
@@ -171,6 +172,7 @@ def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(mon
     bounded is part of what is tested.
     """
     process = FakeProcess()
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
     monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
     monkeypatch.setattr(headed, "display_is_free", lambda number: True)
     monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.25)

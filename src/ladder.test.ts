@@ -169,8 +169,8 @@ test("a protocol mismatch fails at the handshake and names both sides", async ()
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
       assert.ok(error instanceof SerpAxiLadderError);
       assert.match(error.message, /protocol mismatch/);
-      assert.match(error.message, /speaks protocol 2/);
-      assert.match(error.message, /reported protocol 3/);
+      assert.match(error.message, /speaks protocol 3/);
+      assert.match(error.message, /reported protocol 2/);
       return true;
     });
   } finally {
@@ -188,7 +188,7 @@ test("links survive the response parse", async () => {
   }
 });
 
-test("a protocol-2 response without links is a schema violation", async () => {
+test("a protocol-3 response without links is a schema violation", async () => {
   const ladder = client("missing-links");
   try {
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
@@ -217,7 +217,7 @@ test("verdict ok with empty text is a schema violation, not a success", async ()
   }
 });
 
-test("the request on the wire carries protocol plus all nine fields", async () => {
+test("the request on the wire carries protocol and separate browser and HTTP jars", async () => {
   const ladder = client("echo-request");
   try {
     const res = await ladder.fetch("https://a.example/x", resolveLadderAxes({}));
@@ -228,6 +228,8 @@ test("the request on the wire carries protocol plus all nine fields", async () =
         "cacheState",
         "cookieState",
         "fingerprintState",
+        "httpJarIn",
+        "httpJarOut",
         "jarIn",
         "jarOut",
         "profile",
@@ -246,6 +248,44 @@ test("the request on the wire carries protocol plus all nine fields", async () =
     assert.equal(sent.profile, null);
     assert.equal(sent.jarIn, null);
     assert.equal(sent.jarOut, null);
+    assert.equal(sent.httpJarIn, null);
+    assert.equal(sent.httpJarOut, null);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("HTTP jar flags, env and config resolve without browser jar mirroring", () => {
+  const config = { ladderHttpJarIn: "config.in", ladderHttpJarOut: "config.out" };
+  const env = { SERP_AXI_HTTP_JAR_IN: "env.in", SERP_AXI_HTTP_JAR_OUT: "env.out" };
+  const flag = { "http-jar-in": "flag.in", "http-jar-out": "flag.out" };
+  for (const [sources, expected] of [
+    [{ config, env, flag }, ["flag.in", "flag.out"]],
+    [{ config, env }, ["env.in", "env.out"]],
+    [{ config }, ["config.in", "config.out"]],
+  ] as const) {
+    const axes = resolveLadderAxes(sources);
+    assert.deepEqual([axes.httpJarIn, axes.httpJarOut], expected);
+    assert.deepEqual([axes.jarIn, axes.jarOut], [null, null]);
+  }
+  const axes = resolveLadderAxes({ flag: {
+    "cookie-state": "jar", "jar-out": "browser.json", "http-jar-in": "session.txt",
+  } });
+  assert.deepEqual([axes.jarIn, axes.jarOut], ["browser.json", "browser.json"]);
+  assert.deepEqual([axes.httpJarIn, axes.httpJarOut], ["session.txt", null]);
+});
+
+test("profile HTTP jars are transmitted independently of browser jars", async () => {
+  const axes = resolveLadderAxes({ flag: { profile: "both" }, config: { ladderProfiles: {
+    both: { jarIn: "browser.json", httpJarIn: "http.in", httpJarOut: "http.out" },
+  } } });
+  const ladder = client("echo-request");
+  try {
+    const sent = JSON.parse((await ladder.fetch("https://a.example/x", axes)).text);
+    assert.equal(sent.jarIn, "browser.json");
+    assert.equal(sent.jarOut, null);
+    assert.equal(sent.httpJarIn, "http.in");
+    assert.equal(sent.httpJarOut, "http.out");
   } finally {
     await ladder.close();
   }

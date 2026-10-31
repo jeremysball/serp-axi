@@ -49,6 +49,7 @@ new transport.
 
 ```json
 {
+  "protocol": 3,
   "url": "https://example.com/article",
   "tabState": "fresh",
   "cookieState": "cold",
@@ -57,7 +58,9 @@ new transport.
   "rungCeiling": 5,
   "profile": null,
   "jarIn": null,
-  "jarOut": null
+  "jarOut": null,
+  "httpJarIn": null,
+  "httpJarOut": null
 }
 ```
 
@@ -70,6 +73,11 @@ because replay is a known-unmet goal (q3_restart 3/3 blocked) and a single
 boolean cannot express intent that has already failed. `--profile` names a
 bundle resolved parent-side into the six fields, so profiles live in the
 existing config file and the CLI schema never grows a seventh axis.
+
+`jarIn`/`jarOut` remain browser-only filtered JSON jars. Separate
+`httpJarIn`/`httpJarOut` fields carry full-session Netscape jars for rung 1;
+neither is mirrored by `cookieState`, converted, or sent to browser rungs.
+Camoufox receives neither jar format. This request extension uses protocol 3.
 
 `rungCeiling` 1–5 caps escalation; a run that hits the ceiling without a
 verdict reports `blocked`, honestly, instead of climbing.

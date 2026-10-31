@@ -47,7 +47,7 @@ def read_lines(stdout: io.StringIO) -> list[dict]:
 def test_the_ready_line_precedes_every_response_and_declares_the_protocol() -> None:
     stdout = io.StringIO()
     cli.main([], stdin=io.StringIO(""), stdout=stdout)
-    assert read_lines(stdout) == [{"ready": True, "protocol": 2}]
+    assert read_lines(stdout) == [{"ready": True, "protocol": 3}]
 
 
 def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypatch) -> None:
@@ -61,7 +61,7 @@ def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypat
     lines = read_lines(stdout)
     assert lines[0]["ready"] is True
     response = lines[1]
-    assert response["protocol"] == 2
+    assert response["protocol"] == 3
     assert response["verdict"] == "ok"
     assert response["rungReached"] == 1
     assert response["text"] == "clear enough to read"
@@ -272,7 +272,7 @@ def test_jar_paths_reach_the_runner_with_the_request(make_request, monkeypatch, 
 
     jar_in = tmp_path / "in.jar"
     jar_out = tmp_path / "out.jar"
-    stdin = io.StringIO(json.dumps(payload(make_request(jarIn=str(jar_in), jarOut=str(jar_out)))) + "\n")
+    stdin = io.StringIO(json.dumps(payload(make_request(httpJarIn=str(jar_in), httpJarOut=str(jar_out)))) + "\n")
     stdout = io.StringIO()
     assert cli.main([], stdin=stdin, stdout=stdout) == 0
 
@@ -297,7 +297,7 @@ def test_the_child_command_carries_jar_flags(monkeypatch, tmp_path) -> None:
     result = cli.run_rung_isolated("http", "https://example.com/x", jar_in=str(jar), jar_out=str(jar))
 
     assert result.verdict is RungVerdict.OK
-    assert captured["command"][-4:] == ["--jar-in", str(jar), "--jar-out", str(jar)]
+    assert captured["command"][-4:] == ["--http-jar-in", str(jar), "--http-jar-out", str(jar)]
 
     captured.clear()
     cli.run_rung_isolated("http", "https://example.com/x")
@@ -316,7 +316,7 @@ def test_child_mode_parses_jar_flags(monkeypatch, tmp_path) -> None:
     jar_in = tmp_path / "in.jar"
     jar_out = tmp_path / "out.jar"
     code = cli.main(
-        ["--rung", "http", "https://example.com/x", "--jar-in", str(jar_in), "--jar-out", str(jar_out)]
+        ["--rung", "http", "https://example.com/x", "--http-jar-in", str(jar_in), "--http-jar-out", str(jar_out)]
     )
 
     assert code == 0
@@ -326,3 +326,15 @@ def test_child_mode_parses_jar_flags(monkeypatch, tmp_path) -> None:
         "jar_in": str(jar_in),
         "jar_out": str(jar_out),
     }
+
+
+def test_each_rung_receives_only_its_own_jar_format(make_request):
+    runner = sequence(refused(), refused(), refused(), ok_result())
+    request = make_request(jarIn="browser.in.json", jarOut="browser.out.json",
+                           httpJarIn="http.in.txt", httpJarOut="http.out.txt", rungCeiling=4)
+    response = cli.dispatch(request, runner=runner)
+    assert response.verdict == "ok"
+    assert runner.calls == ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]
+    assert runner.jars == [("http.in.txt", "http.out.txt"), (None, None),
+                           ("browser.in.json", "browser.out.json"),
+                           ("browser.in.json", "browser.out.json")]
