@@ -468,3 +468,14 @@ def test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_befo
     saved = jars.load(jar_out, "https://example.com/")
     assert [cookie.value for cookie in saved] == ["earned"]
     assert saved[0].path == "/" and saved[0].http_only is True
+
+
+def test_the_no_sandbox_opt_out_reads_its_environment(monkeypatch) -> None:
+    # Sandbox containers cannot run a sandboxed Chrome: the opt-out is
+    # LADDER_ZENDRIVER_SANDBOX=0, and it must not leak into the default run.
+    monkeypatch.delenv("LADDER_ZENDRIVER_SANDBOX", raising=False)
+    assert "sandbox" not in zendriver.launch_options()
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "0")
+    assert zendriver.launch_options()["sandbox"] is False
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "1")
+    assert "sandbox" not in zendriver.launch_options()

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import os
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +44,16 @@ def launch_options() -> dict[str, Any]:
     One declaration per rung, and the only one ``fetch`` reads: headed-ness is
     derived from it below rather than passed alongside it, so a rung cannot
     declare one head and launch another.
+
+    ``sandbox`` defaults to on and stays on unless LADDER_ZENDRIVER_SANDBOX=0:
+    in sandboxed containers Chrome cannot build its own sandbox, dies at
+    startup, and zendriver cannot connect, so the no-sandbox opt-out is
+    exported rather than hardcoded.
     """
-    return {"headless": HEADLESS, "browser_connection_max_tries": BROWSER_CONNECT_MAX_TRIES}
+    options: dict[str, Any] = {"headless": HEADLESS, "browser_connection_max_tries": BROWSER_CONNECT_MAX_TRIES}
+    if os.environ.get("LADDER_ZENDRIVER_SANDBOX") == "0":
+        options["sandbox"] = False
+    return options
 
 
 def cf_options() -> dict[str, Any]:
