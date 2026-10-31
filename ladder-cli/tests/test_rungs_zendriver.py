@@ -170,3 +170,14 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     assert seen["dir"] == str(tmp_path / "profiles" / "zd")
     assert seen["profile"] == ["zd"]
+
+
+def test_the_no_sandbox_opt_out_reads_its_environment(monkeypatch) -> None:
+    # Sandbox containers cannot run a sandboxed Chrome: the opt-out is
+    # LADDER_ZENDRIVER_SANDBOX=0, and it must not leak into the default run.
+    monkeypatch.delenv("LADDER_ZENDRIVER_SANDBOX", raising=False)
+    assert "sandbox" not in zendriver.launch_options()
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "0")
+    assert zendriver.launch_options()["sandbox"] is False
+    monkeypatch.setenv("LADDER_ZENDRIVER_SANDBOX", "1")
+    assert "sandbox" not in zendriver.launch_options()
