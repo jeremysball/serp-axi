@@ -20,8 +20,9 @@ def test_rung_three_runs_headless() -> None:
     assert zendriver.launch_options()["headless"] is True
 
 
-def test_the_launch_retries_the_connection_the_measured_number_of_times() -> None:
+def test_the_launch_retries_the_connection_the_measured_number_of_times(monkeypatch) -> None:
     # ladder.py:82 `browser_connection_max_tries=80` (H11)
+    monkeypatch.delenv("LADDER_ZENDRIVER_SANDBOX", raising=False)
     assert zendriver.BROWSER_CONNECT_MAX_TRIES == 80
     assert zendriver.launch_options() == {
         "headless": True,
