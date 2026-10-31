@@ -291,6 +291,23 @@ test("resolution precedence is flag, then env, then profile, then config, then d
     "config must beat the default",
   );
   assert.equal(resolveLadderAxes({}).tabState, "fresh", "the documented default must stand");
+  assert.equal(
+    resolveLadderAxes({
+      flag: { profile: "cautious" },
+      config: { ladderTabState: "fresh", ladderProfiles: { cautious: { tabState: "same" } } },
+    }).tabState,
+    "same",
+    "profile must beat scalar config",
+  );
+  assert.equal(
+    resolveLadderAxes({
+      flag: { profile: "cautious" },
+      env: { SERP_AXI_TAB_STATE: "fresh" },
+      config: { ladderProfiles: { cautious: { tabState: "same" } } },
+    }).tabState,
+    "fresh",
+    "env must beat the selected profile",
+  );
 });
 
 test("a profile bundle expands into exactly its named axes", () => {

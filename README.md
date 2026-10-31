@@ -133,8 +133,8 @@ ladder for fetching pages behind the links is live for rungs 1 to 4; rung 5's
 audio solve is not wired yet.
 
 `--ladder` runs the fetch through a resident `ladder-cli` child over stdio, free
-and with no API key. The climb has five rungs and escalates only as far as it
-needs to:
+and with no API key. The climb has four live rungs and escalates only as far as
+it needs to:
 
 | rung | what it does | state |
 | --- | --- | --- |
@@ -142,7 +142,7 @@ needs to:
 | 2 | Camoufox, a patched Firefox with `humanize` | live |
 | 3 | zendriver with a Turnstile click | live |
 | 4 | headed Chromium under Xvfb | live |
-| 5 | Whisper `base.en` on an audio reCAPTCHA, the rung-4 fallback | audio half built, browser half pending |
+| 5 | Whisper `base.en` on an audio reCAPTCHA | deferred; audio helpers only, not attempted |
 
 So a page that rung 1 answers is fetched at rung 1's cost, and a page behind a
 challenge is tried in a browser. Rung 5's audio solve is not wired yet, so an
@@ -155,19 +155,19 @@ serp-axi scrape https://example.com/article --ladder
 ## Ladder flags
 
 These only work with `--ladder`, and they are rejected elsewhere so a typo is
-never parsed and silently ignored. Each resolves flag, then env, then config
-file, then a `--profile` bundle.
+never parsed and silently ignored. Each resolves flag, then env, then a
+`--profile` bundle, then config file, then default.
 
 | flag | values | what it sets |
 | --- | --- | --- |
-| `--tab-state` | `fresh` (default), `same` | whether the tab is new |
+| `--tab-state` | `fresh` (default), `same` | reserved; not yet applied |
 | `--cookie-state` | `cold` (default), `jar` | `jar` is sugar for a jar in and out on one path |
-| `--cache-state` | `cold` (default), `warm` | whether the cache is kept |
-| `--fingerprint-state` | `rotate` (default), `stable` | whether the fingerprint is held |
-| `--rung-ceiling` | `1` to `5` (default `5`) | highest rung to attempt; hitting it reports `blocked` |
+| `--cache-state` | `cold` (default), `warm` | reserved; not yet applied |
+| `--fingerprint-state` | `rotate` (default), `stable` | reserved; not yet applied |
+| `--rung-ceiling` | `1` to `5` (default `5`) | highest rung allowed; `5` currently stops at rung `4` |
 | `--profile` | a name from `ladderProfiles` | a named bundle of the axes above |
-| `--jar-in` | a path | cookie jar loaded into the first browser rung that runs |
-| `--jar-out` | a path | cookie jar saved by that browser before it stops |
+| `--jar-in` | a path | cookie jar loaded before fetching with zendriver (rungs 3-4) |
+| `--jar-out` | a path | cookie jar saved by zendriver before its browser stops |
 
 `--jar-in` and `--jar-out` stay separate from `--cookie-state` on purpose.
 Replay is a known-unmet goal: the measured run loaded a jar into a fresh
@@ -175,22 +175,47 @@ browser three times and every one came back a challenge page. Keeping the two
 paths separate is what lets a caller find out for itself whether replay helped
 that site.
 
-A jar only travels through a browser: rung 1 has no cookies, so a climb that
-rung 1 answers reads no jar in and writes no jar out. The file is JSON, named
-`<name>.cookies.json`; zendriver's own `.cookies.dat` is a pickle and the two
-never share a path.
+A jar only travels through zendriver (rungs 3-4). A climb answered by HTTP or
+Camoufox (rungs 1-2) reads no jar in and writes no jar out. The file is JSON, named
+`<name>.cookies.json` by convention. Explicit jar paths are used as supplied;
+do not point them at zendriver's `.cookies.dat` pickle files, which a JSON
+save would overwrite. Each zendriver rung loads the input jar and saves its
+own output; when both rungs run, the later save replaces the earlier one.
+Filtering uses the bundled public/private suffix snapshot
+without a network refresh; unknown suffixes stay host-scoped. Missing jars are
+cold starts; corrupt or unreadable jars raise errors, including malformed cookie
+records. Saves replace the jar atomically after writing a sibling temporary file;
+a failed write leaves the previous jar intact. A symlink output updates its target
+and preserves the link. Atomic replacement requires write access to the target's
+parent directory, not just to the existing file. An export failure fails the rung
+even if page extraction succeeded; the requested jar is part of that rung's result.
+Unicode and punycode hostnames share one scope. The jar's base-domain filter
+limits which cookies may travel; the browser still applies each cookie's own
+domain and path rules when making requests.
+
+Profile launches take an exclusive local lease. Cleanup removes Chromium locks
+only when their recorded owner is on this host and its process no longer exists.
+A live, foreign-host, or unrecognized lock is refused and left untouched.
+Profiles live under `$XDG_STATE_HOME/serp-axi/profiles`, falling back to
+`~/.local/state/serp-axi/profiles`. Existing working-directory `profiles/`
+folders are not migrated or removed automatically.
 
 Jar contents are filtered before they are written and again before they are
 loaded, to the four defence cookies (`cf_clearance`, `_px3`, `_pxhd`,
 `datadome`) scoped to the target's base domain. A warmed profile holds every
 site's cookies, so only the target's own leave with the fetch.
 
-The scored verdicts are `ok`, `dead`, `blocked`, and `error`, where `error`
-means the climb ran out of rungs with no page ever judged. The single rung
-budget is 90 seconds under SIGKILL, inside the request budget of 120 seconds.
+The scored verdicts are `ok`, `dead`, `blocked`, and `error`. Exhaustion reports
+`error` if the final rung malfunctioned, otherwise `blocked`. A rung that exceeds
+its 90-second subprocess budget is killed and reports `error`, allowing the
+next rung to run. The independent 120-second request cap can interrupt the
+whole climb before every rung finishes; that cap raises a request error.
 
-The measured results are written up in the project's Linear tracker. The raw
-datasets they cite are in [`spikes/`](spikes/), which explains each one.
+The committed datasets and harness ledger are in [`spikes/`](spikes/).
+Current ladder decisions and scope live in
+[the technical design](.superpowers/crispy/ladder-cli/04-tdd.md) and
+[outline](.superpowers/crispy/ladder-cli/05-outline.md). Historical reports and
+some excluded attachments remain in Linear; they are not the home for new findings.
 
 ## Using the Kagi provider
 
@@ -219,6 +244,35 @@ Worth knowing about it:
 - Parsing HTML means a Kagi redesign can break this provider where an API
   version would not. `src/kagi.test.ts` runs against a saved copy of a real
   SERP, so a breaking change shows up as a test failure.
+
+## Tests
+
+Run `npm run check` for typechecking, the Node/Python suites, and the named
+mutation gate. Prepublish checks run the same gate. To run only the mutation
+gate, use `npm run test:mutations`.
+
+The Python mutation-safety tests and the mutation gate require Linux, Bubblewrap
+(`bwrap` on `PATH`), and working unprivileged user namespaces. CI probes those
+capabilities before the Python suite. A missing or unusable sandbox fails the
+gate; it never runs mutants without isolation or counts a startup error as a kill.
+`npm run test:mutations` first syncs the locked Python test extra in `ladder-cli`.
+Before invoking `scripts/mutations.py` directly, run
+`uv sync --project ladder-cli --frozen --inexact --extra test`; scratch runs stay offline
+and reuse that environment without syncing it.
+
+Serper request and error handling use mocked responses by default. To run its
+live API checks, set `SERPER_API_KEY` and run:
+
+```sh
+SERP_AXI_LIVE_SERPER=1 node --test src/serper.live.test.ts
+```
+
+Live Serper checks require available account credits. Mocked tests do not
+verify the live service. Bright Data tests require `SERP_AXI_LIVE_BRIGHTDATA=1`
+and `BRIGHTDATA_API_KEY`; Kagi tests require `SERP_AXI_LIVE_KAGI=1` and
+`KAGI_SESSION_TOKEN`. Credentials alone activate no live provider tests.
+Live ladder tests require `SERP_AXI_LIVE_LADDER=1`
+and an available `ladder-cli` binary.
 
 ## Publishing (maintainers)
 

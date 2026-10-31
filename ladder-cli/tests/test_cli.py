@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import subprocess
 import sys
 import time
 
@@ -145,8 +146,25 @@ def test_a_rung_that_blows_its_budget_is_killed() -> None:
     )
     elapsed = time.monotonic() - started
     assert elapsed < 20, f"the SIGKILL did not land; waited {elapsed}s"
-    assert result.verdict is RungVerdict.BLOCKED
+    assert result.verdict is RungVerdict.ERROR
     assert "budget" in result.reason
+
+
+def test_a_final_rung_timeout_is_an_error_not_a_defended_page(make_request) -> None:
+    calls = []
+
+    def runner(rung, url, ctx=None):
+        calls.append(rung)
+        return cli.run_rung_isolated(
+            rung, url, timeout_s=0.3,
+            argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+        )
+
+    response = cli.dispatch(make_request(rungCeiling=1), runner=runner)
+    assert calls == ["http"]
+    assert response.rungReached == 1
+    assert response.verdict == "error"
+    assert "budget" in response.warning
 
 
 def test_a_child_record_comes_back_judged_by_the_rung_rules() -> None:
@@ -243,6 +261,18 @@ def test_a_browser_tool_is_not_imported_before_anything_needs_it() -> None:
     # module scope made the resident child owe its ready line before it had
     # touched a browser, so the import moved inside the client that uses it.
     assert "primp" not in sys.modules, "importing the ladder pulled in a browser tool it has not asked for"
+
+
+def test_suffix_data_is_loaded_only_when_cookie_scoping_needs_it():
+    process = subprocess.run([
+        sys.executable, "-c",
+        "import sys; from ladder_cli import cli; from ladder_cli.state import jars; "
+        "before = 'tldextract' in sys.modules; "
+        "assert jars.base_domain('www.example.com') == 'example.com'; "
+        "assert 'tldextract' in sys.modules; "
+        "assert not before, 'resident readiness eagerly imported cookie suffix support'",
+    ], capture_output=True, text=True, timeout=10)
+    assert process.returncode == 0, process.stderr
 
 
 def test_the_requests_jar_paths_reach_the_runner(make_request, monkeypatch) -> None:

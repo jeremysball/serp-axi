@@ -13,7 +13,7 @@ const bin = resolveLadderBin(process.env);
 const skip = process.env.SERP_AXI_LIVE_LADDER !== "1" || !existsSync(bin);
 
 test("ladder-cli answers a rung-1 URL end to end", { skip }, async () => {
-  const response = await fetchViaLadder("https://en.wikipedia.org/wiki/Web_scraping", { bin }, resolveLadderAxes({}));
+  const response = await fetchViaLadder("https://en.wikipedia.org/wiki/Web_scraping", { bin }, resolveLadderAxes({ flag: { "rung-ceiling": "1" } }));
   assert.equal(response.verdict, "ok");
   assert.equal(response.rungReached, 1);
   assert.ok(response.text.length > 800, `expected real prose, got ${response.text.length} chars`);
@@ -21,7 +21,7 @@ test("ladder-cli answers a rung-1 URL end to end", { skip }, async () => {
 });
 
 test("a thin page is refused with a reason rather than returned as an empty ok", { skip }, async () => {
-  const response = await fetchViaLadder("https://example.com/", { bin }, resolveLadderAxes({}));
+  const response = await fetchViaLadder("https://example.com/", { bin }, resolveLadderAxes({ flag: { "rung-ceiling": "1" } }));
   assert.equal(response.verdict, "blocked");
   assert.match(response.warning ?? "", /under rung-1 floor/);
 });

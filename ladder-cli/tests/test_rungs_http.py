@@ -26,6 +26,31 @@ def test_real_content_passes() -> None:
     assert result.status == 200
 
 
+def test_http_fetch_ignores_jar_paths(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(status_code=200, text="<title>Title</title><p>Content</p>")
+
+    def unexpected_jar_access(*args, **kwargs):
+        raise AssertionError("HTTP must not load or save cookie jars")
+
+    monkeypatch.setattr(http, "_client", lambda: SimpleNamespace(get=get))
+    monkeypatch.setattr(jars, "load", unexpected_jar_access)
+    monkeypatch.setattr(jars, "save", unexpected_jar_access)
+    output = tmp_path / "output.json"
+    result = http.fetch("https://example.com/", RungContext(tmp_path / "input.json", output))
+    assert result.get("title") == "Title"
+    assert "Content" in result["text"]
+    assert calls == ["https://example.com/"]
+    assert not output.exists()
+
+
 def test_a_gone_page_is_dead_and_a_defended_page_is_blocked() -> None:
     gone = http.judge(page("Not found", "nope", status=404))
     assert gone.verdict is RungVerdict.DEAD, "404 must not climb: no browser revives a deleted page"

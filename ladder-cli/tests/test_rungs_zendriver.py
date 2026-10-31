@@ -7,6 +7,8 @@ numbers.
 
 from __future__ import annotations
 
+import pytest
+
 from conftest import inject_module
 from ladder_cli.rungs import RungVerdict, zendriver
 from ladder_cli.state import profiles
@@ -119,7 +121,7 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
 
     assert page == {"title": "Title", "text": "Body text.", "status": None}, "blanks collapsed, as ladder.py:114 did"
     assert calls == [
-        ("start", {"user_data_dir": str(tmp_path / "profiles" / "zd"), **zendriver.launch_options()}),
+        ("start", {"user_data_dir": str(tmp_path / "serp-axi" / "profiles" / "zd"), **zendriver.launch_options()}),
         ("get", "https://example.com/"),
         ("sleep", 6),
         ("verify_cf", {"click_delay": 3, "timeout": 20}),
@@ -135,7 +137,7 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     class FakeBrowser:
         async def get(self, url: str):
-            seen["profile"] = sorted(p.name for p in (tmp_path / "profiles").iterdir())
+            seen["profile"] = sorted(p.name for p in (tmp_path / "serp-axi" / "profiles").iterdir())
 
             class Tab:
                 async def sleep(self, seconds: float) -> None: ...
@@ -158,7 +160,7 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
 
     zendriver.fetch("https://example.com/")
 
-    assert seen["dir"] == str(tmp_path / "profiles" / "zd")
+    assert seen["dir"] == str(tmp_path / "serp-axi" / "profiles" / "zd")
     assert seen["profile"] == ["zd"]
 
 
@@ -172,12 +174,170 @@ def test_a_stale_profile_lock_is_cleared_before_the_browser_starts(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     profile = profiles.zendriver_dir(profiles.root(), headed=False)
     profile.mkdir(parents=True)
-    (profile / "SingletonLock").write_text("stale")
+    import socket
+    import subprocess
+    import sys
 
-    prepared = zendriver.prepare_profile(headed=False)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=10)
+    (profile / "SingletonLock").symlink_to(f"{socket.gethostname()}-{child.pid}")
+    assert (profile / "SingletonLock").is_symlink()
 
-    assert prepared == profile
-    assert not (profile / "SingletonLock").exists()
+    async def fetch(url, options, ctx=None):
+        assert options["user_data_dir"] == str(profile)
+        assert not (profile / "SingletonLock").is_symlink()
+        return {"title": "page", "text": "body", "status": None}
+
+    monkeypatch.setattr(zendriver, "_fetch", fetch)
+    page = zendriver.climb("https://example.com/", {"headless": True})
+
+    assert page == {"title": "page", "text": "body", "status": None}
+    assert not (profile / "SingletonLock").is_symlink()
+
+
+def test_shared_profile_launches_are_exclusive(tmp_path, monkeypatch) -> None:
+    import fcntl
+    import pytest
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    async def fetch(url, options, ctx=None):
+        calls.append(url)
+        return {"title": "page", "text": "body", "status": None}
+
+    monkeypatch.setattr(zendriver, "_fetch", fetch)
+    assert zendriver.climb("https://example.com/", {"headless": True})["title"] == "page"
+    assert calls == ["https://example.com/"]
+    profile = profiles.zendriver_dir(profiles.root(), headed=False)
+    profile.mkdir(parents=True, exist_ok=True)
+    with (profile / ".ladder.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError, match="profile is already in use"):
+            zendriver.climb("https://other.example/", {"headless": True})
+    assert calls == ["https://example.com/"]
+
+
+@pytest.mark.parametrize("headless", [True, False])
+def test_browser_launch_uses_the_exact_profile_already_leased(tmp_path, monkeypatch, headless) -> None:
+    import fcntl
+
+    resolved = []
+    launched = []
+
+    def profile_dir(base, *, headed):
+        path = base / f"{'headed' if headed else 'headless'}-{len(resolved)}"
+        resolved.append(path)
+        return path
+
+    class Tab:
+        async def sleep(self, seconds): ...
+        async def verify_cf(self, **kwargs): ...
+        async def evaluate(self, expression):
+            return ("Title", "body text")
+
+    class Browser:
+        async def get(self, url):
+            return Tab()
+
+        async def stop(self): ...
+
+    class Zendriver:
+        @staticmethod
+        async def start(**options):
+            launched.append(options["user_data_dir"])
+            assert options["user_data_dir"] == str(resolved[0]), "browser must use the leased directory"
+            with (resolved[0] / ".ladder.lock").open("a") as contender:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return Browser()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(profiles, "zendriver_dir", profile_dir)
+    inject_module(monkeypatch, "zendriver", Zendriver)
+
+    page = zendriver.climb("https://example.com/", {"headless": headless})
+
+    assert page == {"title": "Title", "text": "body text", "status": None}
+    assert launched == [str(tmp_path / "serp-axi" / "profiles" / f"{'headless' if headless else 'headed'}-0")]
+    assert len(resolved) == 1, "profile selection has one owner per launch"
+
+
+@pytest.mark.parametrize("headless", [True, False])
+def test_invalid_jar_is_rejected_before_browser_start(tmp_path, monkeypatch, headless):
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    started = []
+
+    class Tab:
+        async def sleep(self, seconds): ...
+        async def verify_cf(self, **kwargs): ...
+        async def evaluate(self, expression):
+            return ("Title", "body")
+
+    class Browser:
+        async def get(self, url):
+            return Tab()
+        async def stop(self): ...
+
+    class Zendriver:
+        @staticmethod
+        async def start(**options):
+            started.append(options)
+            return Browser()
+
+    monkeypatch.chdir(tmp_path)
+    inject_module(monkeypatch, "zendriver", Zendriver)
+    path = tmp_path / "input.json"
+    jars.save(path, [], "https://example.com/")
+    options = {"headless": headless}
+    page = zendriver.climb("https://example.com/", options, RungContext(jar_in=path))
+    assert page == {"title": "Title", "text": "body", "status": None}
+    assert len(started) == 1
+    path.write_text('{"cookies": 1}')
+
+    with pytest.raises(ValueError, match="invalid cookie jar"):
+        zendriver.climb("https://example.com/", options, RungContext(jar_in=path))
+    assert len(started) == 1, "corrupt input must not launch another browser"
+
+
+def test_failed_jar_export_reports_the_error_and_stops_the_browser(tmp_path, monkeypatch):
+    from ladder_cli.rungs import RungContext
+
+    calls = []
+
+    class Tab:
+        async def sleep(self, seconds): ...
+        async def verify_cf(self, **kwargs): ...
+        async def evaluate(self, expression):
+            calls.append("extract")
+            return ("Title", "body")
+
+    class Browser:
+        @property
+        def cookies(self):
+            return self
+        async def get_all(self):
+            return []
+        async def get(self, url):
+            return Tab()
+        async def stop(self):
+            calls.append("stop")
+
+    class Zendriver:
+        @staticmethod
+        async def start(**options):
+            calls.append("start")
+            return Browser()
+
+    monkeypatch.chdir(tmp_path)
+    inject_module(monkeypatch, "zendriver", Zendriver)
+    output = tmp_path / "directory-not-a-jar"
+    output.mkdir()
+    with pytest.raises(OSError):
+        zendriver.fetch("https://example.com/", RungContext(jar_out=output))
+    assert calls == ["start", "extract", "stop"]
 
 
 def test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop(

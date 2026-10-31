@@ -37,6 +37,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,16 +64,16 @@ BELIEFS: list[Belief] = [
     Belief(
         name="every rung in the climb is reachable",
         path=LADDER / "ladder_cli/rungs/__init__.py",
-        old='    "zendriver_headed_cf": headed,' + chr(10) + '    "whisper": whisper,' + chr(10) + "}",
-        new='    "zendriver_headed_cf": headed,' + chr(10) + "}",
+        old='    "zendriver_headed_cf": headed,',
+        new='',
         test="tests/test_escalation.py::test_every_rung_in_the_climb_is_reachable",
         why="A rung in RUNGS with no module is a dead step: the climb reaches for nothing.",
     ),
     Belief(
         name="the climb starts cheap and only reaches for a browser when it must",
         path=LADDER / "ladder_cli/rungs/__init__.py",
-        old='RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf", "whisper")',
-        new='RUNGS: tuple[str, ...] = ("camoufox", "http", "zendriver_cf", "zendriver_headed_cf", "whisper")',
+        old='RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")',
+        new='RUNGS: tuple[str, ...] = ("camoufox", "http", "zendriver_cf", "zendriver_headed_cf")',
         test="tests/test_escalation.py::test_the_climb_starts_cheap_and_only_reaches_for_a_browser_when_it_must",
         why="The 80-in-100 case pays rung 1's cost alone, so a browser first is the wrong order.",
     ),
@@ -87,42 +89,42 @@ BELIEFS: list[Belief] = [
         name="no rung carries its own budget",
         path=LADDER / "ladder_cli/cli.py",
         old="    budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s",
-        new='    budget = 5.0 if rung == "http" else DEFAULT_RUNG_TIMEOUT_S',
+        new='    budget = 5.0 if rung == "http" else (DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s)',
         test="tests/test_escalation.py::test_no_rung_carries_its_own_budget",
         why="One deadline, one owner. A per-rung budget gives one deadline two owners.",
     ),
-    # ---- rung 5's model is a resource of the process, not of one fetch ----
+    # ---- unwired audio helpers cache only within their own process ----
     Belief(
-        name="the laziness counter reports what actually happened",
+        name="audio helper imports do not construct a model",
         path=LADDER / "ladder_cli/rungs/whisper.py",
-        old="    return _loads",
-        new="    return 1",
+        old="_model: Any | None = None",
+        new="_model: Any | None = object()",
         test="tests/test_rungs_whisper.py::test_importing_the_module_loads_nothing",
-        why="A counter that lies makes the zero-load claim unfalsifiable at a glance.",
+        why="Importing optional audio helpers must leave the model unloaded.",
     ),
     Belief(
-        name="the model is built once per resident child's life",
+        name="the audio helper reuses its model within one process",
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="    if _model is None:",
         new="    if True:",
-        test="tests/test_rungs_whisper.py::test_the_model_is_built_once_per_cli_life_not_once_per_fetch",
-        why="Rebuilding per fetch re-pays the construction the rung exists to avoid.",
+        test="tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",
+        why="Repeated helper calls should not reconstruct their model.",
     ),
     Belief(
         name="the model cache holds the model it built",
         path=LADDER / "ladder_cli/rungs/whisper.py",
-        old="        _model = model",
-        new="        _model = None",
-        test="tests/test_rungs_whisper.py::test_the_model_is_built_once_across_fetches_in_the_resident_child",
-        why="Discarding it means every fetch rebuilds while the counter still says one.",
+        old="        _model = _build(device=DEVICE, compute_type=COMPUTE_TYPE)",
+        new="        _build(device=DEVICE, compute_type=COMPUTE_TYPE)",
+        test="tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",
+        why="Discarding the constructed model makes the next helper call rebuild it.",
     ),
     Belief(
-        name="rung 5 runs in the resident child, never the killable subprocess",
-        path=LADDER / "ladder_cli/cli.py",
-        old='    if rung != "whisper":',
-        new="    if True:",
-        test="tests/test_rungs_whisper.py::test_rung_five_is_never_sent_to_the_killable_subprocess",
-        why="A subprocess is a fresh interpreter per fetch, so the model dies with it.",
+        name="ceiling five stops at the last implemented rung",
+        path=LADDER / "ladder_cli/rungs/__init__.py",
+        old='"zendriver_headed_cf")',
+        new='"zendriver_headed_cf", "whisper")',
+        test="tests/test_escalation.py::test_ceiling_five_stops_at_the_last_implemented_rung",
+        why="An unwired audio helper must not become a duplicate browser attempt.",
     ),
     Belief(
         name="the model is the measured base.en",
@@ -175,11 +177,19 @@ BELIEFS: list[Belief] = [
     ),
     Belief(
         name="the browser rungs agree on a verdict",
-        path=LADDER / "ladder_cli/rungs/whisper.py",
-        old="judge = browser_judge",
-        new='judge = lambda page: browser_judge({"title": "", "text": "", "status": 404})',
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="judge = zendriver.judge",
+        new='judge = lambda page: zendriver.judge({"title": "", "text": "", "status": 404})',
         test="tests/test_fixture_replay.py::test_the_browser_rungs_apply_one_set_of_rules",
         why="A page judged twice must not read differently because it climbed twice.",
+    ),
+    Belief(
+        name="the browser opens the exact profile already leased",
+        path=LADDER / "ladder_cli/rungs/zendriver.py",
+        old='        return asyncio.run(_fetch(url, {**options, "user_data_dir": str(profile)}, ctx))',
+        new='        return asyncio.run(_fetch(url, {**options, "user_data_dir": str(prepare_profile(headed=not options["headless"]))}, ctx))',
+        test="tests/test_rungs_zendriver.py::test_browser_launch_uses_the_exact_profile_already_leased",
+        why="Selecting the profile again can move the browser away from the directory protected by the lease.",
     ),
     Belief(
         name="the filter refuses a URL it cannot scope rather than crashing",
@@ -187,7 +197,10 @@ BELIEFS: list[Belief] = [
         old=(
             '    if "://" not in url:' + chr(10)
             + "        return None" + chr(10)
-            + "    return urlparse(url).hostname"
+            + "    try:" + chr(10)
+            + "        return urlparse(url).hostname" + chr(10)
+            + "    except ValueError:" + chr(10)
+            + "        return None"
         ),
         new='    return url.split("/")[2]',
         test="tests/test_jars.py::test_a_url_the_filter_cannot_scope_is_rejected_rather_than_crashed",
@@ -196,8 +209,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a multi-label public suffix is not the base domain",
         path=LADDER / "ladder_cli/state/jars.py",
-        old='    if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_SUFFIXES:',
-        new="    if False:",
+        old="    return extracted.top_domain_under_public_suffix",
+        new='    return ".".join(host.split(".")[-2:])',
         test="tests/test_jars.py::test_a_multi_label_public_suffix_is_not_treated_as_the_base_domain",
         why="Two labels turns www.bbc.co.uk into co.uk and lets every .co.uk sibling through.",
     ),
@@ -245,16 +258,16 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a killed browser's locks are cleared on the launch path",
         path=LADDER / "ladder_cli/rungs/zendriver.py",
-        old="    jars.clear_locks(user_data_dir)",
-        new="    pass",
+        old="        jars.clear_locks(profile)",
+        new="        pass",
         test="tests/test_rungs_zendriver.py::test_a_stale_profile_lock_is_cleared_before_the_browser_starts",
         why="clear_locks was tested on its own and called by nothing, so launches still stalled.",
     ),
     Belief(
         name="a carried jar is loaded before the page is fetched",
         path=LADDER / "ladder_cli/rungs/zendriver.py",
-        old="                await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])",
-        new="                pass",
+        old="            await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])",
+        new="            pass",
         test="tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",
         why="A jar loaded after the page arrives replays nothing.",
     ),
@@ -269,8 +282,8 @@ BELIEFS: list[Belief] = [
 ]
 
 
-def _forget_imports() -> None:
-    """Drop every compiled cache before a run.
+def _forget_imports(project: Path) -> None:
+    """Drop project source and test bytecode before a run.
 
     Python invalidates bytecode by source mtime AND size. A mutant that preserves
     byte length (base.en to tiny.en) written inside the same timestamp tick leaves
@@ -279,11 +292,23 @@ def _forget_imports() -> None:
     worse than no gate at all, so caches are cleared every run and bytecode is
     never written back.
     """
-    for cache in LADDER.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
+    for root in (project / "ladder_cli", project / "tests"):
+        for cache in root.rglob("__pycache__"):
+            shutil.rmtree(cache)
 
 
-def run_tests(selector: str) -> tuple[str, str]:
+@contextmanager
+def _scratch_project():
+    with tempfile.TemporaryDirectory(prefix="serp-axi-mutation-") as temporary:
+        project = Path(temporary) / "ladder-cli"
+        shutil.copytree(
+            LADDER, project,
+            ignore=shutil.ignore_patterns(".venv", "profiles", "__pycache__", ".pytest_cache"),
+        )
+        yield project
+
+
+def run_tests(selector: str, project: Path | None = None) -> tuple[str, str]:
     """Return (outcome, last_line) where outcome is pass, fail, or error.
 
     The verdict comes from pytest's exit code, not the last output line. A
@@ -292,16 +317,53 @@ def run_tests(selector: str) -> tuple[str, str]:
     gate exists to prevent. Exit 5 means no tests were collected, so the selector
     matches nothing; that is an invalid entry and never a kill.
     """
-    _forget_imports()
+    if project is None:
+        with _scratch_project() as scratch:
+            return run_tests(selector, scratch)
+    _forget_imports(project)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    proc = subprocess.run(
-        PYTEST + [selector], cwd=LADDER, capture_output=True, text=True, timeout=600, env=env
-    )
+    env["PYTHONPATH"] = str(project)
+    environment = Path(env.get("UV_PROJECT_ENVIRONMENT", str(LADDER / ".venv")))
+    env["UV_PROJECT_ENVIRONMENT"] = str((LADDER / environment).resolve())
+    env["UV_NO_SYNC"] = "1"
+    env["UV_OFFLINE"] = "1"
+    for name, directory in {
+        "HOME": "home", "TMPDIR": "tmp", "XDG_CACHE_HOME": "cache",
+        "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_STATE_HOME": "state",
+        "UV_CACHE_DIR": "cache/uv",
+    }.items():
+        location = project.parent / directory
+        location.mkdir(parents=True, exist_ok=True)
+        env[name] = str(location)
+    sandbox = [
+        "bwrap", "--ro-bind", "/", "/", "--bind", str(project.parent), str(project.parent),
+        "--dev", "/dev", "--proc", "/proc", "--unshare-all", "--die-with-parent",
+        "--new-session", "--cap-drop", "ALL", "--",
+    ]
+    status = project.parent / "pytest-status"
+    status.unlink(missing_ok=True)
+    wrapper = [
+        sys.executable, "-c",
+        "import subprocess, sys; from pathlib import Path; "
+        "code = subprocess.run(sys.argv[2:]).returncode; "
+        "Path(sys.argv[1]).write_text(str(code))",
+        str(status),
+    ]
+    try:
+        proc = subprocess.run(
+            sandbox + wrapper + PYTEST + [selector], cwd=project,
+            capture_output=True, text=True, timeout=600, env=env
+        )
+    except FileNotFoundError:
+        return "error", "bwrap is unavailable; install Bubblewrap and enable unprivileged user namespaces"
     tail = (proc.stdout + proc.stderr).strip().splitlines()
     last = tail[-1] if tail else "(no output)"
-    if proc.returncode == 0:
+    if proc.returncode != 0 or not status.exists():
+        return "error", f"sandbox/pytest startup failed; check Bubblewrap, user namespaces and the synced test extra: {last}"
+    code = int(status.read_text())
+    if code == 0:
         return "pass", last
-    if proc.returncode == 1:
+    if code == 1:
         # The only code that means "these tests ran and failed".
         return "fail", last
     # 4 is a usage error (a test id that matches nothing) and 5 is no tests
@@ -365,15 +427,17 @@ def main() -> int:
             invalid.append(belief)
             continue
 
-        belief.path.write_text(original.replace(belief.old, belief.new, 1))
-        try:
-            outcome, last = run_tests(belief.test)
-        finally:
-            belief.path.write_text(original)
+        with _scratch_project() as project:
+            target = project / belief.path.relative_to(LADDER)
+            target.write_text(original.replace(belief.old, belief.new, 1))
+            outcome, last = run_tests(belief.test, project)
 
         if outcome == "fail":
             killed += 1
             print(f"killed    [{belief.name}]")
+        elif outcome == "error":
+            invalid.append(belief)
+            print(f"INVALID   [{belief.name}]: mutant test could not run ({last})")
         else:
             survived.append(belief)
             print(f"SURVIVED  [{belief.name}] -> {last}")

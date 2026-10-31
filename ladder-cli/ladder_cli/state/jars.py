@@ -13,18 +13,23 @@ page, so ``JAR_REPLAY_RESCUES`` is ``False`` and the separate ``jarIn`` and
 ``jarOut`` request fields exist so a caller can find out for itself
 (04-tdd 1.8, want 4).
 
-The file is JSON and is named ``<name>.cookies.json``. The measured run reused
+The file is JSON; ``path_for`` suggests ``<name>.cookies.json``. The measured run reused
 ``<name>.cookies.dat``, which is the path zendriver's own cookie file defaults
 to and that file is a pickle (``CookieJar.save``); two formats must not claim
-one path, and this module's own format is JSON, so the name says so.
+one path. Explicit request paths are used unchanged, so callers must not point
+JSON jar output at an existing browser pickle file.
 """
 
 from __future__ import annotations
 
 import json
-import re
+import math
+import os
+import socket
+import tempfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from functools import cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -69,51 +74,32 @@ class Cookie:
     http_only: bool = False
 
 
-# Two-label public suffixes. The measured filter took the last two labels as the
-# base, which turns `www.bbc.co.uk` into `co.uk` and lets every `.co.uk`
-# sibling's defence cookies travel with the fetch. A registrable domain sits
-# directly above one of these, so it takes one more label.
-#
-# This is a table, not the Public Suffix List, and that is deliberate: a PSL
-# dependency is a heavier change than this filter warrants, and a host under an
-# unlisted suffix degrades to the two-label rule (a narrower scope than measured)
-# rather than to a wrongly wide one. Widening is the failure that matters here.
-MULTI_LABEL_SUFFIXES: frozenset[str] = frozenset(
-    {
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
-        "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
-        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
-        "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp",
-        "com.br", "net.br", "org.br", "gov.br",
-        "com.cn", "net.cn", "org.cn", "gov.cn",
-        "com.mx", "org.mx", "gob.mx",
-        "co.in", "net.in", "org.in", "gov.in",
-        "co.za", "org.za", "gov.za",
-        "com.tr", "org.tr", "gov.tr",
-        "com.tw", "org.tw", "gov.tw",
-        "com.hk", "org.hk", "gov.hk",
-        "com.sg", "org.sg", "gov.sg",
-        "co.kr", "or.kr", "go.kr",
-        "com.ar", "org.ar", "gob.ar",
-        "com.pl", "org.pl", "gov.pl",
-    }
-)
+@cache
+def _suffixes():
+    from tldextract import TLDExtract
+
+    return TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+
+
+def _ascii_host(host: str) -> str:
+    host = host.lower().rstrip(".")
+    if host.isascii():
+        return host
+    import idna
+
+    try:
+        return idna.encode(host, uts46=True).decode("ascii")
+    except idna.IDNAError:
+        return ""
 
 
 def base_domain(host: str) -> str:
-    """The registrable base of a host: above a public suffix, not below it.
-
-    solver_probe.py:30 `".".join(host.split(".")[-2:])` is the measured rule, and
-    it is right for a two-label registrable domain and wrong for a host under a
-    two-label public suffix. Corrected here with the reason recorded beside it:
-    the allowlist and the base-domain scope are measured, this predicate is the
-    part that got the scope wrong.
-    """
-    host = re.sub(r"^www\.", "", host.split("/")[0]).lower()
-    labels = host.split(".")
-    if len(labels) >= 3 and ".".join(labels[-2:]) in MULTI_LABEL_SUFFIXES:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
+    """Use the bundled public/private suffix snapshot; unknown suffixes stay host-scoped."""
+    host = _ascii_host(host)
+    extracted = _suffixes()(host)
+    if not extracted.suffix:
+        return host
+    return extracted.top_domain_under_public_suffix
 
 
 def _host_of(url: str) -> str | None:
@@ -129,7 +115,10 @@ def _host_of(url: str) -> str | None:
     """
     if "://" not in url:
         return None
-    return urlparse(url).hostname
+    try:
+        return urlparse(url).hostname
+    except ValueError:
+        return None
 
 
 def keeps(name: str, domain: str, url: str) -> bool:
@@ -147,7 +136,9 @@ def keeps(name: str, domain: str, url: str) -> bool:
     if host is None:
         return False
     base = base_domain(host)
-    scope = domain.lstrip(".").lower()
+    if not base:
+        return False
+    scope = _ascii_host(domain.lstrip("."))
     return scope == base or scope.endswith("." + base)
 
 
@@ -181,8 +172,20 @@ def save(path: Path, cookies: Iterable[Cookie], url: str) -> int:
     more than the module would ever load.
     """
     kept = filter_cookies(cookies, url)
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"url": url, "cookies": [asdict(cookie) for cookie in kept]}, indent=1) + "\n")
+    contents = json.dumps({"url": url, "cookies": [asdict(cookie) for cookie in kept]}, indent=1) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return len(kept)
 
 
@@ -194,45 +197,72 @@ def load(path: Path, url: str) -> list[Cookie]:
     Returns ``[]`` for a jar that is not there, because a missing jar is the
     cold-start case and not an error.
     """
-    if not path.is_file():
-        return []
     try:
         payload = json.loads(path.read_text())
-    except (ValueError, OSError):
+    except FileNotFoundError:
         return []
     raw = payload.get("cookies") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
-        return []
-    cookies = [
-        Cookie(
-            name=str(item.get("name", "")),
-            domain=str(item.get("domain", "")),
-            value=str(item.get("value", "")),
-            expires=item.get("expires"),
-            secure=bool(item.get("secure", False)),
-            same_site=item.get("same_site"),
-            path=str(item.get("path") or "/"),
-            http_only=bool(item.get("http_only", False)),
-        )
-        for item in raw
-        if isinstance(item, dict)
-    ]
+        raise ValueError(f"invalid cookie jar {path}: expected a cookies array")
+    cookies = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"invalid cookie jar {path}: cookie {index} must be an object")
+        if any(not isinstance(item.get(key), str) for key in ("name", "domain", "value")):
+            raise ValueError(f"invalid cookie jar {path}: cookie {index} requires string name, domain and value")
+        if any(not isinstance(item.get(key, False), bool) for key in ("secure", "http_only")):
+            raise ValueError(f"invalid cookie jar {path}: cookie {index} requires boolean flags")
+        expires = item.get("expires")
+        if expires is not None and (type(expires) not in (int, float) or not math.isfinite(expires)):
+            raise ValueError(f"invalid cookie jar {path}: cookie {index} requires a finite expiry or null")
+        if not isinstance(item.get("path", "/"), str) or item.get("same_site") not in (None, "Strict", "Lax", "None"):
+            raise ValueError(f"invalid cookie jar {path}: cookie {index} has invalid path or same_site")
+        cookies.append(Cookie(
+            name=item["name"], domain=item["domain"], value=item["value"],
+            expires=expires, secure=item.get("secure", False), same_site=item.get("same_site"),
+            path=item.get("path", "/"), http_only=item.get("http_only", False),
+        ))
     return filter_cookies(cookies, url)
 
 
 def clear_locks(profile_dir: Path) -> int:
-    """Remove the locks a SIGKILLed browser left behind.
-
-    solver_probe.py:35-41. Without this the next launch stalls on a lock whose
-    owner is already gone, which reads as a hang rather than a stale file.
-    """
-    removed = 0
+    """Remove Chromium locks only after proving their local owner has exited."""
+    present = []
     for name in PROFILE_LOCKS:
+        path = profile_dir / name
         try:
-            (profile_dir / name).unlink()
-            removed += 1
+            path.lstat()
         except FileNotFoundError:
             continue
-        except OSError:
+        present.append(path)
+    if not present:
+        return 0
+    lock = profile_dir / "SingletonLock"
+    try:
+        host, pid_text = str(lock.readlink()).rsplit("-", 1)
+        pid = int(pid_text)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"profile lock owner is unknown: {lock}") from error
+    if host != socket.gethostname() or pid <= 0:
+        raise RuntimeError(f"profile lock is not a verifiable local owner: {lock}")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
+    else:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError) as error:
+            raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
+        if state != "Z":
+            raise RuntimeError(f"profile lock owner is still running: {lock}")
+    removed = 0
+    for path in sorted(present, key=lambda path: path == lock):
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
             continue
     return removed

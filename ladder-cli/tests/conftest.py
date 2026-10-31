@@ -13,6 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ladder_cli.protocol import LadderRequest  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolated_state_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+
 @pytest.fixture
 def make_request():
     """A request carrying the documented defaults, per TDD section 1.2."""

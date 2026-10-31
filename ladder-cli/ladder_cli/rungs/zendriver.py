@@ -13,6 +13,7 @@ from the page, not from a code.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 from pathlib import Path
 from typing import Any
 
@@ -56,17 +57,8 @@ def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
 
 
 def prepare_profile(headed: bool) -> Path:
-    """Warm the profile this head uses, then clear a killed run's locks.
-
-    H4 (solver_probe.py:35): a SIGKILLed browser leaves its profile lock behind
-    and the next launch stalls on a lock whose owner is already gone, which
-    reads as a hang rather than a stale file. The spike cleared the locks before
-    every launch (solver_probe.py:122) and this is the production path that
-    does the same, rather than a helper the suite tested and nothing called.
-    """
-    user_data_dir = profiles.warm(profiles.zendriver_dir(profiles.root(), headed=headed))
-    jars.clear_locks(user_data_dir)
-    return user_data_dir
+    """Select and warm the profile this head uses."""
+    return profiles.warm(profiles.zendriver_dir(profiles.root(), headed=headed))
 
 
 def climb(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> dict[str, Any]:
@@ -76,7 +68,14 @@ def climb(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> 
     sibling reaching for a private name would be the two halves drifting apart
     under cover of a name that says "not yours".
     """
-    return asyncio.run(_fetch(url, options, ctx))
+    profile = prepare_profile(headed=not options["headless"])
+    with (profile / ".ladder.lock").open("a") as lease:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise BlockingIOError(f"profile is already in use: {profile}; wait for the other ladder request to finish") from error
+        jars.clear_locks(profile)
+        return asyncio.run(_fetch(url, {**options, "user_data_dir": str(profile)}, ctx))
 
 
 def _jar_cookie(cookie: Any) -> jars.Cookie:
@@ -120,16 +119,13 @@ def _cookie_param(cookie: jars.Cookie) -> Any:
 
 
 async def _fetch(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> dict[str, Any]:
+    carried = jars.load(ctx.jar_in, url) if ctx is not None and ctx.jar_in is not None else []
     import zendriver
 
-    headed = not options["headless"]
-    user_data_dir = prepare_profile(headed)
-    browser = await zendriver.start(user_data_dir=str(user_data_dir), **options)
+    browser = await zendriver.start(**options)
     try:
-        if ctx is not None and ctx.jar_in is not None:
-            carried = jars.load(ctx.jar_in, url)
-            if carried:
-                await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])
+        if carried:
+            await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])
         tab = await browser.get(url)
         await tab.sleep(SETTLE_S)
         try:

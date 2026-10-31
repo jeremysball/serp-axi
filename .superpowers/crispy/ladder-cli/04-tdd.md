@@ -19,6 +19,16 @@ Search stays TypeScript (strategy registry, searxng strategy, verdict rules —
 already shipped as `e12b6ca`). No external supervisor: the CLI is the
 long-lived process and supervises itself (BAL-45 narrowed).
 
+Phase-four implementation status: the frontmatter and dated approvals below
+record historical approvals, not a fresh signoff. The approved correction
+defers live rung 5; §§1.4-1.6 and the Python call path describe the narrower
+implementation. Other sections retain historical intent, including protocol
+examples, file listings, signatures, and sensors. Historical examples below
+predate the current protocol/error response: implemented dispatch returns
+`error` when the last rung malfunctions. Historical same-tab and browser/model
+residency goals remain deferred. Review, integration, and live gates remain
+pending; Phase 4 is not declared accepted or merged.
+
 ## 1. System design
 
 Approval: approved 2026-10-07
@@ -63,8 +73,9 @@ new transport.
 
 Six axes ride as named fields with the settled defaults (`fresh / cold /
 cold / rotate / 5 / none`), flag > env > config > default resolved in
-TypeScript before the request is built, so the CLI never reads env or config
-itself. `--cookie-state jar` is sugar the parent expands to `jarIn` plus
+TypeScript before the request is built. The Python CLI does not resolve these
+axes from env or config; it reads `XDG_STATE_HOME` for browser profile storage.
+`--cookie-state jar` is sugar the parent expands to `jarIn` plus
 `jarOut` on the same path; `jar-in` and `jar-out` stay separate fields
 because replay is a known-unmet goal (q3_restart 3/3 blocked) and a single
 boolean cannot express intent that has already failed. `--profile` names a
@@ -98,49 +109,74 @@ replaces `verdict`.
 
 ### 1.4 Laziness and residency
 
-Everything loads on first need and stays resident after. A rung's browser or
-model constructs once: the failure this fixes is `q5_audio.py` building
-`WhisperModel("base.en", ...)` per URL (verified at
-`spikes/scrape-2026-10-03/harness/q5_audio.py:44`) against medians of 21.1s
-per fetch. The 80-in-100 rung-1-only case pays exactly today's cold cost;
-nothing loads at startup, so a single-URL scrape launches no browser and no
-model.
+Browser and model dependencies load on first need, not at startup. The
+resident CLI owns the NDJSON loop, but every live rung runs in a separate
+subprocess under the hard 90s SIGKILL budget. There is no inline soft
+SIGALRM route and no cross-fetch browser or model residency.
 
-Rung order is fixed: HTTP (`primp`, browser impersonation), Camoufox 0.5.6
-(`humanize=True`, verified at
+Four live rungs are registered, in order: HTTP (`primp`, browser
+impersonation), Camoufox 0.5.6 (`humanize=True`, verified at
 `spikes/sample100-2026-10-03/ladder.py:71`), zendriver 0.17.1 with Turnstile
-click, headed Chromium under Xvfb, Whisper `base.en` on audio reCAPTCHA as
-the rung-4 fallback. Python stays Python for exactly these three rungs plus
-Whisper: no Node implementation exists for Camoufox's patched build,
-zendriver's CDP client, or faster-whisper's native binary, and a TypeScript
-port would shell out to Python for the hard parts.
+click, and headed zendriver CF under Xvfb. `rungCeiling: 5` remains accepted
+for protocol compatibility, but runs at most these four rungs and reports
+actual `rungReached: 4` on exhaustion. It does not fetch the headed page
+again under an audio rung.
+
+Live rung 5 is explicitly deferred. The unwired Whisper `base.en` helpers
+load lazily and cache only within their own process. The spike already
+constructed one model per subprocess and reused it across audio rounds;
+a per-process memo does not improve that into cross-fetch reuse. No
+end-to-end audio solve is delivered.
+
+Python remains the implementation language for the live ladder: Camoufox's
+patched build and zendriver's CDP client supply the browser paths. The
+faster-whisper helpers remain Python too, but are not a live escalation step.
 
 ### 1.5 Stores (on disk, all of them)
 
-- Warmed browser profiles, one directory per profile, reused across requests
-  for the CLI's whole life.
-- Cookie jars (`<name>.cookies.json`), written because Chrome flushes lazily
-  and `stop()` kills first (verified comment at
-  `spikes/scrape-2026-10-03/harness/solver_probe.py:85`). Jar contents stay
-  filtered to the target's base domain against the `cf_clearance / _px3 /
-  _pxhd / datadome` allowlist (verified at `solver_probe.py:27-33`), which is
-  why there is no per-host scoping knob: the leakage it would prevent is not
-  reachable, and per-host persistence reintroduces the same-tab failure. The
-  measured run reused zendriver's own `<name>.cookies.dat`, which is a pickle;
-  this module writes JSON, so it takes a JSON name rather than claiming that
-  path (phase 4 correction).
-- The Whisper model weights, loaded once per CLI life.
+- Warmed zendriver profile directories persist on disk for rungs 3 and 4.
+  This is disk reuse, not a resident browser. Camoufox creates and tears down
+  its browser per fetch and keeps no warmed profile.
+- Cookie jars (`<name>.cookies.json`) route only to zendriver rungs 3 and 4.
+  They load before navigation and save before browser shutdown because Chrome
+  flushes lazily and `stop()` kills first (verified comment at
+  `spikes/scrape-2026-10-03/harness/solver_probe.py:85`). HTTP and Camoufox do
+  not read or write jars. Replay rescue remains unproven: q3_restart was
+  blocked 3/3.
+- Jar filtering applies on both read and write, using the `cf_clearance /
+  _px3 / _pxhd / datadome` allowlist and label-boundary domain checks.
+  Pinned tldextract uses its bundled public/private suffix snapshot without
+  runtime network fetching; unknown suffixes stay host-scoped. URL parsing
+  strips ports and userinfo; an unscopable URL admits no cookies.
+- A missing jar is a cold start. Corrupt or unreadable jars raise rather than
+  silently disappearing. The measured run reused zendriver's own
+  `<name>.cookies.dat`, which is a pickle; this module writes JSON and recommends
+  `.cookies.json`. Explicit paths are not renamed or extension-checked: callers
+  must keep JSON output separate from browser pickle files. Each zendriver rung
+  replays the input and saves its own output, replacing any earlier rung's save.
+- Profile cleanup refuses live, foreign-host, unknown, and
+  permission-uncheckable owners. Only a proven dead local owner permits
+  cleanup. A nonblocking exclusive `.ladder.lock` lease protects cleanup
+  across the browser fetch, including shutdown. Tests and examples use
+  temporary fixture profiles, never real browser profiles.
+- Whisper helpers retain a model only within their own process after first
+  use. They provide no cross-fetch model residency.
 - No database, no queue, no cache service. There are no stored-data queries
   to index; this section exists to say so explicitly.
 
 ### 1.6 Same-tab rule, as contract
 
 New tabs in a resident browser lose clearances that same-tab refreshes keep
-(Glassdoor 2/3 revisits, `q3_profile.out`). So `tabState: same` reuses one tab
-for the whole request including escalation, and `fresh` opens exactly one new
-tab per request — never one tab per rung. Fingerprint defaults to `rotate`
-because it reproduces `final.jsonl`, not because cross-host rotate-vs-stable
-was measured: that comparison is unrun and stays listed as unmeasured.
+(Glassdoor 2/3 revisits, `q3_profile.out`). The historical goal was for
+`tabState: same` to reuse one tab throughout a request and escalation, and
+for `fresh` to open one new tab per request. Isolated live rungs do not
+deliver that goal: tabs and browsers do not survive between rungs or
+fetches. Same-tab/browser-residency behavior is deferred, not fulfilled by
+profile or jar persistence.
+
+Fingerprint defaults to `rotate` because it reproduces `final.jsonl`, not
+because cross-host rotate-vs-stable was measured: that comparison is unrun
+and stays listed as unmeasured.
 
 ### 1.7 Guides and their sensors
 
@@ -159,7 +195,10 @@ Every guide gets a sensor; a guide without one does not ship.
 - stdio throughput under concurrent scrapes from one parent (falsifier in
   1.1): measured, not argued, when batch scraping exists.
 - Whether anything rescues jar replay (want 4): undetermined; the separate
-  `jarIn`/`jarOut` fields are what let a caller find out.
+  `jarIn`/`jarOut` fields let a caller investigate, without guaranteeing rescue.
+- Live audio integration and cross-fetch model/browser residency: deferred.
+  Restoring them requires a design that preserves enforceable hard budgets;
+  process-local helper caching does not deliver them.
 - `primp` vs Node `fetch` for rung 1: untested; the only rung-1 choice not
   forced by a missing library.
 - Cache `cold` vs `warm`: untested; the axis exists because warm cache is a
@@ -196,12 +235,11 @@ code rather than against the summary:
    `state` would collide with anything else sharing the venv. This departs from
    §2.2's flat file listing; §2.2's paths are updated in place.
 
-Open for Phase 3, where it first bites: §1.1 and §2.1 put a 90s SIGKILL budget on
-each rung, which needs a killable process, while §1.4 requires a rung's browser or
-model to construct once per CLI life, which a per-rung subprocess cannot give.
-Long-lived per-rung workers (spawn lazily, kill on a budget breach, respawn on
-next need) satisfy both, but Phase 2 only ships rung 1, where primp's own timeout
-applies, so the choice is not forced yet.
+Residency resolution for Phase 4: every live rung uses a killable subprocess
+with the 90s hard budget. Long-lived per-rung workers were a possible design,
+not delivered behavior. The resident CLI supervises requests and isolated
+rungs; it retains neither browsers nor models across fetches. Live rung 5
+and same-tab residency remain deferred.
 
 Below, the call path and signatures are aligned to the names Phase 1 actually
 shipped (`LadderClient`, `fetchViaLadder`) rather than the drafted `resolveLadder`.
@@ -230,21 +268,38 @@ not designed for). A child that dies mid-request surfaces its stderr tail as the
 request error. SIGKILL per rung stays inside the child; the parent's overall
 timeout races the response read.
 
-Python side (new `ladder-cli/` tree at repo root, so the Python package never
-nests inside the npm layout):
+Python side (`ladder-cli/ladder_cli/`, separate from the npm layout):
 
 ```
 __main__ / cli.py
-  -> handshake: print({"ready": True}) ; loop: read line -> dispatch -> print response
+  -> handshake: print({"ready": True, "protocol": PROTOCOL})
+  -> loop: read line -> LadderRequest.parse -> dispatch -> print encoded response
   -> dispatch(request: LadderRequest)
-       build browser context for axes (profile dir, jar-in load, cache/fp/tab policy)
-       for rung in rungs[:ceiling]:
-         run with 90s SIGKILL budget
-         ok -> finish(response); dead/blocked are rung-local signals, keep climbing
-       ceiling hit or all rungs exhausted -> blocked (never empty-ok)
-  rungs/http.py, rungs/camoufox.py, rungs/zendriver.py, rungs/headed.py, rungs/whisper.py
-  state/jars.py (allowlist-filtered load/save), state/profiles.py (dir layout)
+       build per-request RungContext(jar_in, jar_out)
+       for index, rung in enumerate(RUNGS[:request.rungCeiling]):
+         record actual rungReached = index + 1
+         run_rung_isolated(rung, url, ctx=ctx)
+           -> python -m ladder_cli --rung <rung> <url> [jar flags]
+           -> new session; 90s hard budget; SIGKILL process group on timeout
+           -> child: _run_rung_child -> fetch -> JSON page or stderr exception
+           -> supervisor: judge page or map child failure
+         empty ok -> blocked
+         ok -> return; dead -> return; blocked/error -> climb
+       exhaustion -> error if final rung malfunctioned, otherwise blocked
+  RUNGS = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")
+  rungs/http.py, rungs/camoufox.py: no jar reads or writes
+  rungs/zendriver.py, rungs/headed.py:
+    acquire nonblocking exclusive profile/.ladder.lock lease
+    verify dead-local lock owner before cleanup; launch browser
+    load/filter jarIn before navigation; fetch; save/filter jarOut before stop
+    stop browser; release lease
+  state/jars.py, state/profiles.py
+  rungs/whisper.py: lazy process-local helpers, not registered or dispatched
 ```
+
+Ceiling 5 slices the four-entry registry, so exhaustion reports actual
+`rungReached: 4`, never a synthetic fifth attempt. No headed-page refetch
+stands in for audio integration.
 
 `ladder.py` in `spikes/` is not imported and not moved: it stays as the
 executable statement of the measured thresholds. Rung implementations are
@@ -259,9 +314,9 @@ src/ladder.test.ts       contract tests against a stub child (a 20-line node scr
 src/commands/scrape.ts   route --ladder through fetchViaLadder (new flag; serper stays default for scrape)
 ladder-cli/pyproject.toml  pinned deps: camoufox==0.5.6, zendriver==0.17.1, faster-whisper==1.2.1,
                            primp==2.0.1, browserforge==1.2.4 (versions from the measured spikes)
-ladder-cli/cli.py        handshake + NDJSON loop + dispatch + rung ceiling
-ladder-cli/rungs/*.py   one module per rung, each exposing run(url, ctx) -> RungOutcome
-ladder-cli/state/*.py   jars.py, profiles.py
+ladder-cli/ladder_cli/cli.py        handshake + NDJSON loop + dispatch + rung ceiling
+ladder-cli/ladder_cli/rungs/*.py    fetch(url, ctx) -> page dict; judge(page) -> RungResult
+ladder-cli/ladder_cli/state/jars.py cookie jars and stale Chromium-lock cleanup
 ladder-cli/tests/        rung unit tests + fixture replay (final.jsonl, q6_rows.jsonl) + ledger-presence test
 ```
 

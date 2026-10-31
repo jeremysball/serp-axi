@@ -1,13 +1,4 @@
-"""Rung 5: Whisper on an audio reCAPTCHA, as the rung-4 fallback.
-
-The measured run built ``WhisperModel("base.en", ...)`` inside its per-URL loop
-(q5_audio.py:44) and paid the model's construction on every fetch against
-medians of 21.1s (04-tdd 1.4). What this module fixes is that: the model is a
-resource of the CLI's life, not of one fetch.
-
-Nothing here reaches a network or loads a model at import. The construction
-site is one private function, which is the seam these tests read through.
-"""
+"""Audio helper tests, not evidence of live browser/audio integration."""
 
 from __future__ import annotations
 
@@ -15,7 +6,7 @@ import importlib
 
 import pytest
 
-from ladder_cli.rungs import RungVerdict, browser_judge, whisper
+from ladder_cli.rungs import whisper
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +19,6 @@ def fresh_model(monkeypatch):
     adding a production reset keeps the test-only surface out of the rung.
     """
     monkeypatch.setattr(whisper, "_model", None)
-    monkeypatch.setattr(whisper, "_loads", 0)
 
 
 class Simple:
@@ -46,7 +36,7 @@ class RecordingFactory:
         return self.model
 
 
-def test_importing_the_module_loads_nothing() -> None:
+def test_importing_the_module_loads_nothing(monkeypatch) -> None:
     """04-tdd 1.7: laziness is asserted as zero model loads before first need.
 
     The 80-in-100 case pays rung 1's cost alone. A model built at import would
@@ -54,12 +44,15 @@ def test_importing_the_module_loads_nothing() -> None:
     Re-executing the module is what makes this a claim about import rather than
     about the cache a previous test happened to leave behind.
     """
+    factory = RecordingFactory()
+    monkeypatch.setattr(whisper, "_build", factory)
+    assert whisper.load() is factory.model
+    assert len(factory.calls) == 1
     module = importlib.reload(whisper)
-    assert module.model_loads() == 0
     assert module._model is None
 
 
-def test_the_model_is_built_once_per_cli_life_not_once_per_fetch(monkeypatch) -> None:
+def test_the_helper_reuses_one_model_within_its_process(monkeypatch) -> None:
     factory = RecordingFactory()
     monkeypatch.setattr(whisper, "_build", factory)
 
@@ -162,99 +155,3 @@ def test_a_model_that_fails_to_build_does_not_leave_a_broken_rung_hanging(monkey
 
     with pytest.raises(ModuleNotFoundError):
         whisper.load()
-    assert whisper.model_loads() == 0, "a failed construction is not a load"
-
-
-def test_rung_five_is_registered_under_its_wire_name() -> None:
-    from ladder_cli.rungs import MODULES, RUNGS
-
-    assert RUNGS[-1] == "whisper"
-    assert MODULES["whisper"] is whisper
-
-
-def test_the_judge_is_the_browser_rungs_own() -> None:
-    """Rung 5 reads the page rung 4 left; it does not invent a new rule set."""
-    assert whisper.judge is browser_judge
-    result = whisper.judge({"title": "Gone", "text": "nope", "status": 404})
-    assert result.verdict is RungVerdict.DEAD
-
-
-
-def _request(**overrides) -> object:
-    from ladder_cli.protocol import LadderRequest
-
-    payload = {
-        "protocol": 1,
-        "url": "https://example.com/",
-        "tabState": "fresh",
-        "cookieState": "cold",
-        "cacheState": "cold",
-        "fingerprintState": "rotate",
-        "rungCeiling": 5,
-        "profile": None,
-        "jarIn": None,
-        "jarOut": None,
-    }
-    payload.update(overrides)
-    return LadderRequest.parse(payload)
-
-
-def test_rung_five_is_never_sent_to_the_killable_subprocess(monkeypatch) -> None:
-    """The mechanism the whole claim rests on.
-
-    A subprocess runner means `python -m ladder_cli --rung whisper <url>`, a new
-    interpreter per fetch, so any model it builds dies with it. If whisper ever
-    reaches the runner, the once-per-life guarantee is gone and nothing here
-    would notice.
-    """
-    from ladder_cli.cli import dispatch
-    from ladder_cli.rungs import RungResult, RungVerdict
-
-    seen: list[str] = []
-
-    def spy(rung: str, url: str, ctx=None) -> RungResult:
-        seen.append(rung)
-        return RungResult(RungVerdict.BLOCKED, reason="subprocess")
-
-    monkeypatch.setattr(whisper, "fetch", lambda url, ctx=None: {"title": "t", "text": "x" * 900, "status": 200})
-
-    dispatch(_request(), runner=spy)
-
-    assert "whisper" not in seen, "rung 5 went to the subprocess and its model died with it"
-    assert seen == ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]
-
-
-def test_the_model_is_built_once_across_fetches_in_the_resident_child(monkeypatch) -> None:
-    """Two fetches that both need audio must not pay the construction twice.
-
-    This is the amortization the phase is for. It only holds because both
-    fetches run in the same long-lived process, which the test above pins; here
-    we pin the consequence.
-    """
-    from ladder_cli.cli import dispatch
-    from ladder_cli.rungs import RungResult, RungVerdict
-
-    class FakeModel:
-        def transcribe(self, path, **kwargs):
-            return ([Simple(text=f"Heard {path}")], None)
-
-    builds: list[dict] = []
-    monkeypatch.setattr(whisper, "_build", lambda **kwargs: builds.append(kwargs) or FakeModel())
-
-    def fetch_needing_audio(url: str, ctx=None) -> dict:
-        # A fetch that answers an audio clip transcribes it, which loads the model.
-        whisper.answer_rounds(["clip-1.mp3", "clip-2.mp3"])
-        return {"title": "t", "text": "x" * 900, "status": 200}
-
-    monkeypatch.setattr(whisper, "fetch", fetch_needing_audio)
-
-    def never(rung: str, url: str, ctx=None):
-        # Rungs 1 to 4 are meant to be isolated. Only whisper reaching here is a bug.
-        if rung == "whisper":
-            raise AssertionError("whisper must not be isolated")
-        return RungResult(RungVerdict.BLOCKED, reason="subprocess")
-
-    dispatch(_request(), runner=never)
-    dispatch(_request(), runner=never)
-
-    assert len(builds) == 1, f"the model was constructed {len(builds)} times across two fetches"

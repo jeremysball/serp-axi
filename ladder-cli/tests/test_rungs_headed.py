@@ -10,6 +10,7 @@ climb would fail here even if it reused every constant.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,9 +39,13 @@ class FakeProcess:
 class _Reader:
     def __init__(self, data: bytes) -> None:
         self.data = data
+        self.closed = False
 
     def read(self) -> bytes:
         return self.data
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_rung_four_is_the_headed_variant() -> None:
@@ -96,6 +101,36 @@ def test_a_taken_display_is_stepped_over_rather_than_stolen() -> None:
         headed.display_is_free = original
 
 
+def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypatch) -> None:
+    number = headed.free_display(headed.display_for_pid(os.getpid()))
+    owner = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
+    popen = subprocess.Popen
+    attempts = []
+
+    def record_process(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        attempts.append(process)
+        return process
+
+    try:
+        headed._await_display(number, owner)
+        monkeypatch.setattr(headed.subprocess, "Popen", record_process)
+        monkeypatch.setattr(headed, "display_for_pid", lambda pid: f":{number}")
+        monkeypatch.setattr(headed, "display_is_free", lambda candidate: True)
+        monkeypatch.setattr(zendriver, "climb", lambda *args: {"display": os.environ["DISPLAY"]})
+
+        with headed.display("https://example.com/", headed.launch_options()) as page:
+            assert page["display"] != f":{number}"
+            assert Path(f"/tmp/.X{page['display'][1:]}-lock").exists()
+            assert owner.poll() is None
+        assert len(attempts) >= 2
+        assert all(process.poll() is not None and process.stderr.closed for process in attempts)
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)
+        owner.stderr.close()
+
+
 def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monkeypatch) -> None:
     """`free_display` is only useful if the thing that spawns Xvfb calls it.
 
@@ -143,7 +178,7 @@ def test_a_rung_four_page_is_judged_by_the_browser_rules() -> None:
     assert result.verdict is RungVerdict.DEAD
 
 
-def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polled(monkeypatch) -> None:
+def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polled(monkeypatch, tmp_path) -> None:
     """ladder.py:109's `time.sleep(1.5)` is the floor, not the whole answer.
 
     The readiness poll turns it into a floor, which is the point of the poll;
@@ -151,6 +186,7 @@ def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polle
     wait and win nothing, since a lock that has not appeared yet has not appeared.
     """
     slept: list[float] = []
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
     monkeypatch.setattr(headed, "display_is_free", lambda number: True)
     monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: FakeProcess())
     monkeypatch.setattr(headed.time, "sleep", lambda seconds: slept.append(seconds))
@@ -162,7 +198,7 @@ def test_the_display_is_still_given_the_measured_settle_before_the_lock_is_polle
     assert slept[0] == headed.XVFB_SETTLE_S, "the measured settle is spent before polling"
 
 
-def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(monkeypatch) -> None:
+def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(monkeypatch, tmp_path) -> None:
     """Silence is not readiness: a display with no lock is a dead display.
 
     The spike's fixed 1.5s sleep stays the floor (XVFB_SETTLE_S) but cannot tell
@@ -171,6 +207,7 @@ def test_a_display_that_never_lock_fails_after_the_measured_readiness_window(mon
     bounded is part of what is tested.
     """
     process = FakeProcess()
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
     monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
     monkeypatch.setattr(headed, "display_is_free", lambda number: True)
     monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.25)
@@ -222,6 +259,7 @@ def test_the_display_is_torn_down_and_restored_even_when_the_climb_fails(monkeyp
 
     assert process.killed, "the display is torn down"
     assert process.waited, "and reaped, so it is not left as an unreaped child"
+    assert process.stderr.closed, "the Xvfb stderr pipe is closed when the climb fails"
     assert os.environ["DISPLAY"] == "kept-for-the-next-caller", "the caller's display is restored"
 
 
@@ -253,6 +291,7 @@ def test_the_display_is_reaped_on_success_too(monkeypatch) -> None:
     assert seen["options"] == headed.launch_options()
     assert seen["display"] == f":{free_slot(process.argv)}", "the climb sees the display it was given"
     assert process.killed and process.waited
+    assert process.stderr.closed, "the Xvfb stderr pipe is closed after a successful climb"
     assert "DISPLAY" not in os.environ, "nothing is left advertising a killed display"
 
 

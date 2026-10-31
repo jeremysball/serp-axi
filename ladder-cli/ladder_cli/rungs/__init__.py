@@ -21,8 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol as TypingProtocol
 
-# Dependency order. Rung 5 is the rung-4 fallback, so it comes last.
-RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf", "whisper")
+# Implemented fetchers only; audio helpers are not a live escalation step.
+RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")
 
 # ladder.py:18. Drop the elements that are not the page, then read what is left.
 # Camoufox's Playwright calls it for you; zendriver has to be handed a call
@@ -58,10 +58,8 @@ class RungContext:
     requests over its life: a global would leak one caller's jar into the next
     caller's fetch.
 
-    ``jar_in`` is loaded into the first browser rung that runs, and ``jar_out``
-    is written from that browser before it stops. Rung 1 has no cookie jar, so a
-    climb that rung 1 answers writes nothing; that is the honest outcome, not a
-    silent failure.
+    Zendriver (rungs 3 and 4) loads ``jar_in`` before fetching and writes
+    ``jar_out`` before its browser stops. HTTP and Camoufox do not use jars.
     """
 
     jar_in: Path | None = None
@@ -124,14 +122,13 @@ def browser_judge(page: dict[str, Any]) -> RungResult:
 # would start a cycle. ``http`` comes first because browser_judge reads the
 # page-shape vocabulary it owns.
 from . import http  # noqa: E402
-from . import camoufox, headed, whisper, zendriver  # noqa: E402
+from . import camoufox, headed, zendriver  # noqa: E402
 
 MODULES: dict[str, RungModule] = {
     "http": http,
     "camoufox": camoufox,
     "zendriver_cf": zendriver,
     "zendriver_headed_cf": headed,
-    "whisper": whisper,
 }
 
 

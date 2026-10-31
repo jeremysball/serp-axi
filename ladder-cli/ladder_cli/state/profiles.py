@@ -14,29 +14,15 @@ and putting a half of it here would leave a layout nothing reads.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-
-# ladder.py:213 `os.makedirs("profiles", exist_ok=True)`. Made absolute at the
-# use below, exactly as the spike's `os.path.abspath(f"profiles/...")` was:
-# the rung child inherits whatever CWD launched the CLI, and a relative
-# user-data-dir is resolved by the browser against *its* CWD, which can differ.
-#
-# There is deliberately no environment variable here. 04-tdd 1.2 resolves
-# where a store lives in TypeScript before the request is built, "so the CLI
-# never reads env or config itself". A second knob here would make this the
-# second owner of one decision, which is the same shape as the
-# LADDER_RUNG_TIMEOUT_S second budget f2cf1cd removed.
-DEFAULT_ROOT = "profiles"
 
 
 def root() -> Path:
-    """Where warmed profiles live for this CLI's life.
-
-    Absolute, per the spike's ``os.path.abspath`` (ladder.py:82), so the path a
-    rung warms and the path the browser resolves as its user-data-dir are the
-    same directory rather than two opinions about where the CLI was launched.
-    """
-    return Path(DEFAULT_ROOT).resolve()
+    """Keep browser state under XDG_STATE_HOME, independent of the caller's CWD."""
+    state = os.environ.get("XDG_STATE_HOME")
+    base = Path(state) if state else Path.home() / ".local" / "state"
+    return base / "serp-axi" / "profiles"
 
 
 def zendriver_dir(base: Path, *, headed: bool) -> Path:
