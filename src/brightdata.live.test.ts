@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { searchBrightData } from "./brightdata.ts";
+import { liveSkip } from "./live.ts";
 
 const apiKey = process.env.BRIGHTDATA_API_KEY;
-const skip = process.env.SERP_AXI_LIVE_BRIGHTDATA !== "1" || !apiKey;
+const skip = liveSkip("SERP_AXI_LIVE_BRIGHTDATA", apiKey);
 
 test("searchBrightData returns real organic results from the live API", { skip }, async () => {
   const response = await searchBrightData(apiKey as string, { q: "openai", gl: "us", hl: "en", num: 3 });

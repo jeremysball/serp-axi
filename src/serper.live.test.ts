@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { searchSerper, scrapeSerper } from "./serper.ts";
+import { liveSkip } from "./live.ts";
 
 const apiKey = process.env.SERPER_API_KEY;
-const skip = process.env.SERP_AXI_LIVE_SERPER !== "1" || !apiKey;
+const skip = liveSkip("SERP_AXI_LIVE_SERPER", apiKey);
 
 test("searchSerper returns real organic results from the live API", { skip }, async () => {
   const response = await searchSerper(apiKey as string, { q: "openai", gl: "us", hl: "en", num: 3 });

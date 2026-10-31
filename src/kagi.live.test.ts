@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { searchKagi } from "./kagi.ts";
+import { liveSkip } from "./live.ts";
 
 const token = process.env.KAGI_SESSION_TOKEN;
-const skip = process.env.SERP_AXI_LIVE_KAGI !== "1" || !token;
+const skip = liveSkip("SERP_AXI_LIVE_KAGI", token);
 
 test("searchKagi returns real organic results from the live SERP", { skip }, async () => {
   const response = await searchKagi(token as string, { q: "openai", gl: "us", hl: "en", num: 3 });
