@@ -26,7 +26,7 @@ const SNIPPET_LIMIT = 200;
 const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
                               [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>]
 
-Run a search query via Serper, Bright Data, Kagi, or SearXNG.
+Run a free search query via SearXNG by default, or via Serper, Bright Data, or Kagi.
 
 Flags:
   --region <cc>      Lowercase region code. Default: us
@@ -34,7 +34,7 @@ Flags:
   --num <n>            Number of results, 1-100. Default: 10
   --fields <a,b,c>      Extra fields to include beyond the default schema.
                            Accepted: date, sitelinks. Serper only.
-  --provider <name>     Which backend to query: serper, brightdata, kagi, or searxng. Default: serper
+  --provider <name>     Which backend to query: searxng (free, no API key), serper, brightdata, or kagi. Default: searxng
   --zone <name>          Bright Data zone to use. Only applies with --provider brightdata.
                            Default: "${BRIGHT_DATA_DEFAULT_ZONE}", or the BRIGHTDATA_ZONE env var.
   --searxng-url <url>   Base URL of a SearXNG server. Only applies with --provider searxng.
@@ -69,7 +69,7 @@ Output is TOON, not JSON — see "serp-axi --help" for a decode one-liner.
 Examples:
   serp-axi search "site:example.com pricing"
   serp-axi search "climate policy" --region uk --lang en --num 20
-  serp-axi search "conference talks" --fields date,sitelinks
+  serp-axi search "conference talks" --provider serper --fields date,sitelinks
   serp-axi search "climate policy" --provider brightdata
   serp-axi search "climate policy" --provider brightdata --zone my_zone
   serp-axi search "climate policy" --provider kagi
@@ -116,7 +116,7 @@ function parseFields(raw: string | undefined): string[] {
 }
 
 function parseProvider(raw: string | undefined): Provider {
-  const value = raw ?? "serper";
+  const value = raw ?? "searxng";
   if (!PROVIDERS.includes(value as Provider)) {
     throw new SerpAxiError(
       `unknown --provider "${value}"`,

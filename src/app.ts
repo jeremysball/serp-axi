@@ -37,10 +37,10 @@ export function createAppOptions(
 ): Omit<RunCliOptions, "stdout"> {
   return {
     description:
-      "THIS IS GOOGLE. Runs real Google Search via Serper, Bright Data (api.brightdata.com), " +
-      "or free via a SearXNG instance (--provider searxng, no API key), live search results " +
-      "(title/link/snippet). Also searches Kagi (kagi.com) with --provider kagi, against your own " +
-      "subscription. Plus page-scrape text extraction via Serper or Bright Data.\n" +
+      "THIS IS GOOGLE. Runs live search results (title/link/snippet): free via a " +
+      "SearXNG instance by default (no API key), or Google via Serper, Bright Data " +
+      "(api.brightdata.com), or your own Kagi (kagi.com) subscription with " +
+      "--provider kagi. Plus page-scrape text extraction via Serper or Bright Data.\n" +
       "\n" +
       "This is TOON: every command emits TOON (Token-Oriented Object Notation), not JSON. Decode with:\n" +
       "  node --input-type=module -e 'import {readFileSync} from \"node:fs\"; import {decode} from \"@toon-format/toon\"; console.log(JSON.stringify(decode(readFileSync(0,\"utf8\"))))'\n" +

@@ -106,18 +106,36 @@ function appOptions() {
   return createAppOptions(new URL("./bin/serp-axi.ts", import.meta.url).href);
 }
 
-test("runSearch rejects searxng-only flags with the default provider", async (t) => {
+test("runSearch rejects searxng-only flags with --provider serper", async (t) => {
   await isolated(t, async () => {
     let called = 0;
     const fetchImpl = (async () => {
       called++;
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
-    const { error } = await capture(() => runSearch(["q", "--searxng-url", "http://127.0.0.1:8888"], fetchImpl));
+    const { error } = await capture(() =>
+      runSearch(["q", "--provider", "serper", "--searxng-url", "http://127.0.0.1:8888"], fetchImpl),
+    );
     assert.ok(error instanceof SerpAxiError);
     assert.equal(error.kind, "usage");
     assert.match(error.message, /--searxng-url is only supported with --provider searxng/);
     assert.equal(called, 0);
+  });
+});
+
+test("searxng is the default provider and needs no key", async (t) => {
+  await isolated(t, async () => {
+    const captured: CapturedCall[] = [];
+    const fetchImpl = searxngFetch(
+      { results: [{ url: "https://a.example/x", title: "A", content: "s", engines: ["bing"] }] },
+      captured,
+    );
+    const { output, error } = await capture(() =>
+      runSearch(["q", "--searxng-url", "http://127.0.0.1:9"], fetchImpl),
+    );
+    assert.equal(error, undefined);
+    assert.equal(output?.provider, "searxng");
+    assert.equal(captured.length, 1);
   });
 });
 
