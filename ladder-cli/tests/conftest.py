@@ -13,13 +13,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ladder_cli.protocol import LadderRequest  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolated_state_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+
 @pytest.fixture
 def make_request():
     """A request carrying the documented defaults, per TDD section 1.2."""
 
     def build(**overrides: object) -> LadderRequest:
         fields: dict[str, object] = {
-            "protocol": 2,
+            "protocol": 3,
             "url": "https://example.com/article",
             "tabState": "fresh",
             "cookieState": "cold",
@@ -29,6 +34,8 @@ def make_request():
             "profile": None,
             "jarIn": None,
             "jarOut": None,
+            "httpJarIn": None,
+            "httpJarOut": None,
         }
         fields.update(overrides)
         return LadderRequest.parse(fields)

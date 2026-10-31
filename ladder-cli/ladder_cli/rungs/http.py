@@ -9,13 +9,20 @@ dependency.
 
 from __future__ import annotations
 
+import copy
+import os
 import re
+import tempfile
 import urllib.parse
+from email.message import Message
 from html import unescape
 from html.parser import HTMLParser
+from http.cookiejar import DefaultCookiePolicy, HTTPONLY_ATTR, MozillaCookieJar
+from pathlib import Path
 from typing import Any
+from urllib.request import Request
 
-from . import RungResult, RungVerdict, normalize_links
+from . import RungContext, RungResult, RungVerdict, normalize_links
 
 # ladder.py:16
 CHALLENGE = re.compile(
@@ -137,11 +144,11 @@ def _client() -> Any:
 
     for _ in range(5):
         try:
-            return primp.Client(impersonate="random", impersonate_os="random", follow_redirects=True, timeout=30)
+            return primp.Client(impersonate="random", impersonate_os="random", cookie_store=False, follow_redirects=False, timeout=30)
         except Exception as error:  # noqa: BLE001 - the retry key is a message match
             if "Invalid impersonate" not in str(error):
                 raise
-    return primp.Client(impersonate="chrome", follow_redirects=True, timeout=30)
+    return primp.Client(impersonate="chrome", cookie_store=False, follow_redirects=False, timeout=30)
 
 
 def extract_html(html: str, status: int | None, final_url: str) -> dict[str, Any]:
@@ -168,20 +175,118 @@ def extract_html(html: str, status: int | None, final_url: str) -> dict[str, Any
     }
 
 
-def fetch(url: str) -> dict[str, Any]:
-    """Retrieve a page as ``{"title", "text", "status"}``, or raise.
+def _load_jar_cookies(path: str | None) -> MozillaCookieJar:
+    """Load complete Netscape records, enforcing host-only cookies on replay."""
+    jar = MozillaCookieJar(path, policy=DefaultCookiePolicy(
+        strict_ns_domain=DefaultCookiePolicy.DomainStrictNonDomain,
+    ))
+    if path:
+        try:
+            jar.load(ignore_discard=True)
+        except FileNotFoundError:
+            pass
+    return jar
+
+
+def _save_jar_cookies(jar_out: str, jar: MozillaCookieJar) -> None:
+    """Atomically persist full cookie records, never a name/value projection."""
+    target = Path(jar_out).resolve()
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+        for cookie in jar:
+            if cookie.has_nonstandard_attr("HttpOnly"):
+                cookie.set_nonstandard_attr(HTTPONLY_ATTR, cookie.get_nonstandard_attr("HttpOnly"))
+        jar.save(str(temporary), ignore_discard=True)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _request(client: Any, url: str, jar: MozillaCookieJar, saved: MozillaCookieJar, *, api: bool) -> Any:
+    for redirect in range(21):
+        request = Request(url, headers={"User-Agent": USER_AGENT} if api else {})
+        jar.add_cookie_header(request)
+        response = client.get(url, headers=dict(request.header_items()), follow_redirects=False)
+        headers = Message()
+        for key, value in response.headers.items():
+            for line in value.split("\n"):
+                headers.add_header(key, line)
+
+        class CookieResponse:
+            def info(self):
+                return headers
+
+        jar.extract_cookies(CookieResponse(), request)
+        saved.extract_cookies(CookieResponse(), request)
+        location = headers.get("Location")
+        if response.status_code not in (301, 302, 303, 307, 308) or not location:
+            return response
+        if redirect == 20:
+            raise RuntimeError("HTTP redirect limit exceeded")
+        url = urllib.parse.urljoin(url, location)
+        if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+            raise ValueError("HTTP redirect must use http or https")
+
+
+def _walled(page: dict[str, Any]) -> bool:
+    """Use the judge's blocked-page rules to decide whether to retry a 200."""
+    return judge(page).verdict is RungVerdict.BLOCKED
+
+
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
+    """Retrieve a page as ``{"title", "text", "status", "links"}``, or raise.
 
     Nothing verdict-shaped is decided here: the caller judges, so one page
     representation feeds one set of rules regardless of how it was fetched.
+
+    ``ctx`` carries rung 1's own jar pair: the caller's full-session Netscape
+    cookies, loaded before the request and saved after it. They are not the
+    browser JSON jars, and the two formats are never converted into one another.
+
+    Caller-provided Netscape cookies retain their scope through requests and
+    redirects. Response cookies are saved with their domain, path, Secure,
+    expiry and HttpOnly attributes. Netscape files cannot represent SameSite.
+
+    A blocked 200 answer gets one retry with a fresh client and the original
+    caller cookies. Random impersonation may choose the same profile again;
+    a fresh client does not guarantee a different TLS fingerprint or address.
     """
     api = api_url(url)
-    response = _client().get(api or url, headers={"User-Agent": USER_AGENT} if api else None)
-    status = response.status_code
+    jar_in = str(ctx.jar_in) if ctx is not None and ctx.jar_in is not None else None
+    jar_out = str(ctx.jar_out) if ctx is not None and ctx.jar_out is not None else None
+    jar_cookies = _load_jar_cookies(jar_in)
+    output_cookies = _load_jar_cookies(jar_out)
+    for cookie in jar_cookies:
+        output_cookies.set_cookie(copy.copy(cookie))
+    page: dict[str, Any] = {}
+    client: Any = None
+    final_url = url
+    for attempt in (1, 2):
+        client = _client()
+        carried, saved = _load_jar_cookies(None), _load_jar_cookies(None)
+        for source, target in ((jar_cookies, carried), (output_cookies, saved)):
+            for cookie in source:
+                target.set_cookie(copy.deepcopy(cookie))
+        response = _request(client, api or url, carried, saved, api=bool(api))
+        status = response.status_code
 
-    if api and status == 200:
-        return {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
+        if api and status == 200:
+            page = {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
+            final_url = str(getattr(response, "url", "") or url)
+            break
 
-    return extract_html(response.text, status, str(getattr(response, "url", "") or url))
+        final_url = str(getattr(response, "url", "") or url)
+        page = extract_html(response.text, status, final_url)
+        if attempt == 1 and status == 200 and _walled(page):
+            continue
+        break
+
+    if jar_out and client is not None:
+        _save_jar_cookies(jar_out, saved)
+    return page
 
 
 def judge(page: dict[str, Any]) -> RungResult:

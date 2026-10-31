@@ -45,12 +45,19 @@ def test_the_profiles_directory_is_created_by_warming(tmp_path: Path) -> None:
     assert root.is_dir()
 
 
-def test_the_root_is_absolute_not_left_to_the_childs_cwd(monkeypatch, tmp_path: Path) -> None:
-    """The spike's ``os.path.abspath`` half, which the comment here cites.
-
-    A relative store is resolved by the browser against its own CWD, so the
-    warmed directory and the directory Chromium opens drift apart.
-    """
+def test_the_root_uses_xdg_state_independently_of_the_callers_cwd(monkeypatch, tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.chdir(tmp_path)
-    assert profiles.root() == tmp_path / "profiles"
+    assert profiles.root() == state / "serp-axi" / "profiles"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert profiles.root() == state / "serp-axi" / "profiles"
     assert profiles.root().is_absolute()
+
+
+def test_the_root_defaults_to_the_users_local_state_directory(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert profiles.root() == tmp_path / ".local" / "state" / "serp-axi" / "profiles"

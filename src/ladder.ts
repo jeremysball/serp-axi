@@ -23,7 +23,7 @@ export interface LadderResponse {
   links: LadderLink[];
 }
 
-export const LADDER_PROTOCOL = 2;
+export const LADDER_PROTOCOL = 3;
 
 export type LadderTabState = "fresh" | "same";
 export type LadderCookieState = "cold" | "jar";
@@ -40,6 +40,8 @@ export interface LadderAxes {
   profile: string | null;
   jarIn: string | null;
   jarOut: string | null;
+  httpJarIn: string | null;
+  httpJarOut: string | null;
 }
 
 export interface LadderRequest extends LadderAxes {
@@ -93,11 +95,12 @@ const LADDER_AXIS_DEFAULTS: LadderAxes = {
   profile: null,
   jarIn: null,
   jarOut: null,
+  httpJarIn: null,
+  httpJarOut: null,
 };
 
-// Each axis reads flag, then env, then config, then its default. The flag and
-// env names are derived from one table so a new axis cannot drift apart across
-// the three spellings. The config leg is the same shape as the other two, which
+// The flag and env names are derived from one table so a new axis cannot drift
+// apart across the three spellings. The config leg is the same shape as the other two, which
 // is what makes `ladderProfile` in StoredConfig mean something.
 const AXIS_TABLE = {
   tabState: { flag: "tab-state", env: "SERP_AXI_TAB_STATE", config: "ladderTabState" },
@@ -108,6 +111,8 @@ const AXIS_TABLE = {
   profile: { flag: "profile", env: "SERP_AXI_PROFILE", config: "ladderProfile" },
   jarIn: { flag: "jar-in", env: "SERP_AXI_JAR_IN", config: "ladderJarIn" },
   jarOut: { flag: "jar-out", env: "SERP_AXI_JAR_OUT", config: "ladderJarOut" },
+  httpJarIn: { flag: "http-jar-in", env: "SERP_AXI_HTTP_JAR_IN", config: "ladderHttpJarIn" },
+  httpJarOut: { flag: "http-jar-out", env: "SERP_AXI_HTTP_JAR_OUT", config: "ladderHttpJarOut" },
 } as const;
 
 type AxisKey = keyof typeof AXIS_TABLE;
@@ -127,7 +132,7 @@ const AXIS_ENUMS: Record<string, readonly string[]> = {
 };
 
 const VALUE_KEYS = ["tabState", "cookieState", "cacheState", "fingerprintState", "rungCeiling"] as const;
-const JAR_KEYS = ["jarIn", "jarOut"] as const;
+const JAR_KEYS = ["jarIn", "jarOut", "httpJarIn", "httpJarOut"] as const;
 
 // Axis and config validation is a usage error: the caller can fix it by
 // changing a flag, so it must reach the CLI as a SerpAxiError with a help
@@ -242,9 +247,7 @@ function profileBundle(sources: LadderAxisSources, profile: string): Record<stri
 
 /**
  * Resolve the six axes plus jar paths. Precedence, highest first: a flag, an
- * env var, the config file, a bundle named by `profile`, then the default. The
- * profile bundle sits below its own config file so a bundle is a named preset
- * rather than an override the user cannot see past.
+ * env var, a bundle named by `profile`, the config file, then the default.
  */
 export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   const flagOrEnvProfile = readRaw(sources, "profile");
@@ -375,7 +378,7 @@ function parseResponse(line: string): LadderResponse {
       `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${boundedDetail(line)})`,
     );
   }
-  // A protocol-2 child always sends links. Defaulting a missing field to []
+  // A protocol-3 child always sends links. Defaulting a missing field to []
   // would turn a stale half of the pair into an empty result the caller cannot
   // tell from a page with no anchors, so this is a schema violation instead.
   if (!Array.isArray(body.links)) {

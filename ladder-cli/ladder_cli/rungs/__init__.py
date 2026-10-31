@@ -19,9 +19,10 @@ import re
 import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol as TypingProtocol
 
-# Dependency order. Phase 4 adds whisper for audio challenges.
+# Implemented fetchers only; audio helpers are not a live escalation step.
 RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")
 
 # ladder.py:18. Drop the elements that are not the page, then read what is left.
@@ -61,8 +62,28 @@ class RungResult:
     links: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class RungContext:
+    """The per-request state a rung needs beyond the URL.
+
+    The jar pair for the rung being invoked, and nothing else. The paths live
+    here rather than on a module global because a rung's fetch is per request
+    and the resident child answers many requests over its life: a global would
+    leak one caller's jar into the next caller's fetch.
+
+    Dispatch selects which pair arrives. The HTTP rung (rung 1) gets the
+    caller's full-session Netscape jars, loaded before the request and saved
+    after it. Zendriver (rungs 3 and 4) gets the filtered browser JSON jars it
+    loads before fetching and writes before its browser stops. Camoufox gets
+    neither. The two formats are never converted into one another.
+    """
+
+    jar_in: Path | None = None
+    jar_out: Path | None = None
+
+
 class RungModule(TypingProtocol):
-    def fetch(self, url: str) -> dict[str, Any]: ...
+    def fetch(self, url: str, ctx: RungContext | None = None) -> dict[str, Any]: ...
 
     def judge(self, page: dict[str, Any]) -> RungResult: ...
 
@@ -168,8 +189,8 @@ MODULES: dict[str, RungModule] = {
 }
 
 
-def fetch(rung: str, url: str) -> dict[str, Any]:
-    return MODULES[rung].fetch(url)
+def fetch(rung: str, url: str, ctx: RungContext | None = None) -> dict[str, Any]:
+    return MODULES[rung].fetch(url, ctx)
 
 
 def judge(rung: str, page: dict[str, Any]) -> RungResult:

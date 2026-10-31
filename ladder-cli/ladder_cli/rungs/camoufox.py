@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import LINKS_JS, STRIP_JS, RungResult, browser_judge, normalize_page_text
+from . import LINKS_JS, STRIP_JS, RungContext, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:71 `Camoufox(headless=True, humanize=True)`: `humanize` is the
 # build's own human-like input shaping, and it is the point of reaching for
@@ -35,11 +35,13 @@ def launch_options() -> dict[str, Any]:
     return {"headless": HEADLESS, "humanize": HUMANIZE}
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise.
 
     The browser is built here rather than at import: it is a browser tool, and
     the resident child owes its ready line before it touches one (04-tdd 1.4).
+    ``ctx`` is accepted and ignored: Camoufox builds and tears down its own
+    browser per fetch and keeps no profile, so there is no jar to carry.
     """
     from camoufox.sync_api import Camoufox
 

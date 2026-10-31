@@ -445,14 +445,19 @@ test("runScrape rejects a ladder axis flag without --ladder instead of ignoring 
 test("runScrape --ladder forwards the resolved axes onto the wire", async () => {
   await withLadderStub("echo-request", async () => {
     const output = await runScrape(
-      ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2"],
+      ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2",
+        "--jar-in", "browser.json", "--http-jar-in", "session.in", "--http-jar-out", "session.out"],
       (async () => new Response("{}")) as typeof fetch,
     );
     const sent = JSON.parse(output.text as string) as Record<string, unknown>;
     assert.equal(sent.url, "https://example.com/article");
-    assert.equal(sent.protocol, 2);
+    assert.equal(sent.protocol, 3);
     assert.equal(sent.tabState, "same");
     assert.equal(sent.rungCeiling, 2);
+    assert.equal(sent.jarIn, "browser.json");
+    assert.equal(sent.jarOut, null);
+    assert.equal(sent.httpJarIn, "session.in");
+    assert.equal(sent.httpJarOut, "session.out");
   });
 });
 

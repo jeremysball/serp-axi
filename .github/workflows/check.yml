@@ -46,6 +46,27 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+      - name: Install Bubblewrap for the mutation sandbox
+        # GitHub's ubuntu-latest image does not ship bwrap, and Ubuntu 24.04+
+        # restricts unprivileged user namespaces via AppArmor; the knob relax
+        # is guarded because the kernel may not expose it, and the verify step
+        # right below is the real gate on the capability.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+
+      - name: Verify mutation sandbox support
+        run: |
+          if ! command -v bwrap >/dev/null; then
+            printf '%s\n' 'Bubblewrap (bwrap) is required by the mutation safety tests.' >&2
+            exit 1
+          fi
+          if ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent --new-session --cap-drop ALL -- python3 -c 'print("mutation sandbox ready")'; then
+            printf '%s\n' 'Bubblewrap must support unprivileged user namespaces on this runner.' >&2
+            exit 1
+          fi
+
       - name: Run ladder-cli tests
         # Pins come from uv.lock; --frozen fails the build if the lockfile no
         # longer matches pyproject.toml, so a drifting pin cannot pass CI
@@ -61,4 +82,4 @@ jobs:
         # enforced) or when a belief can no longer be applied (the code moved and
         # the claim did not). This is the check that a passing suite cannot
         # perform on itself.
-        run: python3 scripts/mutations.py
+        run: npm run test:mutations

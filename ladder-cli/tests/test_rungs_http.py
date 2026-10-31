@@ -26,6 +26,39 @@ def test_real_content_passes() -> None:
     assert result.status == 200
 
 
+def test_http_fetch_keeps_the_browser_jar_helpers_untouched(monkeypatch, tmp_path):
+    """Rung 1's ctx pair is Netscape; the browser JSON jar helpers stay out of it.
+
+    The pair is used, but by http's own Netscape helpers. Routing these paths
+    through the browser jar loader or saver would silently convert between the
+    two formats, so either one firing is a bug even when the page fetches fine.
+    """
+    from types import SimpleNamespace
+
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(status_code=200, url=url, headers={},
+                               text="<title>Title</title><p>" + "Content " * 100 + "</p>")
+
+    def unexpected_jar_access(*args, **kwargs):
+        raise AssertionError("HTTP must not touch the browser JSON jar helpers")
+
+    monkeypatch.setattr(http, "_client", lambda: SimpleNamespace(get=get))
+    monkeypatch.setattr(jars, "load", unexpected_jar_access)
+    monkeypatch.setattr(jars, "save", unexpected_jar_access)
+    output = tmp_path / "output.cookies.txt"
+    result = http.fetch("https://example.com/", RungContext(jar_in=tmp_path / "input.txt", jar_out=output))
+    assert result.get("title") == "Title"
+    assert "Content" in result["text"]
+    assert calls == ["https://example.com/"]
+    assert output.exists(), "the Netscape jar is still saved, by http's own helpers"
+
+
 def test_a_gone_page_is_dead_and_a_defended_page_is_blocked() -> None:
     gone = http.judge(page("Not found", "nope", status=404))
     assert gone.verdict is RungVerdict.DEAD, "404 must not climb: no browser revives a deleted page"

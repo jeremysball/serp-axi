@@ -31,8 +31,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
-    "test:python": "cd ladder-cli && uv run --frozen --extra test pytest -q",
-    "test:mutations": "python3 scripts/mutations.py",
+    "test:python": "cd ladder-cli && uv run --frozen --inexact --extra test pytest -q",
+    "test:mutations": "uv sync --project ladder-cli --frozen --inexact --extra test && python3 scripts/mutations.py",
     "check": "npm run typecheck && npm test && npm run test:python && npm run test:mutations",
     "prepare": "git config core.hooksPath .githooks || true",
     "prepublishOnly": "npm run check && npm run build"

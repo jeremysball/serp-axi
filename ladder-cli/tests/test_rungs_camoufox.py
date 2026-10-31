@@ -35,7 +35,7 @@ def test_rung_two_is_registered_under_its_wire_name() -> None:
     assert MODULES["camoufox"] is camoufox
 
 
-def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeypatch) -> None:
+def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeypatch, tmp_path) -> None:
     """The constants are only worth having if fetch applies them.
 
     Asserted as the call sequence, so dropping the settle or widening the
@@ -78,7 +78,16 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
 
     inject_module(monkeypatch, "camoufox.sync_api", SimpleNamespace(Camoufox=FakeCamoufox))
 
-    page = camoufox.fetch("https://example.com/")
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    def unexpected_jar_access(*args, **kwargs):
+        raise AssertionError("Camoufox must not load or save cookie jars")
+
+    monkeypatch.setattr(jars, "load", unexpected_jar_access)
+    monkeypatch.setattr(jars, "save", unexpected_jar_access)
+    output = tmp_path / "output.json"
+    page = camoufox.fetch("https://example.com/", RungContext(tmp_path / "input.json", output))
 
     assert page == {
         "title": "Title",
@@ -96,6 +105,7 @@ def test_the_measured_navigation_and_settle_are_what_fetch_actually_uses(monkeyp
         ("evaluate", camoufox.LINKS_JS),
         ("exit",),
     ]
+    assert not output.exists()
 
 
 def test_a_navigation_that_returns_no_response_leaves_the_status_unknown(monkeypatch) -> None:

@@ -22,6 +22,8 @@ export const SCRAPE_FLAGS: FlagSpec = {
   profile: "string",
   "jar-in": "string",
   "jar-out": "string",
+  "http-jar-in": "string",
+  "http-jar-out": "string",
 };
 
 // The six axes and the jar paths are ladder-only. Rejecting them elsewhere
@@ -74,24 +76,28 @@ Flags:
                          Default: ${BRIGHT_DATA_DEFAULT_DATASET_ID} (or $BRIGHTDATA_DATASET_ID).
                          Only valid with --provider brightdata.
 
-Ladder axes (only with --ladder; flag beats env beats config beats a --profile
-                bundle, which beats the default):
-  --tab-state <state>          fresh (default) or same
+Ladder axes (only with --ladder; flag > env > profile > config > default):
+  --tab-state <state>          fresh (default) or same; reserved; not yet applied
   --cookie-state <state>       cold (default) or jar; jar needs a path (see below)
-  --cache-state <state>        cold (default) or warm
-  --fingerprint-state <state>  rotate (default) or stable
-  --rung-ceiling <1-5>         Highest rung to attempt. Default 5; hitting it reports blocked.
+  --cache-state <state>        cold (default) or warm; reserved; not yet applied
+  --fingerprint-state <state>  rotate (default) or stable; reserved; not yet applied
+  --rung-ceiling <1-5>         Highest rung allowed. Default 5; currently stops at rung 4.
   --profile <name>             Named bundle of axes from ladderProfiles in the config file.
-  --jar-in <path>              Cookie jar to load before fetching.
-  --jar-out <path>             Cookie jar to save after fetching.
+  --jar-in <path>              Filtered browser JSON cookie jar to load.
+  --jar-out <path>             Filtered browser JSON cookie jar to save.
                          --cookie-state jar mirrors whichever of these you pass to both.
+                         Browser jar paths reach zendriver (rungs 3-4) only, never HTTP or Camoufox.
+  --http-jar-in <path>         Full-session Netscape cookie jar for HTTP rung 1 only.
+  --http-jar-out <path>        Save HTTP-session cookies; never mirrored or converted.
+
+Rungs 1-4 fetch pages. Rung 5 is deferred and is not attempted; audio helpers are unwired.
 
 Examples:
   serp-axi scrape https://example.com/article
   serp-axi scrape https://example.com/article --full
   serp-axi scrape https://example.com https://example.com/1 --provider brightdata
   serp-axi scrape https://example.com/article --ladder
-  serp-axi scrape https://example.com/article --ladder --tab-state same --cookie-state jar --jar-out ~/cookies.txt`;
+  serp-axi scrape https://example.com/article --ladder --cookie-state jar --jar-out ~/clearance.cookies.json`;
 
 const IPV4_BLOCKED_RANGES: Array<[number, number]> = [
   [0x00000000, 0x00ffffff],

@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from . import RungResult, zendriver
+from . import RungContext, RungResult, zendriver
 
 # ladder.py:82 `headless=not headed` with headed True
 HEADLESS = False
@@ -33,6 +33,10 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
+
+
+class _DisplayCollision(RuntimeError):
+    pass
 
 
 def display_for_pid(pid: int) -> str:
@@ -67,7 +71,7 @@ def xvfb_command(number: int) -> list[str]:
 
 
 @contextlib.contextmanager
-def display(url: str, options: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def display(url: str, options: dict[str, Any], ctx: RungContext | None = None) -> Iterator[dict[str, Any]]:
     """Bring up a private display, and take it down again afterwards.
 
     Xvfb is spawned, given the measured settle, and *checked* before the
@@ -76,24 +80,34 @@ def display(url: str, options: dict[str, Any]) -> Iterator[dict[str, Any]]:
     process that keeps advertising a display it has already killed hands every
     later library in the same process a dead one.
     """
-    number = free_display(display_for_pid(os.getpid()))
-    process = subprocess.Popen(
-        xvfb_command(number),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
     previous = os.environ.get("DISPLAY")
-    try:
-        _await_display(number, process)
-        os.environ["DISPLAY"] = f":{number}"
-        yield zendriver.climb(url, options)
-    finally:
-        if previous is None:
-            os.environ.pop("DISPLAY", None)
-        else:
-            os.environ["DISPLAY"] = previous
-        process.kill()
-        process.wait()
+    preferred = display_for_pid(os.getpid())
+    for _ in range(XVFB_DISPLAY_HIGH - XVFB_DISPLAY_LOW + 1):
+        number = free_display(preferred)
+        process = subprocess.Popen(
+            xvfb_command(number),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            try:
+                _await_display(number, process)
+            except _DisplayCollision:
+                preferred = f":{number + 1}"
+                continue
+            os.environ["DISPLAY"] = f":{number}"
+            yield zendriver.climb(url, options, ctx)
+            return
+        finally:
+            if previous is None:
+                os.environ.pop("DISPLAY", None)
+            else:
+                os.environ["DISPLAY"] = previous
+            process.kill()
+            process.wait()
+            if process.stderr is not None:
+                process.stderr.close()
+    raise RuntimeError("all Xvfb display allocations collided")
 
 
 def _await_display(number: int, process: subprocess.Popen) -> None:
@@ -107,6 +121,8 @@ def _await_display(number: int, process: subprocess.Popen) -> None:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             stderr = (process.stderr.read() if process.stderr else b"").decode(errors="replace").strip()
+            if "Server is already active for display" in stderr:
+                raise _DisplayCollision(f"Xvfb :{number} was claimed by another server")
             raise RuntimeError(f"Xvfb :{number} exited immediately: {stderr or process.returncode}")
         if Path(f"/tmp/.X{number}-lock").exists():
             return
@@ -119,9 +135,9 @@ def launch_options() -> dict[str, Any]:
     return {**zendriver.launch_options(), "headless": HEADLESS}
 
 
-def fetch(url: str) -> dict[str, Any]:
+def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     """Retrieve a page as ``{"title", "text", "status"}``, or raise."""
-    with display(url, launch_options()) as page:
+    with display(url, launch_options(), ctx) as page:
         return page
 
 

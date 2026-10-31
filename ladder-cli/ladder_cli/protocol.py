@@ -13,7 +13,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PROTOCOL = 2
+PROTOCOL = 3
 
 # A fourth verdict, "error", is not a property of the page: it means the climb
 # ran out of rungs because a rung malfunctioned, with no page ever judged. It
@@ -38,6 +38,8 @@ REQUEST_FIELDS = (
     "profile",
     "jarIn",
     "jarOut",
+    "httpJarIn",
+    "httpJarOut",
 )
 
 
@@ -71,6 +73,8 @@ class LadderRequest:
     profile: str | None
     jarIn: str | None
     jarOut: str | None
+    httpJarIn: str | None
+    httpJarOut: str | None
 
     @classmethod
     def parse(cls, payload: Any) -> "LadderRequest":
@@ -109,6 +113,8 @@ class LadderRequest:
             profile=_optional_path("profile", payload["profile"]),
             jarIn=_optional_path("jarIn", payload["jarIn"]),
             jarOut=_optional_path("jarOut", payload["jarOut"]),
+            httpJarIn=_optional_path("httpJarIn", payload["httpJarIn"]),
+            httpJarOut=_optional_path("httpJarOut", payload["httpJarOut"]),
         )
 
 
