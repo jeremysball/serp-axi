@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scrapeBrightData } from "./brightdata.ts";
+import { liveSkip } from "./live.ts";
 
 const apiKey = process.env.BRIGHTDATA_API_KEY;
+const skip = liveSkip("SERP_AXI_LIVE_BRIGHTDATA", apiKey);
 
-test("scrapeBrightData returns real records from the live API", { skip: !apiKey }, async () => {
+test("scrapeBrightData returns real records from the live API", { skip }, async () => {
   const results = await scrapeBrightData(
     apiKey as string,
     "gd_m6gjtfmeh43we6cqc",
@@ -15,6 +17,6 @@ test("scrapeBrightData returns real records from the live API", { skip: !apiKey 
   const urls = results.map((r) => r.url).sort();
   assert.deepEqual(urls, ["https://example.com/", "https://example.org/"]);
   for (const record of results) {
-    assert.match(record.markdown as string, /Example Domain/);
+    assert.match(record.markdown as string, /This domain is for use in documentation examples/);
   }
 });

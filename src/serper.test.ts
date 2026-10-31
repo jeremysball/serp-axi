@@ -22,9 +22,11 @@ test("searchSerper posts to the search endpoint and returns organic results", as
   const result = await searchSerper("key", { q: "hi", gl: "us", hl: "en", num: 5 }, fetchImpl);
 
   assert.equal(capturedUrl, "https://google.serper.dev/search");
+  assert.equal(capturedInit?.method, "POST");
   assert.equal((capturedInit?.headers as Record<string, string>)["X-API-KEY"], "key");
-  assert.equal(JSON.parse(capturedInit?.body as string).num, 5);
-  assert.equal(result.organic.length, 1);
+  assert.equal((capturedInit?.headers as Record<string, string>)["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(capturedInit?.body as string), { q: "hi", gl: "us", hl: "en", num: 5 });
+  assert.deepEqual(result.organic, [{ position: 1, title: "t", link: "https://x", snippet: "s" }]);
 });
 
 test("searchSerper throws a runtime error on 403", async () => {
@@ -52,16 +54,38 @@ test("searchSerper throws a runtime error on 500", async () => {
 
 test("scrapeSerper posts to the scrape endpoint and returns text", async () => {
   let capturedUrl: string | undefined;
-  const fetchImpl = (async (url: string) => {
+  let capturedInit: RequestInit | undefined;
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
     capturedUrl = url;
+    capturedInit = init;
     return new Response(JSON.stringify({ text: "hello", metadata: { title: "Hello Page" } }), { status: 200 });
   }) as typeof fetch;
 
   const result = await scrapeSerper("key", "https://example.com", fetchImpl);
 
   assert.equal(capturedUrl, "https://scrape.serper.dev");
+  assert.equal(capturedInit?.method, "POST");
+  assert.equal((capturedInit?.headers as Record<string, string>)["X-API-KEY"], "key");
+  assert.deepEqual(JSON.parse(capturedInit?.body as string), { url: "https://example.com" });
   assert.equal(result.text, "hello");
   assert.equal(result.metadata.title, "Hello Page");
+});
+
+test("Serper search and scrape report an exhausted credit balance from mocked responses", async () => {
+  for (const request of [
+    (fetchImpl: typeof fetch) => searchSerper("key", { q: "test", gl: "us", hl: "en", num: 1 }, fetchImpl),
+    (fetchImpl: typeof fetch) => scrapeSerper("key", "https://example.com", fetchImpl),
+  ]) {
+    await assert.rejects(
+      () => request(fakeFetch(400, { message: "Not enough credits" })),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError);
+        assert.equal(error.kind, "runtime");
+        assert.match(error.message, /400: Not enough credits/);
+        return true;
+      },
+    );
+  }
 });
 
 test("scrapeSerper throws a runtime error on 404", async () => {

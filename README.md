@@ -129,13 +129,123 @@ is completable with flags alone.
 
 ## In progress: scraping escalation ladder
 
-The free SearXNG search path is wired in (`--provider searxng`). The
-escalation ladder for fetching pages behind the links is still being built.
-Nothing about it is wired into a command yet, and no flag or provider accepts
-this path today.
+The free SearXNG search path is wired in (`--provider searxng`). The escalation
+ladder for fetching pages behind the links is live for rungs 1 to 4; rung 5's
+audio solve is not wired yet.
 
-The measured results are written up in the project's Linear tracker. The raw
-datasets they cite are in [`spikes/`](spikes/), which explains each one.
+`--ladder` runs the fetch through a resident `ladder-cli` child over stdio, free
+and with no API key. The climb has four live rungs and escalates only as far as
+it needs to:
+
+| rung | what it does | state |
+| --- | --- | --- |
+| 1 | site API where one exists, else `primp` with browser impersonation | live |
+| 2 | Camoufox, a patched Firefox with `humanize` | live |
+| 3 | zendriver with a Turnstile click | live |
+| 4 | headed Chromium under Xvfb | live |
+| 5 | Whisper `base.en` on an audio reCAPTCHA | deferred; audio helpers only, not attempted |
+
+So a page that rung 1 answers is fetched at rung 1's cost, and a page behind a
+challenge is tried in a browser. Rung 5's audio solve is not wired yet, so an
+audio reCAPTCHA comes back `blocked` rather than being answered.
+
+```
+serp-axi scrape https://example.com/article --ladder
+```
+
+## Ladder flags
+
+These only work with `--ladder`, and they are rejected elsewhere so a typo is
+never parsed and silently ignored. Each resolves flag, then env, then a
+`--profile` bundle, then config file, then default.
+
+The ladder response carries `links` alongside `text`: absolute, deduplicated
+anchors in document order with their anchor text, capped at 200. Rung 1 reads
+them from the raw HTML, resolving relative URLs against the final URL after
+redirects; browser rungs read `a.href` from the live DOM. Text is whitespace-
+normalized before either is returned, so source indentation and blank-line
+padding do not show up as content.
+
+| flag | values | what it sets |
+| --- | --- | --- |
+| `--tab-state` | `fresh` (default), `same` | reserved; not yet applied |
+| `--cookie-state` | `cold` (default), `jar` | `jar` is sugar for a jar in and out on one path |
+| `--cache-state` | `cold` (default), `warm` | reserved; not yet applied |
+| `--fingerprint-state` | `rotate` (default), `stable` | reserved; not yet applied |
+| `--rung-ceiling` | `1` to `5` (default `5`) | highest rung allowed; `5` currently stops at rung `4` |
+| `--profile` | a name from `ladderProfiles` | a named bundle of the axes above |
+| `--jar-in` | a path | filtered browser JSON cookie jar loaded before fetching with zendriver (rungs 3-4) |
+| `--jar-out` | a path | filtered browser JSON cookie jar saved by zendriver before its browser stops |
+| `--http-jar-in` | a path | full-session Netscape cookie jar loaded by HTTP rung 1 only |
+| `--http-jar-out` | a path | full-session Netscape cookie jar saved after HTTP rung 1; never mirrored or converted |
+
+`--jar-in` and `--jar-out` stay separate from `--cookie-state` on purpose.
+Replay is a known-unmet goal: the measured run loaded a jar into a fresh
+browser three times and every one came back a challenge page. Keeping the two
+paths separate is what lets a caller find out for itself whether replay helped
+that site.
+
+Cookie jars are separate, with no automatic conversion between formats:
+
+- `--jar-in` / `--jar-out` are reserved for filtered browser JSON jars. HTTP
+  never reads or writes them. `--cookie-state jar` mirrors only these paths.
+- `--http-jar-in` / `--http-jar-out` load/save full-session Netscape jars on
+  HTTP rung 1 only. Neither path implies the other. Treat these files as
+  credentials: they can contain authentication cookies, not just clearance.
+- HTTP settings also accept `SERP_AXI_HTTP_JAR_IN` / `SERP_AXI_HTTP_JAR_OUT`,
+  config keys `ladderHttpJarIn` / `ladderHttpJarOut`, and profile members
+  `httpJarIn` / `httpJarOut`.
+
+A browser jar only travels through zendriver (rungs 3-4). A climb answered by
+HTTP or Camoufox (rungs 1-2) reads no browser jar in and writes no browser jar
+out: rung 1 keeps its own Netscape session jars and Camoufox gets neither
+format. The browser jar file is JSON, named `<name>.cookies.json` by
+convention. Explicit jar paths are used as supplied; do not point them at
+zendriver's `.cookies.dat` pickle files, which a JSON save would overwrite.
+Each zendriver rung loads the input jar and saves its own output; when both
+rungs run, the later save replaces the earlier one. Filtering uses the bundled
+public/private suffix snapshot without a network refresh; unknown suffixes stay
+host-scoped. Missing jars are cold starts; corrupt or unreadable jars raise
+errors, including malformed cookie records. Saves replace the jar atomically
+after writing a sibling temporary file; a failed write leaves the previous jar
+intact. A symlink output updates its target and preserves the link. Atomic
+replacement requires write access to the target's parent directory, not just to
+the existing file. An export failure fails the rung even if page extraction
+succeeded; the requested jar is part of that rung's result. Unicode and punycode
+hostnames share one scope. The jar's base-domain filter limits which cookies may
+travel; the browser still applies each cookie's own domain and path rules when
+making requests.
+
+HTTP replay checks domain, path, Secure and expiry attributes, captures cookies
+on redirect hops, and preserves unrelated stored cookies when saving. Netscape
+jars cannot retain SameSite. A blocked HTTP response gets one fresh-client retry;
+its random fingerprint can repeat and it does not change the source IP. The
+parent and child must both speak protocol 3; an older installed child fails at
+the ready handshake instead of ignoring the separate HTTP fields.
+
+Profile launches take an exclusive local lease. Cleanup removes Chromium locks
+only when their recorded owner is on this host and its process no longer exists.
+A live, foreign-host, or unrecognized lock is refused and left untouched.
+Profiles live under `$XDG_STATE_HOME/serp-axi/profiles`, falling back to
+`~/.local/state/serp-axi/profiles`. Existing working-directory `profiles/`
+folders are not migrated or removed automatically.
+
+Jar contents are filtered before they are written and again before they are
+loaded, to the four defence cookies (`cf_clearance`, `_px3`, `_pxhd`,
+`datadome`) scoped to the target's base domain. A warmed profile holds every
+site's cookies, so only the target's own leave with the fetch.
+
+The scored verdicts are `ok`, `dead`, `blocked`, and `error`. Exhaustion reports
+`error` if the final rung malfunctioned, otherwise `blocked`. A rung that exceeds
+its 90-second subprocess budget is killed and reports `error`, allowing the
+next rung to run. The independent 120-second request cap can interrupt the
+whole climb before every rung finishes; that cap raises a request error.
+
+The committed datasets and harness ledger are in [`spikes/`](spikes/).
+Current ladder decisions and scope live in
+[the technical design](.superpowers/crispy/ladder-cli/04-tdd.md) and
+[outline](.superpowers/crispy/ladder-cli/05-outline.md). Historical reports and
+some excluded attachments remain in Linear; they are not the home for new findings.
 
 ## Using the Kagi provider
 
@@ -165,6 +275,35 @@ Worth knowing about it:
   version would not. `src/kagi.test.ts` runs against a saved copy of a real
   SERP, so a breaking change shows up as a test failure.
 
+## Tests
+
+Run `npm run check` for typechecking, the Node/Python suites, and the named
+mutation gate. Prepublish checks run the same gate. To run only the mutation
+gate, use `npm run test:mutations`.
+
+The Python mutation-safety tests and the mutation gate require Linux, Bubblewrap
+(`bwrap` on `PATH`), and working unprivileged user namespaces. CI probes those
+capabilities before the Python suite. A missing or unusable sandbox fails the
+gate; it never runs mutants without isolation or counts a startup error as a kill.
+`npm run test:mutations` first syncs the locked Python test extra in `ladder-cli`.
+Before invoking `scripts/mutations.py` directly, run
+`uv sync --project ladder-cli --frozen --inexact --extra test`; scratch runs stay offline
+and reuse that environment without syncing it.
+
+Serper request and error handling use mocked responses by default. To run its
+live API checks, set `SERPER_API_KEY` and run:
+
+```sh
+SERP_AXI_LIVE_SERPER=1 node --test src/serper.live.test.ts
+```
+
+Live Serper checks require available account credits. Mocked tests do not
+verify the live service. Bright Data tests require `SERP_AXI_LIVE_BRIGHTDATA=1`
+and `BRIGHTDATA_API_KEY`; Kagi tests require `SERP_AXI_LIVE_KAGI=1` and
+`KAGI_SESSION_TOKEN`. Credentials alone activate no live provider tests.
+Live ladder tests require `SERP_AXI_LIVE_LADDER=1`
+and an available `ladder-cli` binary.
+
 ## Publishing (maintainers)
 
 Releases are cut by [release-please](https://github.com/googleapis/release-please):
@@ -184,7 +323,8 @@ after that goes through OIDC only.
 - `search` (all four providers, including SearXNG) and `scrape` are exercised
   against their endpoints in this repo's test suite; Serper, Bright Data,
   Kagi, and a local SearXNG were run live during development.
-- The fetch escalation ladder is measured but not implemented.
+- The fetch escalation ladder is implemented for rungs 1 to 4 (browser rungs
+  need the `browsers` extra); rung 5's browser half is pending.
   See "In progress" above.
 - No npm-registry version check is implemented yet (`update` is a static
   reminder, not a live lookup).

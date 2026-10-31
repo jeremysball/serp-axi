@@ -64,6 +64,8 @@ Kagi searches your own subscription through its session token. It takes
 region and language from your Kagi account settings, so --region and --lang
 are accepted but have no effect there.
 
+Output is TOON, not JSON — see "serp-axi --help" for a decode one-liner.
+
 Examples:
   serp-axi search "site:example.com pricing"
   serp-axi search "climate policy" --region uk --lang en --num 20

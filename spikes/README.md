@@ -2,12 +2,11 @@
 
 Measured datasets backing the free-SERP and page-scrape work. Each directory is
 one spike run, with the machine-readable output and the scripts that produced
-it. The findings derived from this data are **not** here. They live in Linear as
-prose, one issue per spike, and this repo holds the data those reports cite.
+it. Historical reports were recorded in Linear, one issue per spike. New findings
+and design decisions belong in the repo beside the evidence they cite.
 
-That split is deliberate: Linear is the human-readable record, git is the data
-and the code that produced it. Where a harness ledger exists it stays here,
-because a debugging record is only useful next to the runs it explains.
+The attachment references below describe that historical archive, not a rule for
+new work. The committed harness ledger stays next to the runs it explains.
 
 Two things are deliberately absent and are Linear attachments on BAL-40 instead:
 the screenshots, because a picture nobody diffs does not belong in git, and the

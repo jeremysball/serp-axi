@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
 
@@ -355,4 +357,121 @@ test("runScrape Bright Data preserves a bare-origin URL without adding a slash",
     await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
     assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
   });
+});
+
+async function withLadderStub<T>(mode: string, fn: () => Promise<T>): Promise<T> {
+  const binKey = "SERP_AXI_LADDER_BIN";
+  const modeKey = "LADDER_STUB_MODE";
+  const originalBin = process.env[binKey];
+  const originalMode = process.env[modeKey];
+  process.env[binKey] = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "fixtures",
+    "ladder-stub-bin.sh",
+  );
+  process.env[modeKey] = mode;
+  try {
+    return await fn();
+  } finally {
+    if (originalBin === undefined) delete process.env[binKey];
+    else process.env[binKey] = originalBin;
+    if (originalMode === undefined) delete process.env[modeKey];
+    else process.env[modeKey] = originalMode;
+  }
+}
+
+test("runScrape --ladder returns rung text with no API key", async () => {
+  await withLadderStub("ok", async () => {
+    const output = await runScrape(
+      ["https://example.com/article", "--ladder"],
+      (async () => new Response("{}")) as typeof fetch,
+    );
+    assert.equal(output.verdict, "ok");
+    assert.equal(output.rungReached, 1);
+    assert.deepEqual(output.links, [{ url: "https://example.com/linked", text: "Linked" }]);
+    assert.match(output.text as string, /example\.com\/article/);
+  });
+});
+
+test("runScrape --ladder maps a blocked verdict to a typed runtime error", async () => {
+  await withLadderStub("blocked", async () => {
+    await assert.rejects(
+      runScrape(["https://example.com/article", "--ladder"], (async () => new Response("{}")) as typeof fetch),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError);
+        assert.equal(error.kind, "runtime");
+        assert.match(error.message, /verdict: blocked/);
+        return true;
+      },
+    );
+  });
+});
+
+test("runScrape --ladder rejects --provider and multiple URLs", async () => {
+  await withLadderStub("ok", async () => {
+    await assert.rejects(
+      runScrape(
+        ["https://example.com/a", "--ladder", "--provider", "serper"],
+        (async () => new Response("{}")) as typeof fetch,
+      ),
+      /--provider does not apply with --ladder/,
+    );
+    await assert.rejects(
+      runScrape(
+        ["https://example.com/a", "https://example.com/b", "--ladder"],
+        (async () => new Response("{}")) as typeof fetch,
+      ),
+      /exactly one URL/,
+    );
+  });
+});
+
+test("runScrape rejects a ladder axis flag without --ladder instead of ignoring it", async () => {
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/article", "--tab-state", "same"],
+      (async () => new Response("{}")) as typeof fetch,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /--tab-state only applies with --ladder/);
+      return true;
+    },
+  );
+});
+
+test("runScrape --ladder forwards the resolved axes onto the wire", async () => {
+  await withLadderStub("echo-request", async () => {
+    const output = await runScrape(
+      ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2",
+        "--jar-in", "browser.json", "--http-jar-in", "session.in", "--http-jar-out", "session.out"],
+      (async () => new Response("{}")) as typeof fetch,
+    );
+    const sent = JSON.parse(output.text as string) as Record<string, unknown>;
+    assert.equal(sent.url, "https://example.com/article");
+    assert.equal(sent.protocol, 3);
+    assert.equal(sent.tabState, "same");
+    assert.equal(sent.rungCeiling, 2);
+    assert.equal(sent.jarIn, "browser.json");
+    assert.equal(sent.jarOut, null);
+    assert.equal(sent.httpJarIn, "session.in");
+    assert.equal(sent.httpJarOut, "session.out");
+  });
+});
+
+test("runScrape --ladder rejects an invalid axis value as a usage error", async () => {
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/article", "--ladder", "--rung-ceiling", "9"],
+      (async () => new Response("{}")) as typeof fetch,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /rung-ceiling "9"/);
+      return true;
+    },
+  );
 });

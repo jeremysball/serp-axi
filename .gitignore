@@ -2,6 +2,12 @@
 node_modules/
 dist/
 
+# ladder-cli's own interpreter and bytecode. The venv is rebuilt from uv.lock by
+# `uv sync`, so nothing in it is a source file.
+ladder-cli/.venv/
+ladder-cli/**/__pycache__/
+ladder-cli/.pytest_cache/
+
 # Spike harness regenerable bulk. spikes/README.md claims these are excluded;
 # without these lines a re-run inside spikes/ stages a whole venv and profiles.
 spikes/**/.venv/

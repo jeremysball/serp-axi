@@ -1,0 +1,182 @@
+"""Rung 1 verdict rules against recorded page shapes.
+
+Fixtures here are hand-written to the shapes the measured run actually saw, so
+the thresholds stay pinned to evidence rather than to whatever a fetch happens
+to return today. Nothing in this file touches the network.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from ladder_cli.rungs import RungVerdict, http, normalize_links, normalize_page_text
+
+
+def page(title: str, text: str, status: int | None = 200) -> dict:
+    return {"title": title, "text": text, "status": status}
+
+
+def article(length: int = 900) -> str:
+    return "An article opening. " + ("content " * (length // 8))
+
+
+def test_real_content_passes() -> None:
+    result = http.judge(page("An article", article()))
+    assert result.verdict is RungVerdict.OK
+    assert result.status == 200
+
+
+def test_http_fetch_keeps_the_browser_jar_helpers_untouched(monkeypatch, tmp_path):
+    """Rung 1's ctx pair is Netscape; the browser JSON jar helpers stay out of it.
+
+    The pair is used, but by http's own Netscape helpers. Routing these paths
+    through the browser jar loader or saver would silently convert between the
+    two formats, so either one firing is a bug even when the page fetches fine.
+    """
+    from types import SimpleNamespace
+
+    from ladder_cli.rungs import RungContext
+    from ladder_cli.state import jars
+
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(status_code=200, url=url, headers={},
+                               text="<title>Title</title><p>" + "Content " * 100 + "</p>")
+
+    def unexpected_jar_access(*args, **kwargs):
+        raise AssertionError("HTTP must not touch the browser JSON jar helpers")
+
+    monkeypatch.setattr(http, "_client", lambda: SimpleNamespace(get=get))
+    monkeypatch.setattr(jars, "load", unexpected_jar_access)
+    monkeypatch.setattr(jars, "save", unexpected_jar_access)
+    output = tmp_path / "output.cookies.txt"
+    result = http.fetch("https://example.com/", RungContext(jar_in=tmp_path / "input.txt", jar_out=output))
+    assert result.get("title") == "Title"
+    assert "Content" in result["text"]
+    assert calls == ["https://example.com/"]
+    assert output.exists(), "the Netscape jar is still saved, by http's own helpers"
+
+
+def test_a_gone_page_is_dead_and_a_defended_page_is_blocked() -> None:
+    gone = http.judge(page("Not found", "nope", status=404))
+    assert gone.verdict is RungVerdict.DEAD, "404 must not climb: no browser revives a deleted page"
+
+    defended = http.judge(page("Access denied", "nope", status=403))
+    assert defended.verdict is RungVerdict.BLOCKED, "403 may clear in a stronger rung"
+
+
+@pytest.mark.parametrize("status", [521, 522, 523, 525, 526, 530])
+def test_a_dead_origin_is_dead_not_blocked(status: int) -> None:
+    assert http.judge(page("Origin down", article(), status=status)).verdict is RungVerdict.DEAD
+
+
+def test_a_bot_check_reads_blocked_even_when_the_page_is_short() -> None:
+    text = "Just a moment... checking your browser before you continue."
+    result = http.judge(page("Attention Required", text))
+    assert result.verdict is RungVerdict.BLOCKED
+    assert result.reason == "challenge marker"
+
+
+def test_content_thinner_than_the_rung_one_floor_climbs() -> None:
+    result = http.judge(page("Home", "Home and little else."))
+    assert result.verdict is RungVerdict.BLOCKED
+    assert "under rung-1 floor" in result.reason
+
+
+def test_a_client_side_shell_is_not_a_successful_fetch() -> None:
+    text = "Loading... " + ("nav " * 120)
+    result = http.judge(page("App", text))
+    assert result.verdict is RungVerdict.BLOCKED
+    assert result.reason == "js shell (loading marker)"
+
+
+def test_page_text_short_of_the_thin_baseline_climbs() -> None:
+    result = http.judge(page("Short", "A tidy page, but only five hundred characters of actual prose. " + "x" * 440))
+    assert result.verdict is RungVerdict.BLOCKED
+    assert "chars" in result.reason
+
+
+def test_a_site_api_answer_passes_without_the_html_floor() -> None:
+    result = http.judge(page("api", "a thread of posts", status=200))
+    assert result.verdict is RungVerdict.OK
+    assert result.reason == "site api"
+
+
+def test_reddit_comment_urls_prefer_the_site_api() -> None:
+    url = "https://www.reddit.com/r/python/comments/abc123/some_thread/"
+    assert http.api_url(url) == "https://www.reddit.com/r/python/comments/abc123/some_thread.json?limit=200"
+
+
+def test_hacker_news_item_urls_prefer_the_site_api() -> None:
+    assert http.api_url("https://news.ycombinator.com/item?id=12345") == "https://hn.algolia.com/api/v1/items/12345"
+
+
+def test_ordinary_urls_have_no_api_form() -> None:
+    assert http.api_url("https://example.com/article") is None
+
+
+def test_flatten_api_gathers_readable_bodies_recursively() -> None:
+    payload = {
+        "title": "thread",
+        "children": [
+            {"data": {"author": "ann", "score": 12, "body": "hello <b>world</b>"}},
+            {"data": {"author": "bob", "points": 3, "selftext": "second post"}},
+        ],
+    }
+    flat = http.flatten_api("https://example.com", payload)
+    assert "[ann 12] hello world" in flat, "stripping a tag must not leave a double space behind"
+    assert "[bob 3] second post" in flat
+
+
+def test_flatten_api_does_not_render_missing_metadata_as_the_word_none() -> None:
+    flat = http.flatten_api("https://example.com", {"title": "a thread with no author"})
+    assert flat == "a thread with no author"
+    assert "None" not in flat
+
+
+def test_anchor_parser_reads_nested_text_and_entities() -> None:
+    parser = http._AnchorParser()
+    parser.feed('<a href="/a">A &amp; <b>B</b></a><a>no href</a><a href="https://x.test/c">C</a>')
+    assert parser.links == [
+        {"url": "/a", "text": "A & B"},
+        {"url": "https://x.test/c", "text": "C"},
+    ]
+
+
+def test_links_resolve_relative_urls_and_drop_non_navigational_ones() -> None:
+    links = normalize_links(
+        [
+            {"url": "/a", "text": " A "},
+            {"url": "https://example.com/a", "text": "duplicate"},
+            {"url": "javascript:void(0)", "text": "no"},
+            {"url": "https://example.com/b", "text": "B\n line"},
+        ],
+        "https://example.com/page",
+    )
+    assert links == [
+        {"url": "https://example.com/a", "text": "A"},
+        {"url": "https://example.com/b", "text": "B line"},
+    ]
+
+
+def test_judge_carries_the_links_it_was_given() -> None:
+    links = [{"url": "https://example.com/a", "text": "A"}]
+    result = http.judge({"title": "An article", "text": article(), "status": 200, "links": links})
+    assert result.verdict is RungVerdict.OK
+    assert result.links == links
+
+
+def test_browser_text_normalization_strips_layout_whitespace() -> None:
+    assert normalize_page_text("  a  \n\n\n  b\t c  ") == "a\n\nb c"
+
+
+def test_html_extraction_decodes_entities_and_collapses_source_whitespace() -> None:
+    page = http.extract_html(
+        "<title>T</title><body>\n  A &amp; B\n\n <a href='/x'>X &amp; Y</a></body>",
+        200,
+        "https://example.com/p",
+    )
+    assert page["text"] == "T A & B X & Y"
+    assert page["links"] == [{"url": "https://example.com/x", "text": "X & Y"}]

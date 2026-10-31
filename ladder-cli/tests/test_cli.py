@@ -1,0 +1,466 @@
+"""Handshake, dispatch, and the rung budget."""
+
+from __future__ import annotations
+
+import dataclasses
+import io
+import json
+import subprocess
+import sys
+import time
+
+from ladder_cli import cli
+from ladder_cli.rungs import RungResult, RungVerdict
+
+
+def sequence(*results: RungResult):
+    """A runner that answers in order and records which rungs it was asked for."""
+    queue = list(results)
+    calls: list[str] = []
+    jars: list[tuple[str | None, str | None]] = []
+
+    def fake(rung: str, url: str, ctx=None) -> RungResult:
+        calls.append(rung)
+        jars.append((
+            str(ctx.jar_in) if ctx is not None and ctx.jar_in is not None else None,
+            str(ctx.jar_out) if ctx is not None and ctx.jar_out is not None else None,
+        ))
+        return queue.pop(0)
+
+    fake.calls = calls
+    fake.jars = jars
+    return fake
+
+
+def ok_result(text: str = "body " * 200) -> RungResult:
+    return RungResult(RungVerdict.OK, title="An article", text=text, status=200, reason="enough text")
+
+
+def refused(reason: str = "status 403") -> RungResult:
+    return RungResult(RungVerdict.BLOCKED, status=403, reason=reason)
+
+
+def payload(request) -> dict:
+    return dataclasses.asdict(request)
+
+
+def read_lines(stdout: io.StringIO) -> list[dict]:
+    return [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+
+
+def test_the_ready_line_precedes_every_response_and_declares_the_protocol() -> None:
+    stdout = io.StringIO()
+    cli.main([], stdin=io.StringIO(""), stdout=stdout)
+    assert read_lines(stdout) == [{"ready": True, "protocol": 3}]
+
+
+def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypatch) -> None:
+    runner = sequence(ok_result("clear enough to read"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    stdout = io.StringIO()
+    stdin = io.StringIO(json.dumps(payload(make_request())) + "\n")
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    lines = read_lines(stdout)
+    assert lines[0]["ready"] is True
+    response = lines[1]
+    assert response["protocol"] == 3
+    assert response["verdict"] == "ok"
+    assert response["rungReached"] == 1
+    assert response["text"] == "clear enough to read"
+    assert runner.calls == ["http"]
+
+
+def test_dead_ends_the_climb_before_a_stronger_rung_is_tried(make_request, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox", "zendriver_cf"))
+    runner = sequence(RungResult(RungVerdict.DEAD, reason="status 404"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    response = cli.dispatch(make_request())
+    assert response.verdict == "dead"
+    assert response.rungReached == 1
+    assert runner.calls == ["http"], "a browser cannot revive a page that is gone"
+
+
+def test_blocked_climbs_until_the_rungs_run_out(make_request, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox", "zendriver_cf"))
+    runner = sequence(refused(), refused(), ok_result())
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    response = cli.dispatch(make_request())
+    assert response.verdict == "ok"
+    assert response.rungReached == 3
+    assert runner.calls == ["http", "camoufox", "zendriver_cf"]
+
+
+def test_exhausting_every_rung_reports_blocked_not_an_empty_success(make_request, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    runner = sequence(refused("status 403"), refused("js shell"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    response = cli.dispatch(make_request())
+    assert response.verdict == "blocked"
+    assert response.rungReached == 2
+    assert response.warning == "js shell"
+
+
+def test_the_rung_ceiling_caps_the_climb(make_request, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox", "zendriver_cf"))
+    runner = sequence(refused())
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    response = cli.dispatch(make_request(rungCeiling=1))
+    assert response.verdict == "blocked"
+    assert response.rungReached == 1
+    assert runner.calls == ["http"]
+
+
+def test_a_rung_reporting_ok_with_no_text_is_refused_not_propagated(make_request, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    runner = sequence(ok_result("   "), refused("enough text"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    response = cli.dispatch(make_request())
+    assert response.verdict == "blocked"
+    assert runner.calls == ["http", "camoufox"], "the empty ok must climb, not satisfy the caller"
+
+
+def test_a_refused_request_is_answered_and_the_loop_carries_on(make_request, monkeypatch) -> None:
+    broken = payload(make_request())
+    broken["protocol"] = 1
+    stdin = io.StringIO(json.dumps(broken) + "\n" + json.dumps(payload(make_request())) + "\n")
+    stdout = io.StringIO()
+    monkeypatch.setattr(cli, "run_rung_isolated", sequence(ok_result()))
+
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    lines = read_lines(stdout)
+    assert lines[0]["ready"] is True
+    assert lines[1]["verdict"] == "blocked"
+    assert "protocol mismatch" in lines[1]["warning"]
+    assert lines[2]["verdict"] == "ok", "one bad request must not take the resident child down"
+
+
+def test_a_rung_that_blows_its_budget_is_killed() -> None:
+    started = time.monotonic()
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=0.5,
+        argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 20, f"the SIGKILL did not land; waited {elapsed}s"
+    assert result.verdict is RungVerdict.ERROR
+    assert "budget" in result.reason
+
+
+def test_a_final_rung_timeout_is_an_error_not_a_defended_page(make_request) -> None:
+    calls = []
+
+    def runner(rung, url, ctx=None):
+        calls.append(rung)
+        return cli.run_rung_isolated(
+            rung, url, timeout_s=0.3,
+            argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+        )
+
+    response = cli.dispatch(make_request(rungCeiling=1), runner=runner)
+    assert calls == ["http"]
+    assert response.rungReached == 1
+    assert response.verdict == "error"
+    assert "budget" in response.warning
+
+
+def test_a_child_record_comes_back_judged_by_the_rung_rules() -> None:
+    page = json.dumps({"title": "An article", "text": "body " * 300, "status": 200})
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=20,
+        argv=[sys.executable, "-c", f"print({page!r})"],
+    )
+    assert result.verdict is RungVerdict.OK
+    assert result.status == 200
+
+
+def test_a_dns_failure_on_the_first_rung_reads_dead() -> None:
+    result = cli.run_rung_isolated(
+        "http",
+        "https://nonexistent.invalid",
+        timeout_s=20,
+        argv=[sys.executable, "-c", "import sys; print('DNSError: failed to lookup', file=sys.stderr); sys.exit(1)"],
+    )
+    assert result.verdict is RungVerdict.DEAD
+    assert "network" in result.reason
+
+
+def test_an_unexpected_rung_failure_climbs_and_only_surfaces_when_the_rungs_run_out(
+    make_request,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    monkeypatch.setattr(cli, "run_rung_isolated", sequence(RungResult(RungVerdict.ERROR, reason="boom"), RungResult(RungVerdict.ERROR, reason="boom again")))
+
+    stdout = io.StringIO()
+    stdin = io.StringIO(json.dumps(payload(make_request())) + "\n")
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    response = read_lines(stdout)[1]
+    assert response["verdict"] == "error"
+    assert response["rungReached"] == 2
+    assert response["warning"]
+
+
+def test_an_unexpected_rung_failure_reports_blocked_once_a_page_is_actually_defended(
+    make_request,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli, "RUNGS", ("http", "camoufox"))
+    runner = sequence(RungResult(RungVerdict.ERROR, reason="boom"), refused())
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    stdout = io.StringIO()
+    stdin = io.StringIO(json.dumps(payload(make_request())) + "\n")
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    assert read_lines(stdout)[1]["verdict"] == "blocked"
+
+
+def test_a_timeout_reads_as_an_error_not_as_the_page_dying() -> None:
+    # The spike mapped a timeout to `dead`, which stopped the climb on a blown
+    # budget. A budget firing is our machinery, never the page, so it must climb.
+    from ladder_cli.rungs import http as rung_http
+
+    assert rung_http.DEAD_NET.search("TimeoutError") is None
+    assert rung_http.DEAD_NET.search("timed out") is None
+    assert rung_http.DEAD_NET.search("DNSError: failed to lookup")
+
+
+def test_the_childs_error_line_is_picked_out_of_stderr_noise() -> None:
+    # The child prints one `Type: message` line, but it is not the last thing on
+    # stderr: a multi-line exception message, or a deprecation notice after it,
+    # used to be mistaken for the error.
+    stderr = (
+        "/usr/lib/ladder_cli/http.py:9: DeprecationWarning: something newer\n"
+        "Traceback (most recent call last):\n"
+        '  File "x", line 1\n'
+        "ValueError: the real reason\nsecond line of the same message\n"
+    )
+    assert cli._rung_error_line(stderr) == "the real reason"
+
+
+def test_a_timeout_on_a_rung_is_reported_as_a_budget_not_as_a_network_death() -> None:
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=20,
+        argv=[sys.executable, "-c", "import sys; print('TimeoutError: read timed out', file=sys.stderr); sys.exit(1)"],
+    )
+    assert result.verdict is RungVerdict.ERROR
+    assert "timed out" in result.reason
+
+
+def test_a_browser_tool_is_not_imported_before_anything_needs_it() -> None:
+    # primp is a browser library and rung 1 is the only rung. Importing it at
+    # module scope made the resident child owe its ready line before it had
+    # touched a browser, so the import moved inside the client that uses it.
+    assert "primp" not in sys.modules, "importing the ladder pulled in a browser tool it has not asked for"
+
+
+def test_suffix_data_is_loaded_only_when_cookie_scoping_needs_it():
+    process = subprocess.run([
+        sys.executable, "-c",
+        "import sys; from ladder_cli import cli; from ladder_cli.state import jars; "
+        "before = 'tldextract' in sys.modules; "
+        "assert jars.base_domain('www.example.com') == 'example.com'; "
+        "assert 'tldextract' in sys.modules; "
+        "assert not before, 'resident readiness eagerly imported cookie suffix support'",
+    ], capture_output=True, text=True, timeout=10)
+    assert process.returncode == 0, process.stderr
+
+
+def test_the_requests_jar_paths_reach_the_runner(make_request, monkeypatch) -> None:
+    """The parent sent `jarIn`/`jarOut` and dispatch dropped them on the floor.
+
+    README documented both flags as working while no rung read either field.
+    This pins the first hop: the request's browser jar paths become the context
+    the zendriver runner is given. HTTP runs its own jar pair instead.
+    """
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake(rung: str, url: str, ctx=None) -> RungResult:
+        seen["ctx"] = ctx
+        return ok_result()
+
+    monkeypatch.setattr(cli, "RUNGS", ("zendriver_cf",))
+
+    cli.dispatch(make_request(jarIn="/work/in.cookies.json", jarOut="/work/out.cookies.json"), runner=fake)
+
+    assert seen["ctx"] == RungContext(
+        jar_in=Path("/work/in.cookies.json"),
+        jar_out=Path("/work/out.cookies.json"),
+    )
+
+
+def test_an_isolated_child_is_told_the_jars_on_its_command_line(monkeypatch) -> None:
+    """A subprocess cannot see the parent's memory; its argv is the handoff."""
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    commands: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            commands.append(command)
+            self.pid = 4242
+
+        def communicate(self, timeout: float | None = None):
+            return ('{"title": "T", "text": "body", "status": 200}\n', "")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", FakeProcess)
+
+    cli.run_rung_isolated(
+        "http",
+        "https://example.com/",
+        timeout_s=5,
+        ctx=RungContext(jar_in=Path("/j/in.json"), jar_out=Path("/j/out.json")),
+    )
+    cli.run_rung_isolated("http", "https://example.com/", timeout_s=5)
+
+    assert commands[0][-4:] == ["--jar-in", "/j/in.json", "--jar-out", "/j/out.json"]
+    assert "--jar-in" not in commands[1], "no jar, no flags: the child's argv stays what it was"
+
+
+def test_the_rung_child_reads_the_jar_flags_back_without_mistaking_them_for_the_url(monkeypatch) -> None:
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake_child(rung, url, stdout, stderr, ctx=None):
+        seen["call"] = (rung, url, ctx)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_rung_child", fake_child)
+
+    cli.main(
+        ["--rung", "http", "https://example.com/", "--jar-in", "/j/in.json", "--jar-out", "/j/out.json"],
+        stdout=io.StringIO(),
+    )
+
+    assert seen["call"] == (
+        "http",
+        "https://example.com/",
+        RungContext(jar_in=Path("/j/in.json"), jar_out=Path("/j/out.json")),
+    )
+def test_u2028_in_page_text_does_not_split_the_rung_record() -> None:
+    # U+2028 LINE SEPARATOR is legal inside a JSON string but is a line break
+    # to str.splitlines(). The regression is a page whose text contains it
+    # reading as a rung that produced no record at all.
+    script = (
+        "import json; "
+        "print(json.dumps({'title': 'T', 'status': 200, "
+        "'text': 'before\\u2028' + 'word ' * 200}, ensure_ascii=False))"
+    )
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=10,
+        argv=[sys.executable, "-c", script],
+    )
+    assert result.verdict is RungVerdict.OK
+
+
+def test_jar_paths_reach_the_runner_with_the_request(make_request, monkeypatch, tmp_path) -> None:
+    runner = sequence(ok_result("clear enough to read"))
+    monkeypatch.setattr(cli, "run_rung_isolated", runner)
+
+    jar_in = tmp_path / "in.jar"
+    jar_out = tmp_path / "out.jar"
+    stdin = io.StringIO(json.dumps(payload(make_request(httpJarIn=str(jar_in), httpJarOut=str(jar_out)))) + "\n")
+    stdout = io.StringIO()
+    assert cli.main([], stdin=stdin, stdout=stdout) == 0
+
+    assert runner.calls == ["http"]
+    assert runner.jars == [(str(jar_in), str(jar_out))], "the request's jar paths are the runner's to pass on"
+
+
+def test_the_child_command_carries_jar_flags(monkeypatch, tmp_path) -> None:
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    jar = tmp_path / "session.jar"
+    page = json.dumps({"title": "T", "text": "word " * 200, "status": 200})
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            captured["command"] = list(command)
+
+        def communicate(self, timeout=None):
+            return (page + "\n", "")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", FakeProcess)
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/x",
+        ctx=RungContext(jar_in=Path(jar), jar_out=Path(jar)),
+    )
+
+    assert result.verdict is RungVerdict.OK
+    assert captured["command"][-4:] == ["--jar-in", str(jar), "--jar-out", str(jar)], (
+        "the child's argv carries the rung's own jar pair under one flag spelling"
+    )
+
+    captured.clear()
+    cli.run_rung_isolated("http", "https://example.com/x")
+    assert "--jar-in" not in captured["command"], "a cold request spawns no jar flags"
+
+
+def test_child_mode_parses_jar_flags(monkeypatch, tmp_path) -> None:
+    from pathlib import Path
+
+    from ladder_cli.rungs import RungContext
+
+    seen: dict[str, object] = {}
+
+    def fake_fetch(rung, url, ctx=None):
+        seen.update(rung=rung, url=url, ctx=ctx)
+        return {"title": "T", "text": "word " * 200, "status": 200, "links": []}
+
+    monkeypatch.setattr(cli, "fetch", fake_fetch)
+
+    jar_in = tmp_path / "in.jar"
+    jar_out = tmp_path / "out.jar"
+    code = cli.main(
+        ["--rung", "http", "https://example.com/x", "--jar-in", str(jar_in), "--jar-out", str(jar_out)]
+    )
+
+    assert code == 0
+    assert seen == {
+        "rung": "http",
+        "url": "https://example.com/x",
+        "ctx": RungContext(jar_in=Path(jar_in), jar_out=Path(jar_out)),
+    }
+
+
+def test_each_rung_receives_only_its_own_jar_format(make_request):
+    runner = sequence(refused(), refused(), refused(), ok_result())
+    request = make_request(jarIn="browser.in.json", jarOut="browser.out.json",
+                           httpJarIn="http.in.txt", httpJarOut="http.out.txt", rungCeiling=4)
+    response = cli.dispatch(request, runner=runner)
+    assert response.verdict == "ok"
+    assert runner.calls == ["http", "camoufox", "zendriver_cf", "zendriver_headed_cf"]
+    assert runner.jars == [("http.in.txt", "http.out.txt"), (None, None),
+                           ("browser.in.json", "browser.out.json"),
+                           ("browser.in.json", "browser.out.json")]
