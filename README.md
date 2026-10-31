@@ -22,16 +22,20 @@ serp-axi --version
 
 ## Quickstart
 
-Set one API key, then search:
+Search for free through a SearXNG instance. No API key, no provider flag:
 
 ```
-export SERPER_API_KEY=<your key>
 serp-axi search "site:example.com pricing"
 ```
 
-Read a result in full:
+The default endpoint is `http://127.0.0.1:8888`; override it with
+`--searxng-url` or `SERP_AXI_SEARXNG_URL`.
+
+Search Google directly, or read a result in full, through a paid provider:
 
 ```
+export SERPER_API_KEY=<your key>
+serp-axi search "climate policy" --provider serper
 serp-axi scrape https://example.com/article
 ```
 

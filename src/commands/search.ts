@@ -69,7 +69,7 @@ Output is TOON, not JSON — see "serp-axi --help" for a decode one-liner.
 Examples:
   serp-axi search "site:example.com pricing"
   serp-axi search "climate policy" --region uk --lang en --num 20
-  serp-axi search "conference talks" --fields date,sitelinks
+  serp-axi search "conference talks" --provider serper --fields date,sitelinks
   serp-axi search "climate policy" --provider brightdata
   serp-axi search "climate policy" --provider brightdata --zone my_zone
   serp-axi search "climate policy" --provider kagi
