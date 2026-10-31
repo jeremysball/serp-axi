@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ladder_cli.rungs import RungVerdict, http
+from ladder_cli.rungs import RungVerdict, http, normalize_links, normalize_page_text
 
 
 def page(title: str, text: str, status: int | None = 200) -> dict:
@@ -26,8 +26,15 @@ def test_real_content_passes() -> None:
     assert result.status == 200
 
 
-def test_http_fetch_ignores_jar_paths(monkeypatch, tmp_path):
+def test_http_fetch_keeps_the_browser_jar_helpers_untouched(monkeypatch, tmp_path):
+    """Rung 1's ctx pair is Netscape; the browser JSON jar helpers stay out of it.
+
+    The pair is used, but by http's own Netscape helpers. Routing these paths
+    through the browser jar loader or saver would silently convert between the
+    two formats, so either one firing is a bug even when the page fetches fine.
+    """
     from types import SimpleNamespace
+
     from ladder_cli.rungs import RungContext
     from ladder_cli.state import jars
 
@@ -35,20 +42,21 @@ def test_http_fetch_ignores_jar_paths(monkeypatch, tmp_path):
 
     def get(url, **kwargs):
         calls.append(url)
-        return SimpleNamespace(status_code=200, text="<title>Title</title><p>Content</p>")
+        return SimpleNamespace(status_code=200, url=url, headers={},
+                               text="<title>Title</title><p>" + "Content " * 100 + "</p>")
 
     def unexpected_jar_access(*args, **kwargs):
-        raise AssertionError("HTTP must not load or save cookie jars")
+        raise AssertionError("HTTP must not touch the browser JSON jar helpers")
 
     monkeypatch.setattr(http, "_client", lambda: SimpleNamespace(get=get))
     monkeypatch.setattr(jars, "load", unexpected_jar_access)
     monkeypatch.setattr(jars, "save", unexpected_jar_access)
-    output = tmp_path / "output.json"
-    result = http.fetch("https://example.com/", RungContext(tmp_path / "input.json", output))
+    output = tmp_path / "output.cookies.txt"
+    result = http.fetch("https://example.com/", RungContext(jar_in=tmp_path / "input.txt", jar_out=output))
     assert result.get("title") == "Title"
     assert "Content" in result["text"]
     assert calls == ["https://example.com/"]
-    assert not output.exists()
+    assert output.exists(), "the Netscape jar is still saved, by http's own helpers"
 
 
 def test_a_gone_page_is_dead_and_a_defended_page_is_blocked() -> None:
@@ -126,3 +134,49 @@ def test_flatten_api_does_not_render_missing_metadata_as_the_word_none() -> None
     flat = http.flatten_api("https://example.com", {"title": "a thread with no author"})
     assert flat == "a thread with no author"
     assert "None" not in flat
+
+
+def test_anchor_parser_reads_nested_text_and_entities() -> None:
+    parser = http._AnchorParser()
+    parser.feed('<a href="/a">A &amp; <b>B</b></a><a>no href</a><a href="https://x.test/c">C</a>')
+    assert parser.links == [
+        {"url": "/a", "text": "A & B"},
+        {"url": "https://x.test/c", "text": "C"},
+    ]
+
+
+def test_links_resolve_relative_urls_and_drop_non_navigational_ones() -> None:
+    links = normalize_links(
+        [
+            {"url": "/a", "text": " A "},
+            {"url": "https://example.com/a", "text": "duplicate"},
+            {"url": "javascript:void(0)", "text": "no"},
+            {"url": "https://example.com/b", "text": "B\n line"},
+        ],
+        "https://example.com/page",
+    )
+    assert links == [
+        {"url": "https://example.com/a", "text": "A"},
+        {"url": "https://example.com/b", "text": "B line"},
+    ]
+
+
+def test_judge_carries_the_links_it_was_given() -> None:
+    links = [{"url": "https://example.com/a", "text": "A"}]
+    result = http.judge({"title": "An article", "text": article(), "status": 200, "links": links})
+    assert result.verdict is RungVerdict.OK
+    assert result.links == links
+
+
+def test_browser_text_normalization_strips_layout_whitespace() -> None:
+    assert normalize_page_text("  a  \n\n\n  b\t c  ") == "a\n\nb c"
+
+
+def test_html_extraction_decodes_entities_and_collapses_source_whitespace() -> None:
+    page = http.extract_html(
+        "<title>T</title><body>\n  A &amp; B\n\n <a href='/x'>X &amp; Y</a></body>",
+        200,
+        "https://example.com/p",
+    )
+    assert page["text"] == "T A & B X & Y"
+    assert page["links"] == [{"url": "https://example.com/x", "text": "X & Y"}]

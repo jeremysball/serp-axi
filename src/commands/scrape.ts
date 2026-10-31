@@ -22,6 +22,8 @@ export const SCRAPE_FLAGS: FlagSpec = {
   profile: "string",
   "jar-in": "string",
   "jar-out": "string",
+  "http-jar-in": "string",
+  "http-jar-out": "string",
 };
 
 // The six axes and the jar paths are ladder-only. Rejecting them elsewhere
@@ -81,10 +83,12 @@ Ladder axes (only with --ladder; flag > env > profile > config > default):
   --fingerprint-state <state>  rotate (default) or stable; reserved; not yet applied
   --rung-ceiling <1-5>         Highest rung allowed. Default 5; currently stops at rung 4.
   --profile <name>             Named bundle of axes from ladderProfiles in the config file.
-  --jar-in <path>              Cookie jar to load before fetching.
-  --jar-out <path>             Cookie jar to save after fetching.
+  --jar-in <path>              Filtered browser JSON cookie jar to load.
+  --jar-out <path>             Filtered browser JSON cookie jar to save.
                          --cookie-state jar mirrors whichever of these you pass to both.
-                         Jar paths apply only to zendriver (rungs 3-4), not HTTP or Camoufox.
+                         Browser jar paths reach zendriver (rungs 3-4) only, never HTTP or Camoufox.
+  --http-jar-in <path>         Full-session Netscape cookie jar for HTTP rung 1 only.
+  --http-jar-out <path>        Save HTTP-session cookies; never mirrored or converted.
 
 Rungs 1-4 fetch pages. Rung 5 is deferred and is not attempted; audio helpers are unwired.
 
@@ -383,6 +387,7 @@ async function runLadderScrape(
     url: url.toString(),
     verdict: response.verdict,
     rungReached: response.rungReached,
+    links: response.links,
   };
   if (response.title) {
     output.title = response.title;

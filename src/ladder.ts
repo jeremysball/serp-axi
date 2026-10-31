@@ -7,6 +7,11 @@ import { boundedDetail, SerpAxiError } from "./errors.ts";
 
 export type LadderVerdict = "ok" | "dead" | "blocked" | "error";
 
+export interface LadderLink {
+  url: string;
+  text: string;
+}
+
 export interface LadderResponse {
   verdict: LadderVerdict;
   rungReached: number;
@@ -15,9 +20,10 @@ export interface LadderResponse {
   engines: string[];
   elapsedMs: number;
   warning: string | null;
+  links: LadderLink[];
 }
 
-export const LADDER_PROTOCOL = 1;
+export const LADDER_PROTOCOL = 3;
 
 export type LadderTabState = "fresh" | "same";
 export type LadderCookieState = "cold" | "jar";
@@ -34,6 +40,8 @@ export interface LadderAxes {
   profile: string | null;
   jarIn: string | null;
   jarOut: string | null;
+  httpJarIn: string | null;
+  httpJarOut: string | null;
 }
 
 export interface LadderRequest extends LadderAxes {
@@ -87,6 +95,8 @@ const LADDER_AXIS_DEFAULTS: LadderAxes = {
   profile: null,
   jarIn: null,
   jarOut: null,
+  httpJarIn: null,
+  httpJarOut: null,
 };
 
 // The flag and env names are derived from one table so a new axis cannot drift
@@ -101,6 +111,8 @@ const AXIS_TABLE = {
   profile: { flag: "profile", env: "SERP_AXI_PROFILE", config: "ladderProfile" },
   jarIn: { flag: "jar-in", env: "SERP_AXI_JAR_IN", config: "ladderJarIn" },
   jarOut: { flag: "jar-out", env: "SERP_AXI_JAR_OUT", config: "ladderJarOut" },
+  httpJarIn: { flag: "http-jar-in", env: "SERP_AXI_HTTP_JAR_IN", config: "ladderHttpJarIn" },
+  httpJarOut: { flag: "http-jar-out", env: "SERP_AXI_HTTP_JAR_OUT", config: "ladderHttpJarOut" },
 } as const;
 
 type AxisKey = keyof typeof AXIS_TABLE;
@@ -120,7 +132,7 @@ const AXIS_ENUMS: Record<string, readonly string[]> = {
 };
 
 const VALUE_KEYS = ["tabState", "cookieState", "cacheState", "fingerprintState", "rungCeiling"] as const;
-const JAR_KEYS = ["jarIn", "jarOut"] as const;
+const JAR_KEYS = ["jarIn", "jarOut", "httpJarIn", "httpJarOut"] as const;
 
 // Axis and config validation is a usage error: the caller can fix it by
 // changing a flag, so it must reach the CLI as a SerpAxiError with a help
@@ -366,6 +378,18 @@ function parseResponse(line: string): LadderResponse {
       `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${boundedDetail(line)})`,
     );
   }
+  // A protocol-3 child always sends links. Defaulting a missing field to []
+  // would turn a stale half of the pair into an empty result the caller cannot
+  // tell from a page with no anchors, so this is a schema violation instead.
+  if (!Array.isArray(body.links)) {
+    throw new SerpAxiLadderError(
+      `ladder-cli returned a response without a links array: schema violation (line: ${boundedDetail(line)})`,
+    );
+  }
+  const links = body.links.flatMap((entry): LadderLink[] => {
+    if (!isRecord(entry) || typeof entry.url !== "string" || typeof entry.text !== "string") return [];
+    return [{ url: entry.url, text: entry.text }];
+  });
   return {
     verdict: body.verdict,
     rungReached: typeof body.rungReached === "number" ? body.rungReached : 0,
@@ -374,6 +398,7 @@ function parseResponse(line: string): LadderResponse {
     engines: Array.isArray(body.engines) ? body.engines.filter((e): e is string => typeof e === "string") : [],
     elapsedMs: typeof body.elapsedMs === "number" ? body.elapsedMs : 0,
     warning: typeof body.warning === "string" ? body.warning : null,
+    links,
   };
 }
 

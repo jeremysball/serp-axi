@@ -10,10 +10,10 @@ is quietly dropped is indistinguishable from a request that ran with defaults.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PROTOCOL = 1
+PROTOCOL = 3
 
 # A fourth verdict, "error", is not a property of the page: it means the climb
 # ran out of rungs because a rung malfunctioned, with no page ever judged. It
@@ -38,6 +38,8 @@ REQUEST_FIELDS = (
     "profile",
     "jarIn",
     "jarOut",
+    "httpJarIn",
+    "httpJarOut",
 )
 
 
@@ -71,6 +73,8 @@ class LadderRequest:
     profile: str | None
     jarIn: str | None
     jarOut: str | None
+    httpJarIn: str | None
+    httpJarOut: str | None
 
     @classmethod
     def parse(cls, payload: Any) -> "LadderRequest":
@@ -109,6 +113,8 @@ class LadderRequest:
             profile=_optional_path("profile", payload["profile"]),
             jarIn=_optional_path("jarIn", payload["jarIn"]),
             jarOut=_optional_path("jarOut", payload["jarOut"]),
+            httpJarIn=_optional_path("httpJarIn", payload["httpJarIn"]),
+            httpJarOut=_optional_path("httpJarOut", payload["httpJarOut"]),
         )
 
 
@@ -121,6 +127,7 @@ class LadderResponse:
     engines: list[str]
     elapsedMs: int
     warning: str | None
+    links: list[dict[str, str]] = field(default_factory=list)
     protocol: int = PROTOCOL
 
     def __post_init__(self) -> None:
@@ -131,6 +138,15 @@ class LadderResponse:
         # ever producing a response the parent must refuse.
         if self.verdict == "ok" and not self.text.strip():
             raise ProtocolError('verdict "ok" requires non-empty text')
+        for link in self.links:
+            if not isinstance(link, dict):
+                raise ProtocolError(f"link {link!r} must be an object with url and text")
+            url = link.get("url")
+            text = link.get("text")
+            if not isinstance(url, str) or not url.strip():
+                raise ProtocolError(f"link url {url!r} must be a non-empty string")
+            if not isinstance(text, str):
+                raise ProtocolError(f"link text {text!r} must be a string")
 
     def encode(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

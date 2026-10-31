@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import RungContext, STRIP_JS, RungResult, browser_judge, normalize_page_text
+from . import LINKS_JS, STRIP_JS, RungContext, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:71 `Camoufox(headless=True, humanize=True)`: `humanize` is the
 # build's own human-like input shaping, and it is the point of reaching for
@@ -50,10 +50,12 @@ def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
         response = page.goto(url, wait_until=WAIT_UNTIL, timeout=GOTO_TIMEOUT_MS)
         page.wait_for_timeout(SETTLE_MS)
         title, text = page.evaluate(STRIP_JS)
+        links = page.evaluate(LINKS_JS)
         return {
             "title": title or "",
             "text": normalize_page_text(text),
             "status": response.status if response else None,
+            "links": links,
         }
 
 

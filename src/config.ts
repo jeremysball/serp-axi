@@ -14,6 +14,8 @@ export interface StoredConfig {
   ladderProfile?: unknown;
   ladderJarIn?: unknown;
   ladderJarOut?: unknown;
+  ladderHttpJarIn?: unknown;
+  ladderHttpJarOut?: unknown;
   ladderProfiles?: unknown;
 }
 

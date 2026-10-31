@@ -96,8 +96,10 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
         async def verify_cf(self, **kwargs: object) -> None:
             calls.append(("verify_cf", kwargs))
 
-        async def evaluate(self, expression: str) -> tuple[str, str]:
+        async def evaluate(self, expression: str):
             calls.append(("evaluate", expression))
+            if expression == zendriver.LINKS_EXPRESSION:
+                return [{"url": "https://example.com/", "text": "Home"}]
             return ("Title", "Body text.\n" + "\n" * 900)
 
     class FakeBrowser:
@@ -119,7 +121,12 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
 
     page = zendriver.fetch("https://example.com/")
 
-    assert page == {"title": "Title", "text": "Body text.", "status": None}, "blanks collapsed, as ladder.py:114 did"
+    assert page == {
+        "title": "Title",
+        "text": "Body text.",
+        "status": None,
+        "links": [{"url": "https://example.com/", "text": "Home"}],
+    }, "blanks collapsed, as ladder.py:114 did"
     assert calls == [
         ("start", {"user_data_dir": str(tmp_path / "serp-axi" / "profiles" / "zd"), **zendriver.launch_options()}),
         ("get", "https://example.com/"),
@@ -127,6 +134,7 @@ def test_the_measured_call_sequence_is_honoured(tmp_path, monkeypatch) -> None:
         ("verify_cf", {"click_delay": 3, "timeout": 20}),
         ("sleep", 6),
         ("evaluate", zendriver.TEXT_EXPRESSION),
+        ("evaluate", zendriver.LINKS_EXPRESSION),
         ("stop",),
     ], "a settle is missing on one side of the click"
 
@@ -142,7 +150,9 @@ def test_the_headless_profile_is_the_one_warmed_not_the_headed_one(tmp_path, mon
             class Tab:
                 async def sleep(self, seconds: float) -> None: ...
                 async def verify_cf(self, **kwargs: object) -> None: ...
-                async def evaluate(self, expression: str) -> tuple[str, str]:
+                async def evaluate(self, expression: str):
+                    if expression == zendriver.LINKS_EXPRESSION:
+                        return []
                     return ("Title", "body text")
 
             return Tab()
@@ -234,6 +244,8 @@ def test_browser_launch_uses_the_exact_profile_already_leased(tmp_path, monkeypa
         async def sleep(self, seconds): ...
         async def verify_cf(self, **kwargs): ...
         async def evaluate(self, expression):
+            if expression == zendriver.LINKS_EXPRESSION:
+                return []
             return ("Title", "body text")
 
     class Browser:
@@ -258,7 +270,7 @@ def test_browser_launch_uses_the_exact_profile_already_leased(tmp_path, monkeypa
 
     page = zendriver.climb("https://example.com/", {"headless": headless})
 
-    assert page == {"title": "Title", "text": "body text", "status": None}
+    assert page == {"title": "Title", "text": "body text", "status": None, "links": []}
     assert launched == [str(tmp_path / "serp-axi" / "profiles" / f"{'headless' if headless else 'headed'}-0")]
     assert len(resolved) == 1, "profile selection has one owner per launch"
 
@@ -274,6 +286,8 @@ def test_invalid_jar_is_rejected_before_browser_start(tmp_path, monkeypatch, hea
         async def sleep(self, seconds): ...
         async def verify_cf(self, **kwargs): ...
         async def evaluate(self, expression):
+            if expression == zendriver.LINKS_EXPRESSION:
+                return []
             return ("Title", "body")
 
     class Browser:
@@ -293,7 +307,7 @@ def test_invalid_jar_is_rejected_before_browser_start(tmp_path, monkeypatch, hea
     jars.save(path, [], "https://example.com/")
     options = {"headless": headless}
     page = zendriver.climb("https://example.com/", options, RungContext(jar_in=path))
-    assert page == {"title": "Title", "text": "body", "status": None}
+    assert page == {"title": "Title", "text": "body", "status": None, "links": []}
     assert len(started) == 1
     path.write_text('{"cookies": 1}')
 
@@ -311,6 +325,9 @@ def test_failed_jar_export_reports_the_error_and_stops_the_browser(tmp_path, mon
         async def sleep(self, seconds): ...
         async def verify_cf(self, **kwargs): ...
         async def evaluate(self, expression):
+            if expression == zendriver.LINKS_EXPRESSION:
+                calls.append("links")
+                return []
             calls.append("extract")
             return ("Title", "body")
 
@@ -337,7 +354,7 @@ def test_failed_jar_export_reports_the_error_and_stops_the_browser(tmp_path, mon
     output.mkdir()
     with pytest.raises(OSError):
         zendriver.fetch("https://example.com/", RungContext(jar_out=output))
-    assert calls == ["start", "extract", "stop"]
+    assert calls == ["start", "extract", "links", "stop"]
 
 
 def test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop(

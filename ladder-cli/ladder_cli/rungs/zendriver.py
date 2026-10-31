@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state import jars, profiles
-from . import RungContext, STRIP_JS, RungResult, browser_judge, normalize_page_text
+from . import LINKS_JS, STRIP_JS, RungContext, RungResult, browser_judge, normalize_page_text
 
 # ladder.py:15 rung name `zendriver_cf`
 HEADLESS = True
@@ -34,6 +34,7 @@ SETTLE_S = 6
 # uncalled arrow function as ``{}``, so the extraction has to be wrapped in a
 # call. Playwright calls it for you; here it is called explicitly.
 TEXT_EXPRESSION = f"({STRIP_JS})()"
+LINKS_EXPRESSION = f"({LINKS_JS})()"
 
 
 def launch_options() -> dict[str, Any]:
@@ -134,12 +135,18 @@ async def _fetch(url: str, options: dict[str, Any], ctx: RungContext | None = No
             pass
         await tab.sleep(SETTLE_S)
         title, text = await tab.evaluate(TEXT_EXPRESSION)
+        links = await tab.evaluate(LINKS_EXPRESSION)
         if ctx is not None and ctx.jar_out is not None:
             # Before stop(): Chrome flushes cookies lazily and stop() kills it
             # first (solver_probe.py:85), which is why the jar exists at all.
             earned = await browser.cookies.get_all()
             jars.save(ctx.jar_out, (_jar_cookie(cookie) for cookie in earned), url)
-        return {"title": title or "", "text": normalize_page_text(text), "status": None}
+        return {
+            "title": title or "",
+            "text": normalize_page_text(text),
+            "status": None,
+            "links": links,
+        }
     finally:
         await browser.stop()
 

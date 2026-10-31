@@ -24,7 +24,7 @@ def make_request():
 
     def build(**overrides: object) -> LadderRequest:
         fields: dict[str, object] = {
-            "protocol": 1,
+            "protocol": 3,
             "url": "https://example.com/article",
             "tabState": "fresh",
             "cookieState": "cold",
@@ -34,6 +34,8 @@ def make_request():
             "profile": None,
             "jarIn": None,
             "jarOut": None,
+            "httpJarIn": None,
+            "httpJarOut": None,
         }
         fields.update(overrides)
         return LadderRequest.parse(fields)

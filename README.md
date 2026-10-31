@@ -158,6 +158,13 @@ These only work with `--ladder`, and they are rejected elsewhere so a typo is
 never parsed and silently ignored. Each resolves flag, then env, then a
 `--profile` bundle, then config file, then default.
 
+The ladder response carries `links` alongside `text`: absolute, deduplicated
+anchors in document order with their anchor text, capped at 200. Rung 1 reads
+them from the raw HTML, resolving relative URLs against the final URL after
+redirects; browser rungs read `a.href` from the live DOM. Text is whitespace-
+normalized before either is returned, so source indentation and blank-line
+padding do not show up as content.
+
 | flag | values | what it sets |
 | --- | --- | --- |
 | `--tab-state` | `fresh` (default), `same` | reserved; not yet applied |
@@ -166,8 +173,10 @@ never parsed and silently ignored. Each resolves flag, then env, then a
 | `--fingerprint-state` | `rotate` (default), `stable` | reserved; not yet applied |
 | `--rung-ceiling` | `1` to `5` (default `5`) | highest rung allowed; `5` currently stops at rung `4` |
 | `--profile` | a name from `ladderProfiles` | a named bundle of the axes above |
-| `--jar-in` | a path | cookie jar loaded before fetching with zendriver (rungs 3-4) |
-| `--jar-out` | a path | cookie jar saved by zendriver before its browser stops |
+| `--jar-in` | a path | filtered browser JSON cookie jar loaded before fetching with zendriver (rungs 3-4) |
+| `--jar-out` | a path | filtered browser JSON cookie jar saved by zendriver before its browser stops |
+| `--http-jar-in` | a path | full-session Netscape cookie jar loaded by HTTP rung 1 only |
+| `--http-jar-out` | a path | full-session Netscape cookie jar saved after HTTP rung 1; never mirrored or converted |
 
 `--jar-in` and `--jar-out` stay separate from `--cookie-state` on purpose.
 Replay is a known-unmet goal: the measured run loaded a jar into a fresh
@@ -175,23 +184,43 @@ browser three times and every one came back a challenge page. Keeping the two
 paths separate is what lets a caller find out for itself whether replay helped
 that site.
 
-A jar only travels through zendriver (rungs 3-4). A climb answered by HTTP or
-Camoufox (rungs 1-2) reads no jar in and writes no jar out. The file is JSON, named
-`<name>.cookies.json` by convention. Explicit jar paths are used as supplied;
-do not point them at zendriver's `.cookies.dat` pickle files, which a JSON
-save would overwrite. Each zendriver rung loads the input jar and saves its
-own output; when both rungs run, the later save replaces the earlier one.
-Filtering uses the bundled public/private suffix snapshot
-without a network refresh; unknown suffixes stay host-scoped. Missing jars are
-cold starts; corrupt or unreadable jars raise errors, including malformed cookie
-records. Saves replace the jar atomically after writing a sibling temporary file;
-a failed write leaves the previous jar intact. A symlink output updates its target
-and preserves the link. Atomic replacement requires write access to the target's
-parent directory, not just to the existing file. An export failure fails the rung
-even if page extraction succeeded; the requested jar is part of that rung's result.
-Unicode and punycode hostnames share one scope. The jar's base-domain filter
-limits which cookies may travel; the browser still applies each cookie's own
-domain and path rules when making requests.
+Cookie jars are separate, with no automatic conversion between formats:
+
+- `--jar-in` / `--jar-out` are reserved for filtered browser JSON jars. HTTP
+  never reads or writes them. `--cookie-state jar` mirrors only these paths.
+- `--http-jar-in` / `--http-jar-out` load/save full-session Netscape jars on
+  HTTP rung 1 only. Neither path implies the other. Treat these files as
+  credentials: they can contain authentication cookies, not just clearance.
+- HTTP settings also accept `SERP_AXI_HTTP_JAR_IN` / `SERP_AXI_HTTP_JAR_OUT`,
+  config keys `ladderHttpJarIn` / `ladderHttpJarOut`, and profile members
+  `httpJarIn` / `httpJarOut`.
+
+A browser jar only travels through zendriver (rungs 3-4). A climb answered by
+HTTP or Camoufox (rungs 1-2) reads no browser jar in and writes no browser jar
+out: rung 1 keeps its own Netscape session jars and Camoufox gets neither
+format. The browser jar file is JSON, named `<name>.cookies.json` by
+convention. Explicit jar paths are used as supplied; do not point them at
+zendriver's `.cookies.dat` pickle files, which a JSON save would overwrite.
+Each zendriver rung loads the input jar and saves its own output; when both
+rungs run, the later save replaces the earlier one. Filtering uses the bundled
+public/private suffix snapshot without a network refresh; unknown suffixes stay
+host-scoped. Missing jars are cold starts; corrupt or unreadable jars raise
+errors, including malformed cookie records. Saves replace the jar atomically
+after writing a sibling temporary file; a failed write leaves the previous jar
+intact. A symlink output updates its target and preserves the link. Atomic
+replacement requires write access to the target's parent directory, not just to
+the existing file. An export failure fails the rung even if page extraction
+succeeded; the requested jar is part of that rung's result. Unicode and punycode
+hostnames share one scope. The jar's base-domain filter limits which cookies may
+travel; the browser still applies each cookie's own domain and path rules when
+making requests.
+
+HTTP replay checks domain, path, Secure and expiry attributes, captures cookies
+on redirect hops, and preserves unrelated stored cookies when saving. Netscape
+jars cannot retain SameSite. A blocked HTTP response gets one fresh-client retry;
+its random fingerprint can repeat and it does not change the source IP. The
+parent and child must both speak protocol 3; an older installed child fails at
+the ready handshake instead of ignoring the separate HTTP fields.
 
 Profile launches take an exclusive local lease. Cleanup removes Chromium locks
 only when their recorded owner is on this host and its process no longer exists.
