@@ -133,8 +133,11 @@ function failedEngineCount(engines: EngineStatus[]): number {
 }
 
 // `env` and `config` are injectable so a test can drive every setting without
-// touching process.env or the machine's real config file. `config` left unset
-// means "read the config file if a setting needs it" (only searxng does).
+// touching process.env. `config` left unset means "read the config file the
+// handed env points at". Only a searxng run opens it, and it does so before
+// applying flag and env values, so a broken file fails that run even when the
+// flags supply every setting. The file's directory comes from the handed env's
+// XDG_CONFIG_HOME; the home-directory fallback is still the process's own.
 export async function runSearch(
   args: string[],
   fetchImpl: typeof fetch = fetch,
