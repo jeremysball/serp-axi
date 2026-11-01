@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
@@ -474,4 +475,141 @@ test("runScrape --ladder rejects an invalid axis value as a usage error", async 
       return true;
     },
   );
+});
+
+// --- markup stripping -------------------------------------------------------
+// Settings are injected (env, config) so none of these touch process.env or
+// the machine's real config file.
+
+const FIXTURE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
+const BRIGHT_DATA_ENV = { BRIGHTDATA_API_KEY: "test-key" };
+
+function fixtureRecord(): Record<string, unknown> {
+  const firstLine = readFileSync(path.join(FIXTURE_DIR, "brightdata-scrape.ndjson"), "utf8").split("\n")[0];
+  return JSON.parse(firstLine) as Record<string, unknown>;
+}
+
+function brightDataResults(output: Record<string, unknown>): Array<Record<string, unknown>> {
+  return output.results as Array<Record<string, unknown>>;
+}
+
+async function scrapeFixture(extraArgs: string[], env: NodeJS.ProcessEnv = {}, config: Record<string, unknown> = {}) {
+  const fetchImpl = (async () => new Response(JSON.stringify(fixtureRecord()))) as typeof fetch;
+  return runScrape(
+    ["https://example.org/", "--provider", "brightdata", ...extraArgs],
+    fetchImpl,
+    { ...BRIGHT_DATA_ENV, ...env },
+    config,
+  );
+}
+
+test("runScrape Bright Data omits a real record's page_html by default and names it", async () => {
+  const output = await scrapeFixture([]);
+  const result = brightDataResults(output)[0];
+
+  assert.deepEqual(result.markupOmitted, ["page_html"]);
+  assert.equal(Object.hasOwn(result, "page_html"), false);
+  assert.match(result.markdown as string, /^# Example Domain/);
+  assert.match(result.html2text as string, /^EXAMPLE DOMAIN/);
+  assert.match(result.help as string, /--provider brightdata --include-markup/);
+});
+
+test("runScrape Bright Data --include-markup keeps page_html and reports no omission", async () => {
+  const output = await scrapeFixture(["--include-markup"]);
+  const result = brightDataResults(output)[0];
+
+  assert.match(result.page_html as string, /^<!doctype html>/);
+  assert.equal(Object.hasOwn(result, "markupOmitted"), false);
+});
+
+test("runScrape reads SERP_AXI_INCLUDE_MARKUP, and the flag beats it", async () => {
+  const kept = brightDataResults(await scrapeFixture([], { SERP_AXI_INCLUDE_MARKUP: "1" }))[0];
+  const stripped = brightDataResults(await scrapeFixture([], { SERP_AXI_INCLUDE_MARKUP: "0" }))[0];
+  const flagged = brightDataResults(await scrapeFixture(["--include-markup"], { SERP_AXI_INCLUDE_MARKUP: "0" }))[0];
+
+  assert.deepEqual(stripped.markupOmitted, ["page_html"]);
+  assert.equal(typeof kept.page_html, "string");
+  assert.equal(typeof flagged.page_html, "string");
+});
+
+test("runScrape reads includeMarkup from config, and env beats it", async () => {
+  const kept = brightDataResults(await scrapeFixture([], {}, { includeMarkup: true }))[0];
+  const stripped = brightDataResults(await scrapeFixture([], { SERP_AXI_INCLUDE_MARKUP: "false" }, { includeMarkup: true }))[0];
+
+  assert.equal(typeof kept.page_html, "string");
+  assert.deepEqual(stripped.markupOmitted, ["page_html"]);
+});
+
+test("runScrape rejects a bad SERP_AXI_INCLUDE_MARKUP before any network call", async () => {
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("{}");
+  }) as typeof fetch;
+  await assert.rejects(
+    () => runScrape(["https://example.com"], fetchImpl, { SERPER_API_KEY: "k", SERP_AXI_INCLUDE_MARKUP: "maybe" }, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /SERP_AXI_INCLUDE_MARKUP/);
+      return true;
+    },
+  );
+  assert.equal(called, false);
+});
+
+test("runScrape Serper accepts --include-markup and returns the same record", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ text: "plain page text", metadata: { title: "T" } }))) as typeof fetch;
+  const env = { SERPER_API_KEY: "k" };
+
+  const plain = await runScrape(["https://example.com/a"], fetchImpl, env, {});
+  const flagged = await runScrape(["https://example.com/a", "--include-markup"], fetchImpl, env, {});
+
+  assert.equal(plain.text, "plain page text");
+  assert.deepEqual(flagged, plain);
+});
+
+test("runScrape Serper help gives a quoted, runnable rerun command with the total", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ text: "y".repeat(2000), metadata: {} }))) as typeof fetch;
+
+  const plain = await runScrape(["https://example.com/big"], fetchImpl, { SERPER_API_KEY: "k" }, {});
+  const flagged = await runScrape(["https://example.com/big", "--include-markup"], fetchImpl, { SERPER_API_KEY: "k" }, {});
+
+  assert.equal(plain.help, "Run `serp-axi scrape 'https://example.com/big' --full` to see up to 50000 characters (2000 total)");
+  assert.equal(
+    flagged.help,
+    "Run `serp-axi scrape 'https://example.com/big' --include-markup --full` to see up to 50000 characters (2000 total)",
+  );
+});
+
+test("runScrape --ladder accepts --include-markup and returns the same record", async () => {
+  await withLadderStub("ok", async () => {
+    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+    const plain = await runScrape(["https://example.com/article", "--ladder"], fetchImpl, process.env, {});
+    const flagged = await runScrape(["https://example.com/article", "--ladder", "--include-markup"], fetchImpl, process.env, {});
+
+    assert.equal(plain.verdict, "ok");
+    assert.deepEqual(flagged, plain);
+  });
+});
+
+test("runScrape --ladder truncates through the shared path with a quoted, runnable rerun command", async () => {
+  await withLadderStub("ok", async () => {
+    const url = `https://example.com/${"a".repeat(2000)}`;
+    const output = await runScrape([url, "--ladder"], (async () => new Response("{}")) as typeof fetch, process.env, {});
+
+    assert.equal((output.text as string).length, 1200);
+    assert.equal(output.truncatedFrom, `body for ${url}`.length);
+    assert.match(output.help as string, new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --full\``));
+  });
+});
+
+test("scrape.ts routes every provider through shapeScrapeRecord and never truncates on its own", () => {
+  const source = readFileSync(fileURLToPath(new URL("./scrape.ts", import.meta.url)), "utf8");
+
+  assert.match(source, /shapeScrapeRecord\(/);
+  assert.doesNotMatch(source, /\btruncate\(/);
+  assert.doesNotMatch(source, /\bFULL_LIMIT\b\s*=/);
 });

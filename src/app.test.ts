@@ -98,6 +98,17 @@ test("scrape --help documents profile bundles above config in ladder precedence"
   assert.match(stdout.output, /flag > env > profile > config > default/);
 });
 
+test("scrape --help documents --include-markup with its env var, config key, and precedence", async () => {
+  const stdout = fakeStdout();
+  const code = await runCli(["scrape", "--help"], { ...testOptions(), stdout });
+  assert.equal(code, 0);
+  assert.match(stdout.output, /--include-markup\s+Keep raw-HTML fields/);
+  assert.match(stdout.output, /SERP_AXI_INCLUDE_MARKUP=1\|0/);
+  assert.match(stdout.output, /"includeMarkup": true/);
+  assert.match(stdout.output, /flag > env > config > off/);
+  assert.match(stdout.output, /markupOmitted/);
+});
+
 test("scrape --help marks unimplemented ladder state controls as reserved", async () => {
   const stdout = fakeStdout();
   const code = await runCli(["scrape", "--help"], { ...testOptions(), stdout });

@@ -2,15 +2,23 @@ import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
 import { SerpAxiError } from "../errors.ts";
-import { truncate, type AxiOutput } from "../output.ts";
+import type { AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
 import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
+import {
+  DEFAULT_LIMIT,
+  FULL_LIMIT,
+  INCLUDE_MARKUP_ENV,
+  resolveIncludeMarkup,
+  shapeScrapeRecord,
+} from "../scrape-output.ts";
 
 export const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
+  "include-markup": "boolean",
   provider: "string",
   "dataset-id": "string",
   ladder: "boolean",
@@ -32,12 +40,12 @@ export const SCRAPE_FLAGS: FlagSpec = {
 // cannot be addable to the wire without becoming addable to the CLI.
 const LADDER_AXIS_FLAGS = LADDER_AXIS_FLAG_NAMES;
 
-const DEFAULT_LIMIT = 1200;
-const FULL_LIMIT = 50000;
 const PROVIDERS = ["serper", "brightdata"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
-const NON_TRUNCATED_RECORD_FIELDS = new Set(["url"]);
+// Bright Data's record shape depends on the dataset, so every string field is
+// limited except the url, which has to stay usable as a link.
+const NON_TRUNCATED_RECORD_FIELDS: ReadonlySet<string> = new Set(["url"]);
 
 function nonEmpty(value: string | undefined): string | undefined {
   return value !== undefined && value.length > 0 ? value : undefined;
@@ -54,11 +62,15 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-const SCRAPE_HELP = `serp-axi scrape <url> [--full]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--dataset-id <id>]
-serp-axi scrape <url> [--full] --ladder
+const SCRAPE_HELP = `serp-axi scrape <url> [--full] [--include-markup]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> [--full] [--include-markup] --ladder
 
 Fetch and extract readable text from one or more web pages.
+
+Raw markup is left out by default. A field that holds raw HTML (its name ends in
+"html", or its value is a whole HTML document) is omitted from the result and
+named in markupOmitted. Markdown and plain-text fields are kept as they are.
 
 Providers:
   serper (default)   Serper's own scrape endpoint. Exactly one URL, synchronous.
@@ -70,6 +82,10 @@ Providers:
 
 Flags:
   --full                Return up to 50,000 characters per page instead of the default 1,200.
+  --include-markup      Keep raw-HTML fields instead of omitting them. Serper and --ladder
+                         return no such fields, so it changes nothing there.
+                         Also: SERP_AXI_INCLUDE_MARKUP=1|0, or "includeMarkup": true in the
+                         config file. Precedence: flag > env > config > off.
   --provider <name>      serper (default) or brightdata. Not valid with --ladder.
   --ladder               Scrape through the resident ladder CLI instead of a paid provider.
   --dataset-id <id>     Bright Data dataset to scrape against.
@@ -194,31 +210,22 @@ function parseProvider(raw: string | boolean | undefined): Provider {
   return raw as Provider;
 }
 
-function summarizeRecord(record: BrightDataRecord, limit: number, full: boolean): AxiOutput {
-  const out: AxiOutput = { ...record };
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value !== "string") continue;
-    if (NON_TRUNCATED_RECORD_FIELDS.has(key)) continue;
-    const info = truncate(value, limit);
-    out[key] = info.text;
-    const marker = `${key}TruncatedFrom`;
-    if (info.truncated) {
-      if (!Object.hasOwn(record, marker)) {
-        out[marker] = info.totalChars;
-      }
-      const url = shellQuote(typeof record.url === "string" ? record.url : "<url>");
-      out.help = full
-        ? `content is capped at ${FULL_LIMIT} characters even with --full`
-        : `Run \`serp-axi scrape ${url} --provider brightdata --full\` to see up to ${FULL_LIMIT} characters`;
-    }
-  }
-  return out;
+function shapeBrightDataRecord(record: BrightDataRecord, full: boolean, includeMarkup: boolean): AxiOutput {
+  const url = shellQuote(typeof record.url === "string" ? record.url : "<url>");
+  return shapeScrapeRecord(record, {
+    full,
+    includeMarkup,
+    rerun: `serp-axi scrape ${url} --provider brightdata`,
+    scope: { kind: "every-string", except: NON_TRUNCATED_RECORD_FIELDS },
+  });
 }
 
 async function runBrightDataScrape(
   positionals: string[],
   flags: Record<string, string | boolean>,
   fetchImpl: typeof fetch,
+  env: NodeJS.ProcessEnv,
+  includeMarkup: boolean,
 ): Promise<AxiOutput> {
   if (positionals.length === 0) {
     throw new SerpAxiError(
@@ -229,7 +236,7 @@ async function runBrightDataScrape(
   }
   const urls = positionals.map((raw) => preferredUrlString(raw, validateUrl(raw)));
 
-  const apiKey = process.env.BRIGHTDATA_API_KEY;
+  const apiKey = env.BRIGHTDATA_API_KEY;
   if (!apiKey) {
     throw new SerpAxiError(
       "BRIGHTDATA_API_KEY is not set",
@@ -239,24 +246,51 @@ async function runBrightDataScrape(
   }
   const datasetId =
     nonEmpty(flags["dataset-id"] as string | undefined) ??
-    nonEmpty(process.env.BRIGHTDATA_DATASET_ID) ??
+    nonEmpty(env.BRIGHTDATA_DATASET_ID) ??
     BRIGHT_DATA_DEFAULT_DATASET_ID;
 
-  const limit = flags.full ? FULL_LIMIT : DEFAULT_LIMIT;
-  const records = await scrapeBrightData(apiKey, datasetId, urls, limit, fetchImpl);
+  const full = Boolean(flags.full);
+  const records = await scrapeBrightData(apiKey, datasetId, urls, full ? FULL_LIMIT : DEFAULT_LIMIT, fetchImpl);
 
   return {
     provider: "brightdata",
     datasetId,
-    results: records.map((record) => summarizeRecord(record, limit, Boolean(flags.full))),
+    results: records.map((record) => shapeBrightDataRecord(record, full, includeMarkup)),
   };
 }
 
-export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch): Promise<AxiOutput> {
+// The config file is read only when neither the flag nor the env var settles
+// the answer, so a run governed entirely by flags or env does not depend on the
+// file being readable.
+function resolveMarkupSetting(
+  flags: Record<string, string | boolean>,
+  env: NodeJS.ProcessEnv,
+  config: StoredConfig | undefined,
+): boolean {
+  const flag = flags["include-markup"] === true;
+  const fromEnv = nonEmpty(env[INCLUDE_MARKUP_ENV]);
+  const settled = flag || fromEnv !== undefined;
+  return resolveIncludeMarkup({
+    flag,
+    env: fromEnv,
+    config: settled ? undefined : (config ?? loadStoredConfig(os.homedir(), env)),
+  });
+}
+
+// `env` and `config` are injectable so a test can drive every setting without
+// touching process.env or the machine's real config file. `config` left unset
+// means "read the config file if a setting needs it".
+export async function runScrape(
+  args: string[],
+  fetchImpl: typeof fetch = fetch,
+  env: NodeJS.ProcessEnv = process.env,
+  config?: StoredConfig,
+): Promise<AxiOutput> {
   const { positionals, flags } = parseFlags(args, SCRAPE_FLAGS, "scrape");
+  const includeMarkup = resolveMarkupSetting(flags, env, config);
 
   if (flags.ladder) {
-    return runLadderScrape(positionals, flags, process.env);
+    return runLadderScrape(positionals, flags, env, config, includeMarkup);
   }
 
   for (const axis of LADDER_AXIS_FLAGS) {
@@ -272,7 +306,7 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
-    return runBrightDataScrape(positionals, flags, fetchImpl);
+    return runBrightDataScrape(positionals, flags, fetchImpl, env, includeMarkup);
   }
 
   if (flags["dataset-id"] !== undefined) {
@@ -297,27 +331,24 @@ export async function runScrape(args: string[], fetchImpl: typeof fetch = fetch)
   }
   const url = validateUrl(raw);
 
-  const apiKey = process.env.SERPER_API_KEY;
+  const apiKey = env.SERPER_API_KEY;
   if (!apiKey) {
     throw new SerpAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
   }
 
   const response = await scrapeSerper(apiKey, url.toString(), fetchImpl);
-  const limit = flags.full ? FULL_LIMIT : DEFAULT_LIMIT;
-  const info = truncate(response.text, limit);
 
-  const output: AxiOutput = { url: url.toString() };
+  const record: AxiOutput = { url: url.toString() };
   if (response.metadata.title) {
-    output.title = response.metadata.title;
+    record.title = response.metadata.title;
   }
-  output.text = info.text;
-  if (info.truncated) {
-    output.truncatedFrom = info.totalChars;
-    output.help = flags.full
-      ? `content is capped at ${FULL_LIMIT} characters even with --full`
-      : `Run \`serp-axi scrape ${url.toString()} --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
-  }
-  return output;
+  record.text = response.text;
+  return shapeScrapeRecord(record, {
+    full: Boolean(flags.full),
+    includeMarkup,
+    rerun: `serp-axi scrape ${shellQuote(url.toString())}`,
+    scope: { kind: "field", key: "text" },
+  });
 }
 
 async function runLadderScrape(
@@ -328,6 +359,7 @@ async function runLadderScrape(
   // entirely by flags should not depend on the machine's config file being
   // readable, and a test should not have to fake a home directory to reach one.
   config: StoredConfig = loadStoredConfig(os.homedir()),
+  includeMarkup = false,
 ): Promise<AxiOutput> {
   if (flags.provider !== undefined) {
     throw new SerpAxiError(
@@ -381,24 +413,22 @@ async function runLadderScrape(
     );
   }
 
-  const limit = flags.full ? FULL_LIMIT : DEFAULT_LIMIT;
-  const info = truncate(response.text, limit);
-  const output: AxiOutput = {
+  const record: AxiOutput = {
     url: url.toString(),
     verdict: response.verdict,
     rungReached: response.rungReached,
     links: response.links,
   };
   if (response.title) {
-    output.title = response.title;
+    record.title = response.title;
   }
-  output.text = info.text;
-  if (info.truncated) {
-    output.truncatedFrom = info.totalChars;
-    output.help = flags.full
-      ? `content is capped at ${FULL_LIMIT} characters even with --full`
-      : `Run \`serp-axi scrape ${url.toString()} --ladder --full\` to see up to ${FULL_LIMIT} characters (${info.totalChars} total)`;
-  }
+  record.text = response.text;
+  const output = shapeScrapeRecord(record, {
+    full: Boolean(flags.full),
+    includeMarkup,
+    rerun: `serp-axi scrape ${shellQuote(url.toString())} --ladder`,
+    scope: { kind: "field", key: "text" },
+  });
   // The child's own note about how the page arrived (site api, rung used,
   // anything it thought worth saying). It was parsed, validated, and then
   // dropped by this branch, which made the field a write-only part of the
