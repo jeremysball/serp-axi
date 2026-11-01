@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
+import { INCLUDE_MARKUP_ENV } from "../scrape-output.ts";
 
 async function withApiKey<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
   const original = process.env.SERPER_API_KEY;
@@ -197,6 +199,15 @@ async function withBrightData<T>(
   }
 }
 
+// The env these process.env-driven tests hand to runScrape: what withBrightData
+// set, minus the one setting a developer's shell might export. Paired with an
+// empty config so no test reads the machine's real config file.
+function hermeticEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env[INCLUDE_MARKUP_ENV];
+  return env;
+}
+
 test("runScrape rejects an unknown provider", async () => {
   await assert.rejects(
     () => runScrape(["https://example.com", "--provider", "yahoo"], (async () => new Response("[]")) as typeof fetch),
@@ -268,6 +279,8 @@ test("runScrape Bright Data batches URLs, applies the default dataset, and trunc
     const output = await runScrape(
       ["https://example.com", "https://example.com/1", "--provider", "brightdata"],
       fetchImpl,
+      hermeticEnv(),
+      {},
     );
 
     assert.match(capturedUrl as string, /dataset_id=gd_m6gjtfmeh43we6cqc/);
@@ -298,7 +311,12 @@ test("runScrape Bright Data preserves upstream truncation markers and quotes hel
           content: "c".repeat(2000),
         }),
       )) as typeof fetch;
-    const output = await runScrape(["https://example.com/$HOME/test", "--provider", "brightdata"], fetchImpl);
+    const output = await runScrape(
+      ["https://example.com/$HOME/test", "--provider", "brightdata"],
+      fetchImpl,
+      hermeticEnv(),
+      {},
+    );
     const result = (output.results as Array<Record<string, unknown>>)[0];
 
     assert.equal(result.markdownTruncatedFrom, 9999);
@@ -317,6 +335,8 @@ test("runScrape Bright Data prefers --dataset-id over BRIGHTDATA_DATASET_ID", as
     const output = await runScrape(
       ["https://example.com", "--provider", "brightdata", "--dataset-id", "gd_from_flag"],
       fetchImpl,
+      hermeticEnv(),
+      {},
     );
     assert.match(capturedUrl as string, /dataset_id=gd_from_flag/);
     assert.equal(output.datasetId, "gd_from_flag");
@@ -330,7 +350,7 @@ test("runScrape Bright Data uses BRIGHTDATA_DATASET_ID when no flag is given", a
       capturedUrl = url;
       return new Response("");
     }) as typeof fetch;
-    const output = await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
+    const output = await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, hermeticEnv(), {});
     assert.match(capturedUrl as string, /dataset_id=gd_from_env/);
     assert.equal(output.datasetId, "gd_from_env");
   });
@@ -343,7 +363,7 @@ test("runScrape Bright Data passes the full limit to the provider", async () => 
       capturedBody = JSON.parse(init?.body as string);
       return new Response("");
     }) as typeof fetch;
-    await runScrape(["https://example.com", "--provider", "brightdata", "--full"], fetchImpl);
+    await runScrape(["https://example.com", "--provider", "brightdata", "--full"], fetchImpl, hermeticEnv(), {});
     assert.equal((capturedBody as { limit_per_input: number }).limit_per_input, 50000);
   });
 });
@@ -355,7 +375,7 @@ test("runScrape Bright Data preserves a bare-origin URL without adding a slash",
       capturedBody = JSON.parse(init?.body as string);
       return new Response(JSON.stringify({ url: "https://example.com", markdown: "x" }));
     }) as typeof fetch;
-    await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl);
+    await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, hermeticEnv(), {});
     assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
   });
 });
@@ -606,10 +626,199 @@ test("runScrape --ladder truncates through the shared path with a quoted, runnab
   });
 });
 
-test("scrape.ts routes every provider through shapeScrapeRecord and never truncates on its own", () => {
-  const source = readFileSync(fileURLToPath(new URL("./scrape.ts", import.meta.url)), "utf8");
+// One behavioural assertion per provider that the shared path is the one in force:
+// a record only a provider-specific shortcut could leave alone is shaped here.
+const HTML_DOCUMENT = "<!doctype html><html><head><title>T</title></head><body>x</body></html>";
 
-  assert.match(source, /shapeScrapeRecord\(/);
-  assert.doesNotMatch(source, /\btruncate\(/);
-  assert.doesNotMatch(source, /\bFULL_LIMIT\b\s*=/);
+test("runScrape Serper omits a title that is a whole HTML document unless the flag or env keeps it", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ text: "plain page text", metadata: { title: HTML_DOCUMENT } }))) as typeof fetch;
+  const env = { SERPER_API_KEY: "k" };
+
+  const stripped = await runScrape(["https://example.com/a"], fetchImpl, env, {});
+  assert.equal(Object.hasOwn(stripped, "title"), false);
+  assert.deepEqual(stripped.markupOmitted, ["title"]);
+  assert.equal(stripped.text, "plain page text");
+
+  const viaFlag = await runScrape(["https://example.com/a", "--include-markup"], fetchImpl, env, {});
+  assert.equal(viaFlag.title, HTML_DOCUMENT);
+  const viaEnv = await runScrape(["https://example.com/a"], fetchImpl, { ...env, SERP_AXI_INCLUDE_MARKUP: "1" }, {});
+  assert.equal(viaEnv.title, HTML_DOCUMENT);
+});
+
+test("runScrape --ladder omits a title that is a whole HTML document unless the flag or env keeps it", async () => {
+  await withLadderStub("html-title", async () => {
+    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+
+    const stripped = await runScrape(["https://example.com/a", "--ladder"], fetchImpl, hermeticEnv(), {});
+    assert.equal(Object.hasOwn(stripped, "title"), false);
+    assert.deepEqual(stripped.markupOmitted, ["title"]);
+    assert.equal(stripped.text, "plain body");
+
+    const viaFlag = await runScrape(["https://example.com/a", "--ladder", "--include-markup"], fetchImpl, hermeticEnv(), {});
+    assert.equal(viaFlag.title, HTML_DOCUMENT);
+    const viaEnv = await runScrape(
+      ["https://example.com/a", "--ladder"],
+      fetchImpl,
+      { ...hermeticEnv(), SERP_AXI_INCLUDE_MARKUP: "1" },
+      {},
+    );
+    assert.equal(viaEnv.title, HTML_DOCUMENT);
+  });
+});
+
+test("runScrape Bright Data rerun hint repeats the flags that shaped the record", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ url: "https://example.org/", markdown: "m".repeat(2000) }))) as typeof fetch;
+  const helpFor = async (extra: string[], env: NodeJS.ProcessEnv = {}) =>
+    brightDataResults(
+      await runScrape(["https://example.org/", "--provider", "brightdata", ...extra], fetchImpl, { ...BRIGHT_DATA_ENV, ...env }, {}),
+    )[0].help;
+  const rerun = (flags: string) =>
+    `Run \`serp-axi scrape 'https://example.org/' --provider brightdata${flags} --full\` to see up to 50000 characters (2000 total)`;
+
+  assert.equal(await helpFor([]), rerun(""));
+  assert.equal(await helpFor(["--dataset-id", "gd_x"]), rerun(" --dataset-id 'gd_x'"));
+  assert.equal(await helpFor(["--include-markup"]), rerun(" --include-markup"));
+  assert.equal(await helpFor([], { SERP_AXI_INCLUDE_MARKUP: "1" }), rerun(" --include-markup"));
+  assert.equal(await helpFor(["--dataset-id", "gd_x", "--include-markup"]), rerun(" --dataset-id 'gd_x' --include-markup"));
+});
+
+test("runScrape --ladder rerun hint repeats the axis flags that were passed", async () => {
+  await withLadderStub("ok", async () => {
+    const url = `https://example.com/${"a".repeat(2000)}`;
+    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+
+    const output = await runScrape(
+      [url, "--ladder", "--rung-ceiling", "2", "--tab-state", "same", "--include-markup"],
+      fetchImpl,
+      hermeticEnv(),
+      {},
+    );
+
+    assert.match(
+      output.help as string,
+      new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --tab-state 'same' --rung-ceiling '2' --include-markup --full\``),
+    );
+  });
+});
+
+test("runScrape Bright Data leaves a long url whole and unmarked", async () => {
+  const url = `https://example.org/${"a".repeat(2500)}`;
+  const fetchImpl = (async () => new Response(JSON.stringify({ url, markdown: "m" }))) as typeof fetch;
+
+  const output = await runScrape([url, "--provider", "brightdata"], fetchImpl, { ...BRIGHT_DATA_ENV }, {});
+  const result = brightDataResults(output)[0];
+
+  assert.equal(result.url, url);
+  assert.equal(Object.hasOwn(result, "urlTruncatedFrom"), false);
+});
+
+test("runScrape's extra-URL usage hint lists every flag the command takes", async () => {
+  await assert.rejects(
+    () =>
+      runScrape(
+        ["https://example.com/a", "https://example.com/b"],
+        (async () => new Response("{}")) as typeof fetch,
+        { SERPER_API_KEY: "k" },
+        {},
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.match(error.help, /\[--full\] \[--include-markup\]/);
+      return true;
+    },
+  );
+});
+
+// --- when the config file is read -------------------------------------------
+// A config file that is not JSON. Any run that opens it fails with a "not valid
+// JSON" usage error, so a test can tell "read the config" from "never looked".
+
+async function withBrokenConfig(fn: (xdgConfigHome: string) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "serp-axi-config-"));
+  try {
+    mkdirSync(path.join(dir, "serp-axi"));
+    writeFileSync(path.join(dir, "serp-axi", "config.json"), "{ not json");
+    await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("runScrape checks its input before it opens the config file", async () => {
+  await withBrokenConfig(async (xdg) => {
+    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+    const keys: Record<string, string> = { SERPER_API_KEY: "k", BRIGHTDATA_API_KEY: "k" };
+    const withoutKey = (name: string) => {
+      const { [name]: _dropped, ...rest } = keys;
+      return rest;
+    };
+    const cases: Array<{ name: string; args: string[]; env: NodeJS.ProcessEnv; expect: RegExp }> = [
+      { name: "Serper, bad URL", args: ["not a url"], env: keys, expect: /is not a valid URL/ },
+      { name: "Serper, no URL", args: [], env: keys, expect: /requires a URL/ },
+      { name: "Serper, no key", args: ["https://example.com"], env: withoutKey("SERPER_API_KEY"), expect: /SERPER_API_KEY is not set/ },
+      { name: "Bright Data, bad URL", args: ["not a url", "--provider", "brightdata"], env: keys, expect: /is not a valid URL/ },
+      { name: "Bright Data, no URL", args: ["--provider", "brightdata"], env: keys, expect: /at least one URL/ },
+      {
+        name: "Bright Data, no key",
+        args: ["https://example.com", "--provider", "brightdata"],
+        env: withoutKey("BRIGHTDATA_API_KEY"),
+        expect: /BRIGHTDATA_API_KEY is not set/,
+      },
+      { name: "ladder, bad URL", args: ["not a url", "--ladder"], env: keys, expect: /is not a valid URL/ },
+      { name: "ladder, no URL", args: ["--ladder"], env: keys, expect: /requires a URL/ },
+    ];
+    for (const { name, args, env, expect } of cases) {
+      await assert.rejects(() => runScrape(args, fetchImpl, { ...env, XDG_CONFIG_HOME: xdg }), expect, name);
+    }
+  });
+});
+
+test("runScrape opens the config file for Bright Data only once its input is valid", async () => {
+  await withBrokenConfig(async (xdg) => {
+    const fetchImpl = (async () => new Response(JSON.stringify({ url: "https://example.org/", markdown: "m" }))) as typeof fetch;
+    await assert.rejects(
+      () =>
+        runScrape(["https://example.org/", "--provider", "brightdata"], fetchImpl, { ...BRIGHT_DATA_ENV, XDG_CONFIG_HOME: xdg }),
+      /config file .* is not valid JSON/,
+    );
+  });
+});
+
+test("runScrape consults config includeMarkup for Bright Data and for no other path", async () => {
+  const invalid = { includeMarkup: "yes" };
+  const serperFetch = (async () =>
+    new Response(JSON.stringify({ text: "plain page text", metadata: { title: "T" } }))) as typeof fetch;
+
+  const serper = await runScrape(["https://example.com/a"], serperFetch, { SERPER_API_KEY: "k" }, invalid);
+  assert.equal(serper.text, "plain page text");
+
+  await withLadderStub("ok", async () => {
+    const ladder = await runScrape(
+      ["https://example.com/a", "--ladder"],
+      (async () => new Response("{}")) as typeof fetch,
+      hermeticEnv(),
+      invalid,
+    );
+    assert.equal(ladder.verdict, "ok");
+  });
+
+  await assert.rejects(() => scrapeFixture([], {}, invalid), /includeMarkup must be a JSON boolean/);
+});
+
+test("runScrape --ladder reads the config file once, from the injected env", async () => {
+  await withBrokenConfig(async (xdg) => {
+    await withLadderStub("ok", async () => {
+      await assert.rejects(
+        () =>
+          runScrape(
+            ["https://example.com/a", "--ladder"],
+            (async () => new Response("{}")) as typeof fetch,
+            { ...hermeticEnv(), XDG_CONFIG_HOME: xdg },
+          ),
+        /config file .* is not valid JSON/,
+      );
+    });
+  });
 });

@@ -2,7 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { SerpAxiError } from "./errors.ts";
-import { FULL_LIMIT, resolveIncludeMarkup, shapeScrapeRecord, type ShapeOptions } from "./scrape-output.ts";
+import {
+  DEFAULT_LIMIT,
+  FULL_LIMIT,
+  limitFor,
+  resolveIncludeMarkup,
+  shapeScrapeRecord,
+  type ShapeOptions,
+} from "./scrape-output.ts";
 
 const EVERY_STRING = { kind: "every-string", except: new Set(["url"]) } as const;
 const TEXT_FIELD = { kind: "field", key: "text" } as const;
@@ -176,11 +183,68 @@ test("shapeScrapeRecord help covers both truncation and omission when both happe
   assert.match(out.help as string, /--include-markup/);
 });
 
-test("shapeScrapeRecord rerun hints keep --include-markup once it was asked for", () => {
-  const out = shape({ url: "https://example.com/a", markdown: "m".repeat(2000), page_html: HTML_DOCUMENT }, { includeMarkup: true });
+test("shapeScrapeRecord leaves --include-markup to the caller's rerun string", () => {
+  const record = { url: "https://example.com/a", markdown: "m".repeat(2000), page_html: HTML_DOCUMENT };
 
-  assert.equal(out.help, `Run \`${RERUN} --include-markup --full\` to see up to 50000 characters (2000 total)`);
+  // A provider the flag does nothing for passes a rerun without it, and gets no flag back.
+  const bare = shape(record, { includeMarkup: true });
+  // A provider it matters for names it in its own rerun string.
+  const named = shape(record, { includeMarkup: true, rerun: `${RERUN} --include-markup` });
+
+  assert.equal(bare.help, `Run \`${RERUN} --full\` to see up to 50000 characters (2000 total)`);
+  assert.equal(named.help, `Run \`${RERUN} --include-markup --full\` to see up to 50000 characters (2000 total)`);
+  assert.equal(Object.hasOwn(bare, "markupOmitted"), false);
+});
+
+test("shapeScrapeRecord keeps every markup field when nothing but markup is left to show", () => {
+  const onlyDocument = shape({ url: "https://example.com/a", content: HTML_DOCUMENT });
+  const onlyMarkup = shape({ url: "https://example.com/a", content: HTML_DOCUMENT, page_html: HTML_DOCUMENT });
+
+  assert.equal(onlyDocument.content, HTML_DOCUMENT);
+  assert.equal(Object.hasOwn(onlyDocument, "markupOmitted"), false);
+  assert.equal(onlyMarkup.page_html, HTML_DOCUMENT);
+  assert.equal(onlyMarkup.content, HTML_DOCUMENT);
+  assert.equal(Object.hasOwn(onlyMarkup, "markupOmitted"), false);
+});
+
+test("shapeScrapeRecord still omits markup once any other text field is there to show", () => {
+  const out = shape({ url: "https://example.com/a", error: "timeout", content: HTML_DOCUMENT });
+
+  assert.deepEqual(out.markupOmitted, ["content"]);
+  assert.equal(out.error, "timeout");
+});
+
+test("shapeScrapeRecord recognises a whole HTML document behind a comment or an XML prolog", () => {
+  const saved = `<!-- saved from url=(0020)https://example.com/ -->\n${HTML_DOCUMENT}`;
+  const rendered = `<?xml version="1.0" encoding="UTF-8"?>\n<!-- generated -->\n<!DOCTYPE html>${HTML_DOCUMENT.slice("<!doctype html>".length)}`;
+  const out = shape({ url: "https://example.com/a", markdown: "# Hi", saved, rendered });
+
+  assert.deepEqual(out.markupOmitted, ["saved", "rendered"]);
+});
+
+test("shapeScrapeRecord does not take a comment followed by prose for a document", () => {
+  const prose = "<!-- editor's note -->\nThe <html> element is the root of a document.";
+  const unclosed = "<!-- never closed <html><body>";
+  const out = shape({ url: "https://example.com/a", markdown: "# Hi", prose, unclosed });
+
   assert.equal(Object.hasOwn(out, "markupOmitted"), false);
+  assert.equal(out.prose, prose);
+  assert.equal(out.unclosed, unclosed);
+});
+
+test("shapeScrapeRecord classifies a field of many comments in linear time", () => {
+  // Nested lazy quantifiers backtrack exponentially on this shape; a scan does not.
+  const comments = "<!-- c -->".repeat(20000);
+  const started = performance.now();
+  const out = shape({ url: "https://example.com/a", markdown: "# Hi", comments: `${comments}tail` });
+
+  assert.equal(out.comments, `${comments}tail`.slice(0, 1200));
+  assert.ok(performance.now() - started < 1000, "classifying 20000 comments took over a second");
+});
+
+test("limitFor is the one place the character limit is chosen", () => {
+  assert.equal(limitFor(false), DEFAULT_LIMIT);
+  assert.equal(limitFor(true), FULL_LIMIT);
 });
 
 test("shapeScrapeRecord strips the real Bright Data fixture records", () => {
@@ -228,6 +292,11 @@ test("resolveIncludeMarkup falls through an empty env to config", () => {
 test("resolveIncludeMarkup reads the config key", () => {
   assert.equal(resolveIncludeMarkup({ config: { includeMarkup: true } }), true);
   assert.equal(resolveIncludeMarkup({ config: { includeMarkup: false } }), false);
+});
+
+test("resolveIncludeMarkup treats a null config value as unset, like the ladder config does", () => {
+  assert.equal(resolveIncludeMarkup({ config: { includeMarkup: null } }), false);
+  assert.equal(resolveIncludeMarkup({ env: "1", config: { includeMarkup: null } }), true);
 });
 
 test("resolveIncludeMarkup rejects an unrecognised env value by name", () => {

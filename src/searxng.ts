@@ -1,4 +1,4 @@
-import { SerpAxiError, boundedDetail } from "./errors.ts";
+import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
 import type { OrganicResult, SearchParams } from "./serper.ts";
 
 export const SEARXNG_DEFAULT_URL = "http://127.0.0.1:8888";
@@ -36,7 +36,7 @@ function sourceField(source: string, flagName: string, envName: string, configNa
 function validateEndpoint(raw: unknown, source: string): string {
   const field = sourceField(source, "--searxng-url", "SERP_AXI_SEARXNG_URL", "searxngUrl");
   if (typeof raw !== "string" || raw.length === 0) {
-    throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describe(raw)}`, "usage", "example: --searxng-url http://127.0.0.1:8888");
+    throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describeValue(raw)}`, "usage", "example: --searxng-url http://127.0.0.1:8888");
   }
   let url: URL;
   try {
@@ -56,36 +56,30 @@ function validateEndpoint(raw: unknown, source: string): string {
   return url.toString();
 }
 
-function describe(value: unknown): string {
-  if (Array.isArray(value)) return "an array";
-  if (value === null) return "null";
-  return `${typeof value} ${JSON.stringify(value)}`;
-}
-
 function validateEngines(raw: unknown, source: string): string[] {
   const field = sourceField(source, "--engines", "SERP_AXI_SEARXNG_ENGINES", "searxngEngines");
   let items: string[];
   if (source === "config") {
     if (!Array.isArray(raw)) {
-      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describe(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
     }
     items = raw.map((entry) => {
       if (typeof entry !== "string") {
-        throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describe(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+        throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
       }
       return entry.trim();
     });
   } else {
     if (typeof raw !== "string") {
-      throw new SerpAxiError(`${field} must be a comma-separated engine list, got ${describe(raw)}`, "usage", "example: --engines bing,mojeek");
+      throw new SerpAxiError(`${field} must be a comma-separated engine list, got ${describeValue(raw)}`, "usage", "example: --engines bing,mojeek");
     }
     items = raw.split(",").map((name) => name.trim());
   }
   if (items.length === 0 || items.some((name) => name.length === 0)) {
     if (source === "config") {
-      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describe(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
     }
-    throw new SerpAxiError(`${field} must be a comma-separated list of non-empty engine names, got ${describe(raw)}`, "usage", "example: --engines bing,mojeek");
+    throw new SerpAxiError(`${field} must be a comma-separated list of non-empty engine names, got ${describeValue(raw)}`, "usage", "example: --engines bing,mojeek");
   }
   return [...new Set(items)];
 }
@@ -95,12 +89,12 @@ function validateTimeout(raw: unknown, source: string): number {
   let value: number;
   if (source === "config") {
     if (typeof raw !== "number" || !Number.isInteger(raw)) {
-      throw new SerpAxiError(`${field} must be a JSON number of milliseconds, got ${describe(raw)}`, "usage", 'example: "searchTimeoutMs": 30000');
+      throw new SerpAxiError(`${field} must be a JSON number of milliseconds, got ${describeValue(raw)}`, "usage", 'example: "searchTimeoutMs": 30000');
     }
     value = raw;
   } else {
     if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
-      throw new SerpAxiError(`${field} must be an integer number of milliseconds, got ${describe(raw)}`, "usage", "example: --search-timeout-ms 30000");
+      throw new SerpAxiError(`${field} must be an integer number of milliseconds, got ${describeValue(raw)}`, "usage", "example: --search-timeout-ms 30000");
     }
     value = Number(raw);
   }

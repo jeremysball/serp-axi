@@ -1,5 +1,5 @@
 // Test double for ladder-cli: speaks the NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title
 import readline from "node:readline";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -101,6 +101,15 @@ input.on("line", async (line) => {
   if (mode === "error") {
     process.stdout.write(
       JSON.stringify({ verdict: "error", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: "boom: primp refused" }) + "\n",
+    );
+    return;
+  }
+  // A page whose <title> came back as a whole HTML document: the one place a
+  // ladder record can carry raw markup, so the one place the shared stripping
+  // is observable on this provider.
+  if (mode === "html-title") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "<!doctype html><html><head><title>T</title></head><body>x</body></html>", text: "plain body", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
     );
     return;
   }
