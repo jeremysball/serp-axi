@@ -7,6 +7,8 @@ export interface StoredConfig {
   searxngEngines?: unknown;
   searchTimeoutMs?: unknown;
   includeMarkup?: unknown;
+  maxChars?: unknown;
+  fullMaxChars?: unknown;
   ladderTabState?: unknown;
   ladderCookieState?: unknown;
   ladderCacheState?: unknown;

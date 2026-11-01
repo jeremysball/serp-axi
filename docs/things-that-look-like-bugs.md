@@ -181,10 +181,12 @@ malformed value (`"includeMarkup": "yes"`) fails a Bright Data run and passes th
 other two.
 
 **Why:** Bright Data is the one provider whose records carry raw-HTML fields of
-their own. Reading the config for a run it cannot change would let a corrupt
-file replace the real error (a bad URL, a missing key) on every scrape. The flag
-and `SERP_AXI_INCLUDE_MARKUP` are read for every provider, and they win over
-the config key.
+their own, so it is the only path that asks the config what `includeMarkup`
+says. Every path does open the file now, for the `maxChars` and `fullMaxChars`
+keys (see "Every scrape path opens the config file, after its input checks"
+below), but a Serper or `--ladder` run never looks at the `includeMarkup` key, so
+a malformed one still passes there. The flag and `SERP_AXI_INCLUDE_MARKUP` are
+read for every provider, and they win over the config key.
 
 **When this becomes a real bug:** if a Bright Data run ignores the config key
 when neither the flag nor the env var is set, or if a run reads the config file
@@ -325,3 +327,76 @@ per-run override: env outranks config.
 
 **When this becomes a real bug:** if the env override stops beating the config
 key, or `SERP_AXI_INCLUDE_MARKUP=0` is read as true.
+
+## A bad `--full` cap fails a run that never uses `--full`
+
+**What you see:** `SERP_AXI_FULL_MAX_CHARS=abc serp-axi scrape <url>` exits with a
+usage error naming `SERP_AXI_FULL_MAX_CHARS`, though the run never asked for
+`--full`. A bad `maxChars` in the config file fails a `--full` run the same way.
+Only the source that wins for each cap is checked, so a bad env value under a
+flag, or a bad config value under an env var, never fails anything.
+
+**Why:** the rerun hint under a truncated field prints the real `--full` cap
+("to see up to 8000 characters"), so a normal run has to resolve it. A hint that
+printed a number nobody validated would be a wrong fact, and resolving the cap
+lazily would make the failure depend on whether the page happened to be long
+enough to truncate.
+
+**When this becomes a real bug:** if a value that loses to a flag or an env var
+is checked and fails the run, or if a malformed cap passes and a hint prints it.
+
+## `--max-chars` is refused with `--full`, and a hint never offers `--max-chars`
+
+**What you see:** `serp-axi scrape <url> --full --max-chars 500` exits with
+"--max-chars cannot be combined with --full", and `--full-max-chars 500` without
+`--full` exits with "--full-max-chars only applies with --full". The rerun hint
+says `Run \`serp-axi scrape '<url>' --full\` to see up to N characters` and
+leaves `--max-chars` off, even when the run being repeated used it. An env var or
+config key for the cap that the run does not use (`SERP_AXI_FULL_MAX_CHARS` on a
+normal run) is accepted and ignored.
+
+**Why:** `--full` picks which cap applies, so `--max-chars` beside it would name
+a cap the run does not use, and `--full-max-chars` alone would be read by
+nothing. Accepting either and ignoring it is the silent failure the other
+flag-conflict checks in `scrape` already refuse. Env and config settings are not
+conflicts because they are standing defaults for both modes. The hint omits
+`--max-chars` because the rerun is the `--full` run, where `--max-chars` is an
+error; the `--full` cap it prints is the one that rerun will use.
+
+**When this becomes a real bug:** if a hint suggests a command that exits with
+the usage error above, or if a conflicting pair reaches the network.
+
+## Every scrape path opens the config file, after its input checks
+
+**What you see:** a corrupt or unreadable `config.json` now fails a Serper scrape
+(it used to be read only by `--ladder`, and by Bright Data when the flag and env
+var had not settled `includeMarkup`). A Bright Data run with `--include-markup`
+fails on it too. A bad URL, a missing API key, or a bad cap flag is still
+reported as itself, ahead of the file error.
+
+**Why:** `maxChars` and `fullMaxChars` apply to every path, so every path needs
+the file. It is read once, after the URL and key checks, so a broken file never
+replaces a more useful error. Unlike `includeMarkup`, these keys cannot be left
+out of a path.
+
+**When this becomes a real bug:** if a run opens the config file before it has
+checked its URL, its API key (or ladder binary), and the cap flags, or if a
+path opens it twice.
+
+## Bright Data gets the character cap as `limit_per_input`
+
+**What you see:** the Bright Data request body is
+`{"input": [...], "limit_per_input": <cap>}` with the character cap (1200,
+50000, or the configured value) in `limit_per_input`, and the response is cut to
+the same cap again on our side.
+
+**Why:** the field was sent with the character limit before the caps became
+configurable, and this change passes the resolved cap through unchanged. Bright
+Data documents `limit_per_input` as a record count for discovery collections.
+Whether `/datasets/v3/scrape` reads it as a character count is unverified: no
+Bright Data document says so, and a live check needs a funded account. The local
+cut is what guarantees the cap.
+
+**When this becomes a real bug:** if a live request shows Bright Data rejecting
+the field, or reading it as a record count so that the cap changes how many
+records come back.
