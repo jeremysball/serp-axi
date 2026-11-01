@@ -190,6 +190,30 @@ the config key.
 when neither the flag nor the env var is set, or if a run reads the config file
 before it has checked its URL and API key.
 
+## `runSearch` with no config argument reads the real config file, and a bad file stops a flags-only searxng run
+
+**What you see:** a test or script that calls `runSearch(args, fetchImpl, env)`
+without the fourth argument gets the config file from `env`'s
+`XDG_CONFIG_HOME`, or from the process's home directory when that is unset. It
+does not get an empty config. A searxng run also reads the file before it looks
+at flags, so a corrupt `config.json` fails `--provider searxng` even when
+`--searxng-url`, `--engines`, and `--search-timeout-ms` are all given, and it
+replaces the error for a bad `--searxng-url`. Injecting `HOME` in the env has no
+effect on where the file is looked for.
+
+**Why:** the CLI entry point passes no config, so the default has to be the real
+file. Tests pass `{}` to opt out. Making the read lazy, or taking the home
+directory from the handed env, would change what `serp-axi search` does on a
+broken file, and `runScrape` has the same read (`config ?? loadStoredConfig(...)`
+in `src/commands/scrape.ts`), so the two should change together. Serper,
+Bright Data, and Kagi runs never open the file, and flag errors such as
+`--num 0` are reported before it is opened. Both are pinned by tests in
+`src/commands/search.test.ts`.
+
+**When this becomes a real bug:** if a non-searxng run opens the config file, if
+a flag error is replaced by a config error for a flag checked before the load,
+or if a test that hands in a config still reads the developer's own file.
+
 ## A hint's rerun command repeats flags, not env or config settings
 
 **What you see:** the command in `help` has `--include-markup`, `--dataset-id`,
