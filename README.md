@@ -86,8 +86,9 @@ Serper is the default and accepts one URL. Bright Data accepts multiple URLs
 in one batched request and requires `BRIGHTDATA_API_KEY`.
 
 ```
-serp-axi scrape <url> [--full]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--dataset-id <id>]
+serp-axi scrape <url> [--full] [--include-markup]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> --ladder [--full] [--include-markup]
 ```
 
 Bright Data uses dataset `gd_m6gjtfmeh43we6cqc` by default. Override it with
@@ -97,6 +98,28 @@ batched object with `provider`, `datasetId`, and dataset-specific `results`.
 Truncated result fields include a `<field>TruncatedFrom` count and a `help`
 hint showing how to retry with `--full`.
 Loopback and private-range hosts are rejected.
+
+Raw HTML is left out by default. A field counts as raw HTML when its name ends
+in `html` (Bright Data's `page_html`) or its value is a whole HTML document.
+Each field that was left out is named in `markupOmitted`, and `help` carries the
+command that brings it back. The text fields that stay (`markdown`, `html2text`)
+keep their content as returned, tags inside them included, apart from the
+character limit. The limit is applied after the omission, so a page's HTML never
+uses up the 1,200 characters.
+
+`--include-markup` keeps the omitted fields. The character limit still applies to
+them, so a kept `page_html` is cut to 1,200 characters unless you add `--full`
+(up to 50,000). `SERP_AXI_INCLUDE_MARKUP=1` does the same, and so does
+`"includeMarkup": true` in the config file, which only the Bright Data path
+reads. Precedence is flag, then env, then config, then off.
+`SERP_AXI_INCLUDE_MARKUP=0` turns it back off for one run when the config file
+has it on.
+
+A record whose only text is an HTML document keeps it, cut to the limit, rather
+than coming back empty. Serper and `--ladder` records have no raw-HTML field of
+their own, so the flag changes their output only when the title is itself a
+whole HTML document. Their `text` is whatever the provider extracted; for
+`--ladder` that is plain, whitespace-normalized text, not markdown.
 
 ### `update`
 
@@ -126,6 +149,7 @@ is completable with flags alone.
 | `SERP_AXI_SEARXNG_URL` | optional endpoint override for `search --provider searxng` |
 | `SERP_AXI_SEARXNG_ENGINES` | optional engine list for `search --provider searxng` |
 | `SERP_AXI_SEARCH_TIMEOUT_MS` | optional timeout override for `search --provider searxng` |
+| `SERP_AXI_INCLUDE_MARKUP` | optional `1`/`0` (or `true`/`false`); keeps raw-HTML fields in `scrape` output (`--include-markup` wins) |
 
 ## In progress: scraping escalation ladder
 

@@ -27,3 +27,10 @@ const MAX_ERROR_DETAIL = 200;
 export function boundedDetail(message: string): string {
   return message.length > MAX_ERROR_DETAIL ? `${message.slice(0, MAX_ERROR_DETAIL)}...` : message;
 }
+
+/** Name a wrongly typed config or env value in an error message: `string "yes"`, `an array`, `null`. */
+export function describeValue(value: unknown): string {
+  if (Array.isArray(value)) return "an array";
+  if (value === null) return "null";
+  return `${typeof value} ${JSON.stringify(value)}`;
+}
