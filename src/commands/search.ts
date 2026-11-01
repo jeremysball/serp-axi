@@ -5,6 +5,7 @@ import { truncate, type AxiOutput } from "../output.ts";
 import type { SearchParams } from "../serper.ts";
 import { BRIGHT_DATA_DEFAULT_ZONE } from "../brightdata.ts";
 import { searchStrategies, PROVIDERS, type Provider } from "../providers.ts";
+import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
 import { resolveSearxngOptions, type EngineStatus } from "../searxng.ts";
 
@@ -131,7 +132,15 @@ function failedEngineCount(engines: EngineStatus[]): number {
   return engines.filter((e) => e.status !== "ok").length;
 }
 
-export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch): Promise<AxiOutput> {
+// `env` and `config` are injectable so a test can drive every setting without
+// touching process.env or the machine's real config file. `config` left unset
+// means "read the config file if a setting needs it" (only searxng does).
+export async function runSearch(
+  args: string[],
+  fetchImpl: typeof fetch = fetch,
+  env: NodeJS.ProcessEnv = process.env,
+  config?: StoredConfig,
+): Promise<AxiOutput> {
   const { positionals, flags } = parseFlags(args, SEARCH_FLAGS, "search");
 
   const query = positionals.join(" ").trim();
@@ -174,21 +183,21 @@ export async function runSearch(args: string[], fetchImpl: typeof fetch = fetch)
 
   let searxng;
   if (provider === "searxng") {
-    const stored = loadStoredConfig(os.homedir());
     searxng = resolveSearxngOptions({
       flagUrl: flags["searxng-url"] as string | undefined,
       flagEngines: flags.engines as string | undefined,
       flagTimeoutMs: flags["search-timeout-ms"] as string | undefined,
-      envUrl: process.env.SERP_AXI_SEARXNG_URL,
-      envEngines: process.env.SERP_AXI_SEARXNG_ENGINES,
-      envTimeoutMs: process.env.SERP_AXI_SEARCH_TIMEOUT_MS,
-      config: stored,
+      envUrl: env.SERP_AXI_SEARXNG_URL,
+      envEngines: env.SERP_AXI_SEARXNG_ENGINES,
+      envTimeoutMs: env.SERP_AXI_SEARCH_TIMEOUT_MS,
+      config: config ?? loadStoredConfig(os.homedir(), env),
     });
   }
 
   const response = await searchStrategies[provider].run({
     params,
     fetchImpl,
+    env,
     zone: flags.zone as string | undefined,
     searxng,
   });
