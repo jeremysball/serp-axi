@@ -152,3 +152,65 @@ A symlink output keeps the link and replaces its resolved target.
 **When this becomes a real bug:** if the rung reports success without completing
 the requested export, destroys the old jar on a failed write, or replaces the
 symlink itself.
+
+## `--include-markup` changes nothing for Serper and `--ladder`
+
+**What you see:** `serp-axi scrape <url> --include-markup` and the same command
+without the flag print the same record, except that the rerun command in `help`
+carries the flag.
+
+**Why:** both paths build a record with no raw-HTML field. Serper's record is
+`url`, `title`, and `text`, taken from the response by name in
+`src/commands/scrape.ts`, so nothing else in the response reaches the output.
+Ladder rung 1 strips tags and then decodes entities (`extract_html` in
+`ladder-cli/ladder_cli/rungs/http.py`), and the browser rungs read
+`document.body.innerText`. The flag is accepted everywhere so one command line
+works across providers, and every provider still goes through
+`shapeScrapeRecord`.
+
+**When this becomes a real bug:** if Serper or ladder starts returning a field
+whose name ends in `html`, and it shows up in the output without
+`--include-markup`, or if `--include-markup` is rejected under one provider.
+
+## Kept text fields can still contain tags, and `markdown` and `html2text` can repeat each other
+
+**What you see:** a Bright Data record keeps both `markdown` and `html2text`,
+which carry nearly the same text. A page about HTML can show a literal `<div>`
+in a field that stayed.
+
+**Why:** the omission rule looks at a field's name (ending in `html`) and at
+whether its whole value is an HTML document. It does not rewrite the inside of a
+field that stays. A regex tag-stripper would delete the `<div>` a page is
+legitimately talking about, and ladder rung 1 decodes entities after it removes
+tags, so a tag in its text is content. Dropping
+`html2text` to save space would also be a guess about which field a caller reads.
+
+**When this becomes a real bug:** if a field whose name ends in `html`, or whose
+value is a whole HTML document, appears in the output without
+`--include-markup`.
+
+## The content field is kept even when it is an HTML document
+
+**What you see:** a Serper or ladder `text` that begins with `<!doctype html>`
+comes back as is, with no `markupOmitted` entry, while a Bright Data field with
+that value would be left out.
+
+**Why:** Serper and ladder each declare one content field, `text`. Omitting it
+would turn "the page came back as HTML" into an empty result with a hint to
+re-run for the thing that was just dropped. Showing the document is the more
+honest failure.
+
+**When this becomes a real bug:** if a sibling field of `text` that holds markup
+is kept, or if `text` is dropped.
+
+## There is no flag to turn markup back off
+
+**What you see:** with `"includeMarkup": true` in the config file, no CLI flag
+switches it off for one run.
+
+**Why:** the flag is presence-only like the other boolean flags in `scrape`, so
+`--include-markup` can only turn it on. `SERP_AXI_INCLUDE_MARKUP=0` is the
+per-run override: env outranks config.
+
+**When this becomes a real bug:** if the env override stops beating the config
+key, or `SERP_AXI_INCLUDE_MARKUP=0` is read as true.
