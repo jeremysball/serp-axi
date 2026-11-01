@@ -153,24 +153,58 @@ A symlink output keeps the link and replaces its resolved target.
 the requested export, destroys the old jar on a failed write, or replaces the
 symlink itself.
 
-## `--include-markup` changes nothing for Serper and `--ladder`
+## `--include-markup` does almost nothing for Serper and `--ladder`
 
 **What you see:** `serp-axi scrape <url> --include-markup` and the same command
-without the flag print the same record, except that the rerun command in `help`
-carries the flag.
+without the flag print the same record, apart from the rerun command in `help`,
+which carries the flag whenever it is on.
 
 **Why:** both paths build a record with no raw-HTML field. Serper's record is
 `url`, `title`, and `text`, taken from the response by name in
 `src/commands/scrape.ts`, so nothing else in the response reaches the output.
 Ladder rung 1 strips tags and then decodes entities (`extract_html` in
 `ladder-cli/ladder_cli/rungs/http.py`), and the browser rungs read
-`document.body.innerText`. The flag is accepted everywhere so one command line
-works across providers, and every provider still goes through
+`document.body.innerText`. The one field the flag can change is `title`, when it
+is itself a whole HTML document. The flag is accepted everywhere so one command
+line works across providers, and every provider goes through
 `shapeScrapeRecord`.
 
 **When this becomes a real bug:** if Serper or ladder starts returning a field
 whose name ends in `html`, and it shows up in the output without
 `--include-markup`, or if `--include-markup` is rejected under one provider.
+
+## The `includeMarkup` config key is read for Bright Data only
+
+**What you see:** `"includeMarkup": true` in the config file keeps raw-HTML
+fields in a Bright Data run, but a Serper or `--ladder` run ignores it, and a
+malformed value (`"includeMarkup": "yes"`) fails a Bright Data run and passes the
+other two.
+
+**Why:** Bright Data is the one provider whose records carry raw-HTML fields of
+their own. Reading the config for a run it cannot change would let a corrupt
+file replace the real error (a bad URL, a missing key) on every scrape. The flag
+and `SERP_AXI_INCLUDE_MARKUP` are read for every provider, and they win over
+the config key.
+
+**When this becomes a real bug:** if a Bright Data run ignores the config key
+when neither the flag nor the env var is set, or if a run reads the config file
+before it has checked its URL and API key.
+
+## A hint's rerun command repeats flags, not env or config settings
+
+**What you see:** the command in `help` has `--include-markup`, `--dataset-id`,
+or a ladder axis flag only if that flag was on the command line. A value that came
+from `SERP_AXI_INCLUDE_MARKUP`, `BRIGHTDATA_DATASET_ID`, or the config file is
+not repeated, except that `--include-markup` is added whenever markup is on,
+whichever way it was turned on.
+
+**Why:** the env and config settings apply to the rerun by themselves, in the
+same shell. The hint is shorter, and a pasted command does not pin a value that
+the reader may have changed.
+
+**When this becomes a real bug:** if the rerun fetches a different dataset, or
+uses different ladder axes, than the run that printed it, with the same
+environment.
 
 ## Kept text fields can still contain tags, and `markdown` and `html2text` can repeat each other
 
@@ -189,19 +223,72 @@ tags, so a tag in its text is content. Dropping
 value is a whole HTML document, appears in the output without
 `--include-markup`.
 
-## The content field is kept even when it is an HTML document
+## A record whose only text is an HTML document keeps it
 
 **What you see:** a Serper or ladder `text` that begins with `<!doctype html>`
-comes back as is, with no `markupOmitted` entry, while a Bright Data field with
-that value would be left out.
+comes back, cut to the character limit, with no `markupOmitted` entry. A Bright
+Data record with `page_html` and nothing else textual does the same. The same
+`page_html` next to a `markdown` field is left out.
 
-**Why:** Serper and ladder each declare one content field, `text`. Omitting it
-would turn "the page came back as HTML" into an empty result with a hint to
-re-run for the thing that was just dropped. Showing the document is the more
-honest failure.
+**Why:** the rule is "omit markup unless it is all there is to show". When every
+text field the limit applies to is markup, omitting them would turn "the page
+came back as HTML" into an empty result with a hint to rerun for the thing that
+was just dropped. Showing the document, bounded by the limit, is the more honest
+failure. Markup outside that scope (a Serper `title`) is still omitted, because
+nothing would bound it.
 
-**When this becomes a real bug:** if a sibling field of `text` that holds markup
-is kept, or if `text` is dropped.
+**When this becomes a real bug:** if a markup field is kept next to a field of
+real content, or if the only text a record has is dropped.
+
+## Prose that opens with a literal `<html>` is classed as a document
+
+**What you see:** a Bright Data field named `summary` whose value is
+`<html> is the root element` appears in `markupOmitted`, while the same text in
+a field named `snippet` that begins `<div>` is kept.
+
+**Why:** the document test looks only at how a value opens: a doctype or an
+`<html` tag, after any whitespace, comments, and XML prologs. That is cheap and
+cannot be fooled into a slow scan on a large page (the scan is linear; a test
+pins it). It cannot tell a page from a sentence that starts with the same
+characters, and a `<div>` fragment under a name that does not end in `html` is
+treated as content for the same reason: nothing here parses HTML. The omission
+is not silent, so `--include-markup` brings the field back.
+
+**When this becomes a real bug:** if a field that stays contains a whole
+document (starting with a doctype or `<html>`), or if an omitted field is not
+named in `markupOmitted`.
+
+## Serper and ladder `title` and `warning` are not cut to the limit
+
+**What you see:** with the default 1,200-character limit, a Serper or ladder
+record can still print a `title` (or the ladder's `warning`) longer than that,
+and no `truncatedFrom` marker covers it.
+
+**Why:** the limit is a bound on the page body. Serper and ladder each declare
+one body field, `text`, and the limit applies to that field only. A title is
+expected to be short, and so is the ladder's `warning`, a message the child
+writes by protocol. The `warning` is attached after the record is shaped
+(`src/commands/scrape.ts`, after `shapeTextRecord`), so it rides outside the
+limit. Bright Data's every-string scope has
+no such carve-out because its record shape is not ours to know.
+
+**When this becomes a real bug:** if a title or warning large enough to matter
+shows up in practice, since that would mean the premise (short strings) is
+false and the scope needs to widen.
+
+## A document with a comment or XML prolog before the doctype is still a document
+
+**What you see:** a field that starts with `<!-- saved from url=... -->` or
+`<?xml version="1.0"?>` and then `<!doctype html>` is omitted as markup, even
+though its first characters are neither.
+
+**Why:** saved pages and some proxies prepend those. The scan skips whitespace,
+comments, and prologs before it looks for the doctype, one at a time, so a page
+with many comments costs time proportional to its length.
+
+**When this becomes a real bug:** if an unterminated comment or prolog makes the
+scan run past the end of the value, or the scan's time grows faster than the
+value's length.
 
 ## There is no flag to turn markup back off
 

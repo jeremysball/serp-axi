@@ -88,6 +88,7 @@ in one batched request and requires `BRIGHTDATA_API_KEY`.
 ```
 serp-axi scrape <url> [--full] [--include-markup]
 serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> --ladder [--full] [--include-markup]
 ```
 
 Bright Data uses dataset `gd_m6gjtfmeh43we6cqc` by default. Override it with
@@ -106,11 +107,19 @@ keep their content as returned, tags inside them included, apart from the
 character limit. The limit is applied after the omission, so a page's HTML never
 uses up the 1,200 characters.
 
-`--include-markup` keeps everything. `SERP_AXI_INCLUDE_MARKUP=1` and
-`"includeMarkup": true` in the config file do the same; precedence is flag, then
-env, then config, then off. `SERP_AXI_INCLUDE_MARKUP=0` turns it back off for one
-run when the config file has it on. Serper and `--ladder` records have no
-raw-HTML field, so the flag changes nothing for them.
+`--include-markup` keeps the omitted fields. The character limit still applies to
+them, so a kept `page_html` is cut to 1,200 characters unless you add `--full`
+(up to 50,000). `SERP_AXI_INCLUDE_MARKUP=1` does the same, and so does
+`"includeMarkup": true` in the config file, which only the Bright Data path
+reads. Precedence is flag, then env, then config, then off.
+`SERP_AXI_INCLUDE_MARKUP=0` turns it back off for one run when the config file
+has it on.
+
+A record whose only text is an HTML document keeps it, cut to the limit, rather
+than coming back empty. Serper and `--ladder` records have no raw-HTML field of
+their own, so the flag changes their output only when the title is itself a
+whole HTML document. Their `text` is whatever the provider extracted; for
+`--ladder` that is plain, whitespace-normalized text, not markdown.
 
 ### `update`
 
