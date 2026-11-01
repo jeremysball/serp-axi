@@ -10,10 +10,6 @@ tools through shell execution rather than a browser.
 npm install -g serp-axi
 ```
 
-Until the first release has actually published (see "Publishing" below),
-this package doesn't exist on the npm registry yet and the install above
-404s.
-
 Confirms it's on `PATH`:
 
 ```
@@ -313,14 +309,26 @@ and an available `ladder-cli` binary.
 Releases are cut by [release-please](https://github.com/googleapis/release-please):
 merging its release PR tags a version and triggers a `publish` job that runs
 `npm publish` under [npm trusted publishing](https://docs.npmjs.com/trusted-publishers)
-(OIDC) — no long-lived npm token stored in the workflow.
+(OIDC), with no long-lived npm token stored in the workflow.
 
-Trusted publishing has to be configured on npmjs.com against a package that
-already exists, so it can't cover the very first publish of a brand-new
-package name. That first publish is a one-time manual step from an
-authenticated local session (`npm publish`, using the `NPM_TOKEN` repo
-secret's value) *before* the first release PR is merged. Every release
-after that goes through OIDC only.
+Trusted publishing can only be configured against a package that already
+exists, so the first publish does not go through it. 0.2.0 was published from
+an authenticated local session, which created the package on the registry.
+The 0.2.0 release was also tagged and published by hand, because the
+`RELEASE_PLEASE_TOKEN` secret in this repository was rejected with
+`Bad credentials` on every run since the workflow landed.
+
+Two maintainer steps remain before the workflow can publish on its own:
+
+- Replace the `RELEASE_PLEASE_TOKEN` secret with a credential GitHub accepts.
+- Configure the trusted publisher on npmjs.com: the package's Settings,
+  Publishing access, Trusted Publisher, pointing at `jeremysball/serp-axi`
+  and `.github/workflows/release-please.yml`.
+
+Until both are done, releases have to be cut manually: bump the version in
+`package.json`, `package-lock.json`, and `.release-please-manifest.json`, run
+`npm run check` and `npm run build`, tag the merge commit, create the GitHub
+release, and run `npm publish` from an authenticated session.
 
 ## Status
 

@@ -1,6 +1,6 @@
 {
   "name": "serp-axi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AXI-compliant CLI for Google Search and page scraping via Serper or Bright Data",
   "type": "module",
   "license": "Unlicense",
