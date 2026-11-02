@@ -36,7 +36,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const URL_NAMES: SettingNames = { flag: "--searxng-url", env: "SERP_AXI_SEARXNG_URL", config: "searxngUrl" };
+const URL_EXAMPLES = settingExamples(URL_NAMES, SEARXNG_DEFAULT_URL, `"${SEARXNG_DEFAULT_URL}"`);
 const ENGINES_NAMES: SettingNames = { flag: "--engines", env: "SERP_AXI_SEARXNG_ENGINES", config: "searxngEngines" };
+const ENGINES_EXAMPLES = settingExamples(ENGINES_NAMES, "bing,mojeek", '["bing", "mojeek"]');
 const TIMEOUT_NAMES: SettingNames = { flag: "--search-timeout-ms", env: "SERP_AXI_SEARCH_TIMEOUT_MS", config: "searchTimeoutMs" };
 const TIMEOUT_SHAPE: IntegerSettingShape = {
   names: TIMEOUT_NAMES,
@@ -48,13 +50,13 @@ const TIMEOUT_SHAPE: IntegerSettingShape = {
 function validateEndpoint(raw: unknown, source: OptionSource): string {
   const field = URL_NAMES[source];
   if (typeof raw !== "string" || raw.length === 0) {
-    throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describeValue(raw)}`, "usage", "example: --searxng-url http://127.0.0.1:8888");
+    throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describeValue(raw)}`, "usage", `example: ${URL_EXAMPLES[source]}`);
   }
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new SerpAxiError(`${field} is not a valid URL: "${raw}"`, "usage", "example: --searxng-url http://127.0.0.1:8888");
+    throw new SerpAxiError(`${field} is not a valid URL: "${raw}"`, "usage", `example: ${URL_EXAMPLES[source]}`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new SerpAxiError(`${field} must use http or https, got "${url.protocol}"`, "usage", "example: http://127.0.0.1:8888");
@@ -73,25 +75,25 @@ function validateEngines(raw: unknown, source: OptionSource): string[] {
   let items: string[];
   if (source === "config") {
     if (!Array.isArray(raw)) {
-      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", `example: ${ENGINES_EXAMPLES[source]}`);
     }
     items = raw.map((entry) => {
       if (typeof entry !== "string") {
-        throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+        throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", `example: ${ENGINES_EXAMPLES[source]}`);
       }
       return entry.trim();
     });
   } else {
     if (typeof raw !== "string") {
-      throw new SerpAxiError(`${field} must be a comma-separated engine list, got ${describeValue(raw)}`, "usage", "example: --engines bing,mojeek");
+      throw new SerpAxiError(`${field} must be a comma-separated engine list, got ${describeValue(raw)}`, "usage", `example: ${ENGINES_EXAMPLES[source]}`);
     }
     items = raw.split(",").map((name) => name.trim());
   }
   if (items.length === 0 || items.some((name) => name.length === 0)) {
     if (source === "config") {
-      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", 'example: "searxngEngines": ["bing", "mojeek"]');
+      throw new SerpAxiError(`${field} must be a JSON array of non-empty engine names, got ${describeValue(raw)}`, "usage", `example: ${ENGINES_EXAMPLES[source]}`);
     }
-    throw new SerpAxiError(`${field} must be a comma-separated list of non-empty engine names, got ${describeValue(raw)}`, "usage", "example: --engines bing,mojeek");
+    throw new SerpAxiError(`${field} must be a comma-separated list of non-empty engine names, got ${describeValue(raw)}`, "usage", `example: ${ENGINES_EXAMPLES[source]}`);
   }
   return [...new Set(items)];
 }

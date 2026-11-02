@@ -1007,16 +1007,47 @@ test("validation errors from env values name the env var", async (t) => {
   });
 });
 
+function helpFor(sources: SearxngOptionSources): string {
+  try {
+    resolveSearxngOptions(sources);
+  } catch (error) {
+    assert.ok(error instanceof SerpAxiError);
+    return error.help;
+  }
+  throw new Error("expected resolveSearxngOptions to throw");
+}
+
+test("a bad endpoint's help line shows the example for the source the value came from", () => {
+  const flagExample = "example: --searxng-url http://127.0.0.1:8888";
+  const envExample = "example: SERP_AXI_SEARXNG_URL=http://127.0.0.1:8888";
+  const configExample = 'example: "searxngUrl": "http://127.0.0.1:8888"';
+
+  // Wrong type or empty.
+  assert.equal(helpFor({ flagUrl: "", config: {} }), flagExample);
+  assert.equal(helpFor({ envUrl: "", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngUrl: "" } }), configExample);
+
+  // A string that is not a URL.
+  assert.equal(helpFor({ flagUrl: "not a url", config: {} }), flagExample);
+  assert.equal(helpFor({ envUrl: "not a url", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngUrl: "not a url" } }), configExample);
+});
+
+test("a bad engine list's help line shows the example for the source the value came from", () => {
+  const flagExample = "example: --engines bing,mojeek";
+  const envExample = "example: SERP_AXI_SEARXNG_ENGINES=bing,mojeek";
+  const configExample = 'example: "searxngEngines": ["bing", "mojeek"]';
+
+  // An empty name in the list.
+  assert.equal(helpFor({ flagEngines: "bing,,mojeek", config: {} }), flagExample);
+  assert.equal(helpFor({ envEngines: "bing,,mojeek", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngEngines: ["bing", ""] } }), configExample);
+
+  // Not a list at all.
+  assert.equal(helpFor({ config: { searxngEngines: "bing" } }), configExample);
+});
+
 test("a bad timeout's help line shows the example for the source the value came from", () => {
-  const helpFor = (sources: SearxngOptionSources): string => {
-    try {
-      resolveSearxngOptions(sources);
-    } catch (error) {
-      assert.ok(error instanceof SerpAxiError);
-      return error.help;
-    }
-    throw new Error("expected resolveSearxngOptions to throw");
-  };
   const flagExample = "example: --search-timeout-ms 30000";
   const envExample = "example: SERP_AXI_SEARCH_TIMEOUT_MS=30000";
   const configExample = 'example: "searchTimeoutMs": 30000';
