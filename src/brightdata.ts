@@ -188,9 +188,8 @@ export async function scrapeBrightData(
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      // Inputs only. Bright Data's `limit_per_input` caps records per input on
-      // discovery requests; it is not a character limit, so the cap is applied
-      // to the records after they arrive (docs/things-that-look-like-bugs.md).
+      // Inputs only. The character cap is applied to the records after they
+      // arrive; why it is not sent here is in docs/things-that-look-like-bugs.md.
       body: JSON.stringify({ input: urls.map((url) => ({ url })) }),
     });
   } catch (cause) {

@@ -712,6 +712,22 @@ test("array-valued endpoint is rejected, not String-coerced", async (t) => {
   });
 });
 
+test("a null config value is rejected for each SearXNG key, unlike the ladder's config keys", () => {
+  // scrape-output.ts says the SearXNG keys "reject null" where the ladder's config keys read it as unset.
+  for (const key of ["searxngUrl", "searxngEngines", "searchTimeoutMs"] as const) {
+    assert.throws(
+      () => resolveSearxngOptions({ config: { [key]: null } }),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError);
+        assert.equal(error.kind, "usage");
+        assert.match(error.message, new RegExp(`^${key} .*got null$`));
+        return true;
+      },
+      key,
+    );
+  }
+});
+
 test("higher-precedence valid values override lower invalid ones", async (t) => {
   await isolated(t, async (_home, configDir) => {
     writeConfig(configDir, { searxngUrl: 123, searchTimeoutMs: -3, searxngEngines: "bing" });

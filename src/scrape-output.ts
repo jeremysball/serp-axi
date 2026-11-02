@@ -287,7 +287,8 @@ export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
 }
 
 function charLimitFromConfig(raw: unknown, shape: IntegerSettingShape): number | undefined {
-  // Null and absent both mean "not set", as they do for the other config keys.
+  // Null and absent both mean "not set", as they do for the ladder's config keys
+  // and `includeMarkup`. The SearXNG keys differ: they reject null.
   if (raw === undefined || raw === null) return undefined;
   return validateCharLimit(raw, "config", shape);
 }

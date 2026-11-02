@@ -546,6 +546,21 @@ test("the config file can set the profile, not only be overridden by one", () =>
   assert.equal(axes.cacheState, "warm");
 });
 
+test("a null config or profile value is unset: the axis falls to the next layer or the default", () => {
+  // scrape-output.ts says "Null and absent both mean 'not set', as they do for the ladder's config keys".
+  assert.deepEqual(
+    resolveLadderAxes({
+      config: { ladderTabState: null, ladderRungCeiling: null, ladderJarIn: null, ladderProfile: null },
+    }),
+    resolveLadderAxes({}),
+  );
+  const axes = resolveLadderAxes({
+    flag: { profile: "p" },
+    config: { ladderTabState: "same", ladderProfiles: { p: { tabState: null } } },
+  });
+  assert.equal(axes.tabState, "same", "a null in the profile bundle must not mask the config key under it");
+});
+
 test("an unknown profile-bundle key is a usage error, not a silent default", () => {
   assert.throws(
     () =>

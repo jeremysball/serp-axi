@@ -570,7 +570,7 @@ test("resolveCharLimits lets a request beat the config, and the config beat the 
   });
 });
 
-test("resolveCharLimits treats a null config value as unset, like the other config keys", () => {
+test("resolveCharLimits treats a null config value as unset, like the ladder's config keys", () => {
   assert.deepEqual(resolveCharLimits(request(), { maxChars: null, fullMaxChars: null }), DEFAULT_LIMITS);
 });
 

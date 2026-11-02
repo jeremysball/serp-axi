@@ -402,12 +402,13 @@ diagnose than failing every run the same way.
 checked its URL, its API key (or ladder binary), and the cap flags, or if a
 path opens it twice.
 
-## Bright Data downloads the whole record, then the cap cuts it
+## The Bright Data cap is applied after the records arrive
 
-**What you see:** `serp-axi scrape --provider brightdata --max-chars 5` asks
-Bright Data for the page with no limit in the request body (`{"input": [...]}`,
-nothing else), receives the full record, and cuts every long string to 5
-characters afterward.
+**What you see:** `serp-axi scrape --provider brightdata --max-chars 5` sends
+Bright Data no limit of any kind (the request body is `{"input": [...]}`,
+nothing else). Whatever comes back is cut afterward: every long top-level
+string except `url` is cut to 5 characters. The cap shortens the output, and
+nothing in the request asks Bright Data to send less.
 
 **Why:** the only limit the `/datasets/v3/scrape` reference names is
 `limit_per_input`, and it counts records per input, for discovery requests
