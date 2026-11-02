@@ -2,7 +2,7 @@ import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
 import {
   parseIntegerSetting,
   pickOption,
-  settingName,
+  settingExamples,
   type IntegerSettingShape,
   type OptionSource,
   type SettingNames,
@@ -37,15 +37,16 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const URL_NAMES: SettingNames = { flag: "--searxng-url", env: "SERP_AXI_SEARXNG_URL", config: "searxngUrl" };
 const ENGINES_NAMES: SettingNames = { flag: "--engines", env: "SERP_AXI_SEARXNG_ENGINES", config: "searxngEngines" };
+const TIMEOUT_NAMES: SettingNames = { flag: "--search-timeout-ms", env: "SERP_AXI_SEARCH_TIMEOUT_MS", config: "searchTimeoutMs" };
 const TIMEOUT_SHAPE: IntegerSettingShape = {
-  names: { flag: "--search-timeout-ms", env: "SERP_AXI_SEARCH_TIMEOUT_MS", config: "searchTimeoutMs" },
-  examples: { flag: "--search-timeout-ms 30000", env: "SERP_AXI_SEARCH_TIMEOUT_MS=30000", config: '"searchTimeoutMs": 30000' },
+  names: TIMEOUT_NAMES,
+  examples: settingExamples(TIMEOUT_NAMES, "30000"),
   textShape: "an integer number of milliseconds",
   configShape: "a JSON number of milliseconds",
 };
 
 function validateEndpoint(raw: unknown, source: OptionSource): string {
-  const field = settingName(URL_NAMES, source);
+  const field = URL_NAMES[source];
   if (typeof raw !== "string" || raw.length === 0) {
     throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describeValue(raw)}`, "usage", "example: --searxng-url http://127.0.0.1:8888");
   }
@@ -68,7 +69,7 @@ function validateEndpoint(raw: unknown, source: OptionSource): string {
 }
 
 function validateEngines(raw: unknown, source: OptionSource): string[] {
-  const field = settingName(ENGINES_NAMES, source);
+  const field = ENGINES_NAMES[source];
   let items: string[];
   if (source === "config") {
     if (!Array.isArray(raw)) {
@@ -99,7 +100,7 @@ function validateTimeout(raw: unknown, source: OptionSource): number {
   const value = parseIntegerSetting(raw, source, TIMEOUT_SHAPE);
   if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
     throw new SerpAxiError(
-      `${settingName(TIMEOUT_SHAPE.names, source)} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds, got "${String(raw)}"`,
+      `${TIMEOUT_NAMES[source]} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds, got "${String(raw)}"`,
       "usage",
       `example: ${TIMEOUT_SHAPE.examples[source]}`,
     );

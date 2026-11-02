@@ -2,7 +2,7 @@ import { SerpAxiError, describeValue } from "./errors.ts";
 import {
   parseIntegerSetting,
   pickOption,
-  settingName,
+  settingExamples,
   type IntegerSettingShape,
   type OptionSource,
   type SettingNames,
@@ -187,7 +187,7 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
 function charLimitShape(names: SettingNames): IntegerSettingShape {
   return {
     names,
-    examples: { flag: `${names.flag} 5000`, env: `${names.env}=5000`, config: `"${names.config}": 5000` },
+    examples: settingExamples(names, "5000"),
     textShape: "a whole number of characters",
     configShape: "a JSON integer number of characters",
   };
@@ -209,7 +209,7 @@ function validateCharLimit(raw: unknown, source: OptionSource, shape: IntegerSet
   const value = parseIntegerSetting(raw, source, shape);
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new SerpAxiError(
-      `${settingName(shape.names, source)} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
+      `${shape.names[source]} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
       "usage",
       `example: ${shape.examples[source]}`,
     );

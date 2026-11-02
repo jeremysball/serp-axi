@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SerpAxiError } from "./errors.ts";
-import { parseIntegerSetting, pickOption, settingName, type IntegerSettingShape } from "./option-sources.ts";
+import { parseIntegerSetting, pickOption, settingExamples, type IntegerSettingShape } from "./option-sources.ts";
 
 const shape: IntegerSettingShape = {
   names: { flag: "--wait-ms", env: "SERP_AXI_WAIT_MS", config: "waitMs" },
@@ -36,10 +36,18 @@ test("pickOption counts only undefined as unset, so an empty string, null or 0 s
   assert.deepEqual(pickOption<unknown>(undefined, undefined, 0), { value: 0, source: "config" });
 });
 
-test("settingName returns the name a source goes by", () => {
-  assert.equal(settingName(shape.names, "flag"), "--wait-ms");
-  assert.equal(settingName(shape.names, "env"), "SERP_AXI_WAIT_MS");
-  assert.equal(settingName(shape.names, "config"), "waitMs");
+test("settingExamples spells one sample value in each home's own syntax", () => {
+  assert.deepEqual(settingExamples(shape.names, "500"), {
+    flag: "--wait-ms 500",
+    env: "SERP_AXI_WAIT_MS=500",
+    config: '"waitMs": 500',
+  });
+  // A config value is JSON, so it can differ from the text a flag or env var takes.
+  assert.deepEqual(settingExamples({ flag: "--tags", env: "SERP_AXI_TAGS", config: "tags" }, "a,b", '["a", "b"]'), {
+    flag: "--tags a,b",
+    env: "SERP_AXI_TAGS=a,b",
+    config: '"tags": ["a", "b"]',
+  });
 });
 
 test("parseIntegerSetting reads all-digit text from a flag or env value", () => {

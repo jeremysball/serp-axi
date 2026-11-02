@@ -18,8 +18,13 @@ export interface PickedOption<T> {
   source: OptionSource;
 }
 
-export function settingName(names: SettingNames, source: OptionSource): string {
-  return names[source];
+/**
+ * One sample value written the way each home writes it: a flag and a
+ * `NAME=value` env var take the text as is, a config key takes JSON. Pass
+ * `json` only when the JSON spelling differs from the text, as a list does.
+ */
+export function settingExamples(names: SettingNames, text: string, json: string = text): SettingNames {
+  return { flag: `${names.flag} ${text}`, env: `${names.env}=${text}`, config: `"${names.config}": ${json}` };
 }
 
 /**
@@ -57,7 +62,7 @@ export interface IntegerSettingShape {
  * own range and says what the range is.
  */
 export function parseIntegerSetting(raw: unknown, source: OptionSource, shape: IntegerSettingShape): number {
-  const field = settingName(shape.names, source);
+  const field = shape.names[source];
   if (source === "config") {
     if (typeof raw !== "number" || !Number.isInteger(raw)) {
       throw new SerpAxiError(`${field} must be ${shape.configShape}, got ${describeValue(raw)}`, "usage", `example: ${shape.examples.config}`);
