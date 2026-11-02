@@ -6,9 +6,12 @@ import dataclasses
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
+
+import pytest
 
 from ladder_cli import cli
 from ladder_cli.rungs import RungResult, RungVerdict
@@ -244,7 +247,7 @@ def test_a_rung_is_not_done_until_what_it_started_has_finished_stopping(tmp_path
 
 def test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period(tmp_path, monkeypatch) -> None:
     """Asking first must not mean waiting forever on a rung that will not stop."""
-    monkeypatch.setattr(cli, "GROUP_STOP_GRACE_S", 0.3)
+    monkeypatch.setattr(cli, "STOP_GRACE_S", 0.3)
     ready = tmp_path / "ready"
     child = (
         "import os, signal, sys, time\n"
@@ -271,6 +274,102 @@ def test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_perio
         pass
     else:
         raise AssertionError("the rung that ignored SIGTERM is still running")
+
+
+def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first(tmp_path, monkeypatch) -> None:
+    """`main` turns SIGTERM into SystemExit, so one can land inside the grace wait.
+
+    Without a fallback that exits the wait with the SIGKILL still unsent, a rung
+    that ignores SIGTERM outlives the CLI that was stopping it. The stand-in
+    raises SystemExit from the wait's own sleep, which is where the handler's
+    exception would surface.
+    """
+    ready = tmp_path / "ready"
+    child = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    def second_sigterm(seconds: float) -> None:
+        raise SystemExit(128 + 15)
+
+    group = None
+    try:
+        monkeypatch.setattr(cli.time, "sleep", second_sigterm)
+        with pytest.raises(SystemExit):
+            cli.run_rung_isolated(
+                "http",
+                "https://example.com/article",
+                timeout_s=1.5,
+                argv=[sys.executable, "-c", child, str(ready)],
+            )
+        monkeypatch.undo()
+        assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
+        group = int(ready.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(group, 0)
+    finally:
+        if group is not None:
+            # a failure above leaves the child running; this is the test's own cleanup, not the code's
+            try:
+                os.killpg(group, signal.SIGKILL)
+                os.waitpid(group, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
+
+_ORPHANS_THE_GRANDCHILD_TO_A_PARENT_THAT_NEVER_REAPS = (
+    "import ctypes, subprocess, sys, time\n"
+    "from pathlib import Path\n"
+    "from ladder_cli import cli\n"
+    # What a container whose PID 1 never waits does: orphans stay zombies for good.
+    "PR_SET_CHILD_SUBREAPER = 36\n"
+    "if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:\n"
+    "    sys.exit('could not become a subreaper')\n"
+    "cli.STOP_GRACE_S = 3.0\n"
+    "ready = Path(sys.argv[1])\n"
+    "rung = (\n"
+    "    'import subprocess, sys, time\\n'\n"
+    "    'from pathlib import Path\\n'\n"
+    "    \"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\\n\"\n"
+    "    'Path(sys.argv[1]).write_text(\"up\")\\n'\n"
+    "    'time.sleep(60)\\n'\n"
+    ")\n"
+    "process = subprocess.Popen(\n"
+    "    [sys.executable, '-c', rung, str(ready)],\n"
+    "    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,\n"
+    ")\n"
+    "while not ready.exists():\n"
+    "    time.sleep(0.01)\n"
+    "started = time.monotonic()\n"
+    "cli._stop_group(process)\n"
+    "print(time.monotonic() - started)\n"
+)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc and uses prctl, as the rest of the group check does")
+def test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period(tmp_path) -> None:
+    """A zombie is dead; counting it as still running costs every timeout the full wait.
+
+    `killpg(group, 0)` succeeds while an unreaped zombie is in the group. Under
+    a PID 1 that never waits, the rung's orphaned grandchild is one for good,
+    so the group is never seen to be gone and `_stop_group` always spent its
+    whole grace period, then SIGKILLed the dead. Measured on the real kernel
+    with a subreaper standing in for that PID 1.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _ORPHANS_THE_GRANDCHILD_TO_A_PARENT_THAT_NEVER_REAPS, str(tmp_path / "ready")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    elapsed = float(result.stdout.strip().splitlines()[-1])
+    assert elapsed < 2.0, f"waited {elapsed:.2f}s of a 3s grace period on a group with nothing left running"
 
 
 def test_a_final_rung_timeout_is_an_error_not_a_defended_page(make_request) -> None:

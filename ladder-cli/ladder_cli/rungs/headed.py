@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from . import RungContext, RungResult, zendriver
+from . import STOP_GRACE_S, RungContext, RungResult, zendriver
 
 # ladder.py:82 `headless=not headed` with headed True
 HEADLESS = False
@@ -33,9 +34,6 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
-# How long Xvfb gets after SIGTERM to remove its lock before it is killed. A
-# bound for a server that does not stop when asked, not a measured stop time.
-XVFB_STOP_TIMEOUT_S = 5.0
 
 
 class _DisplayCollision(RuntimeError):
@@ -47,6 +45,27 @@ def display_for_pid(pid: int) -> str:
     return f":{XVFB_DISPLAY_LOW + pid % (XVFB_DISPLAY_HIGH - XVFB_DISPLAY_LOW + 1)}"
 
 
+def _read_lock(lock: Path) -> tuple[int, int]:
+    """The owning uid and the pid inside an Xvfb lock, read without ever blocking.
+
+    /tmp is shared, so what sits at the lock path is not necessarily what Xvfb
+    wrote. A plain `open` of a FIFO there blocks until something writes to it,
+    which would hang the display search for good, and it follows a symlink to
+    whatever that points at. This opens non-blocking and without following a
+    link, and accepts only a regular file; anything else raises OSError, which
+    both callers read as "not a lock we can vouch for". A missing lock raises
+    FileNotFoundError. A file that does not hold a number raises ValueError.
+    """
+    fd = os.open(lock, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode):
+            raise OSError(f"{lock} is not a regular file")
+        return status.st_uid, int(os.read(fd, 64).strip())
+    finally:
+        os.close(fd)
+
+
 def _lock_is_held(lock: Path) -> bool:
     """Whether the server named in an Xvfb lock file is still there.
 
@@ -55,16 +74,15 @@ def _lock_is_held(lock: Path) -> bool:
     or a reboot does not take the slot. Anything that cannot be read as a
     live-or-dead pid counts as held: claiming a slot needs proof the server is
     dead, not the absence of proof. That includes a lock another user owns,
-    since /tmp is sticky and Xvfb could not remove it to start over, and a pid
-    too large to probe at all (`os.kill` raises OverflowError for those).
+    since /tmp is sticky and Xvfb could not remove it to start over, a lock that
+    is not a regular file, and a pid too large to probe at all (`os.kill` raises
+    OverflowError for those).
 
     Raises FileNotFoundError when there is no lock, so the caller decides what
     an absent lock means with one read rather than a stat and a read.
     """
     try:
-        with lock.open() as handle:
-            owner = os.fstat(handle.fileno()).st_uid
-            pid = int(handle.read().strip())
+        owner, pid = _read_lock(lock)
     except FileNotFoundError:
         raise
     except (OSError, ValueError):
@@ -161,7 +179,7 @@ def _stop_display(process: subprocess.Popen) -> None:
     """
     process.terminate()
     try:
-        process.wait(timeout=XVFB_STOP_TIMEOUT_S)
+        process.wait(timeout=STOP_GRACE_S)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
@@ -170,7 +188,7 @@ def _stop_display(process: subprocess.Popen) -> None:
 def _lock_names(lock: Path, pid: int) -> bool:
     """Whether the lock file currently holds this pid. Unreadable counts as no."""
     try:
-        return int(lock.read_text().strip()) == pid
+        return _read_lock(lock)[1] == pid
     except (OSError, ValueError):
         return False
 

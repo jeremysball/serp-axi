@@ -43,6 +43,11 @@ LINKS_JS = (
 # cap keeps one response bounded without hiding the links a caller came for.
 MAX_LINKS = 200
 MAX_LINK_TEXT = 200
+# How long anything this CLI stops (a rung's process group, the display server it
+# started) gets after SIGTERM to clean up before it is SIGKILLed. A bound for one
+# that does not stop when asked, not a measured stop time. One number, read by
+# both stops, so the two cannot drift apart.
+STOP_GRACE_S = 5.0
 
 
 class RungVerdict(Enum):

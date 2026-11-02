@@ -201,6 +201,22 @@ def test_cleanup_refuses_a_lock_without_proof_its_owner_is_dead(tmp_path: Path, 
     assert lock.is_symlink() or lock.is_file()
 
 
+@pytest.mark.parametrize("pid", [2**31, 10**20])
+def test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock(tmp_path: Path, pid: int) -> None:
+    """Review finding: `os.kill` raises OverflowError, not a lookup or permission error, past a pid_t.
+
+    That is a lock whose owner cannot be shown dead, the same answer the display
+    lock gives for it: refuse and say why, rather than crash unclassified or clear it.
+    """
+    lock = tmp_path / "SingletonLock"
+    lock.symlink_to(f"{socket.gethostname()}-{pid}")
+
+    with pytest.raises(RuntimeError, match="cannot be checked"):
+        jars.clear_locks(tmp_path)
+
+    assert lock.is_symlink(), "a lock whose owner could not be checked must stay"
+
+
 def test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner(tmp_path: Path) -> None:
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     lock = tmp_path / "SingletonLock"

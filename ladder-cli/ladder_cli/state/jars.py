@@ -249,7 +249,9 @@ def clear_locks(profile_dir: Path) -> int:
         os.kill(pid, 0)
     except ProcessLookupError:
         pass
-    except PermissionError as error:
+    except (PermissionError, OverflowError) as error:
+        # PermissionError: the pid exists and is someone else's. OverflowError: the pid
+        # does not fit a pid_t, so `os.kill` cannot be asked about it at all.
         raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
     else:
         try:

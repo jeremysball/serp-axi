@@ -107,14 +107,18 @@ live rung, or the response claims rung 5 ran when only rung 4 was attempted.
 at 90 to 95 seconds, not at 90.
 
 **Why:** the rung's process group gets SIGTERM first and up to
-`GROUP_STOP_GRACE_S` (5 seconds, `ladder_cli/cli.py`) to stop before SIGKILL.
-Rung 4 runs an Xvfb display server. On SIGTERM Xvfb removes its own
-`/tmp/.X<n>-lock` and socket; SIGKILL left both behind on every timeout. The wait ends as soon as the whole group is gone, so a rung that stops
-promptly costs nothing extra.
+`STOP_GRACE_S` (5 seconds, `ladder_cli/rungs/__init__.py`, the one value the
+group stop and the display stop both read) to stop before SIGKILL. Rung 4 runs
+an Xvfb display server. On SIGTERM Xvfb removes its own `/tmp/.X<n>-lock` and
+socket; SIGKILL left both behind on every timeout. The wait ends as soon as
+nothing in the group is still running, so a rung that stops promptly costs
+nothing extra. A zombie does not count as running: under a PID 1 that never
+waits, a rung's orphaned grandchild stays one for good.
 
 **When this becomes a real bug:** if a group that ignores SIGTERM survives the
-grace period, if the wait runs the full 5 seconds when nothing is left running,
-or if a timed-out rung 4 leaves a lock behind for a pid that is dead.
+grace period (including when a second SIGTERM lands during the wait), if the
+wait runs the full 5 seconds when nothing is left running, or if a timed-out
+rung 4 leaves a lock behind for a pid that is dead.
 
 ## A display slot with a lock we cannot prove dead is skipped, never reclaimed
 
@@ -125,8 +129,10 @@ fails with `no free Xvfb display between :200 and :699`.
 **Why:** a slot is taken back only when its lock names a pid that no longer
 exists and the lock belongs to the current user. A lock owned by someone else
 sits in a sticky `/tmp`, where we cannot remove it, so the slot is not ours to take.
-A lock that is empty, garbled, or names a pid too large to probe is skipped for
-the same reason: claiming a slot needs proof, not a lack of proof. A dead
+A lock that is empty, garbled, names a pid too large to probe, or is not a
+regular file at all (a FIFO, a symlink, a directory) is skipped for the same
+reason: claiming a slot needs proof, not a lack of proof. Such a lock is never
+opened in a way that waits, so a FIFO planted in `/tmp` cannot hang the search. A dead
 server's pid that the kernel has since handed to another process also reads as
 held. A lock for a dead pid that we own is reclaimed, because Xvfb starts over
 it (checked against a real server, over both a leftover lock and its socket).
@@ -135,6 +141,22 @@ it (checked against a real server, over both a leftover lock and its socket).
 skipped, since that is the leak this exists to close, or if the headed rung
 reports no free display while fewer than 500 slots hold a live, foreign, or
 unreadable lock.
+
+## Rung 4 treats a display as ready once its lock names the server
+
+**What you see:** `_await_display` returns when `/tmp/.X<n>-lock` holds the pid
+of the Xvfb we started. It never looks at the display's socket in
+`/tmp/.X11-unix`.
+
+**Why:** the lock is what a second server on the slot would fail on, and it is
+the file the server itself writes. On one real Xvfb (`:761`, 2026-11-02) the
+lock and the socket were first seen in the same 1 ms poll, 25 ms after start,
+and a settle of 1.5 seconds comes before the first poll. That is one run, so it
+shows no gap, not that none can exist.
+
+**When this becomes a real bug:** if a headed fetch fails to connect to its
+display right after `_await_display` returned, on a machine where the lock is
+there and the socket is not yet.
 
 ## Old working-directory profiles are not picked up automatically
 

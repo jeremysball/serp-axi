@@ -19,17 +19,13 @@ from pathlib import Path
 from typing import IO, Iterable, Sequence
 
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
-from .rungs import RUNGS, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
+from .rungs import RUNGS, STOP_GRACE_S, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
 
 # One budget, owned by the code that enforces it: a rung is stopped at 90s.
 # It used to be overridable from the environment, which made two owners of one
 # deadline (the parent already bounds the whole request) and a tunable no test
 # ever exercised. Tests now inject `timeout_s` instead of exporting an env var.
 DEFAULT_RUNG_TIMEOUT_S = 90.0
-# How long a rung's process group gets after SIGTERM to clean up before it is
-# SIGKILLed. A bound for a group that does not stop when asked, not a measured
-# stop time; it is spent on top of the budget only when something is still up.
-GROUP_STOP_GRACE_S = 5.0
 
 
 def _jar_args(ctx: RungContext | None) -> list[str]:
@@ -63,12 +59,42 @@ def _context_from(args: Sequence[str]) -> RungContext:
     return RungContext(jar_in=jar_in, jar_out=jar_out)
 
 
+def _has_live_member(group: int) -> bool:
+    """Whether any process in the group is still running, which a zombie is not.
+
+    Reads each process's state and group from /proc (`pid (comm) state ppid
+    pgrp ...`; the comm field can hold spaces and parentheses, so the fields are
+    taken after its last `)`). If no process could be read at all, the answer is
+    True: the caller's `killpg` already said something is there, and without a
+    way to look closer that stays the answer.
+    """
+    readable = False
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue  # it exited between the listing and the read
+        readable = True
+        if int(fields[2]) == group and fields[0] != "Z":
+            return True
+    return not readable
+
+
 def _group_exists(group: int) -> bool:
+    """Whether anything in the group is still running.
+
+    `killpg(group, 0)` also succeeds while an unreaped zombie is in the group. A
+    rung's grandchild orphaned to a PID 1 that never waits stays one for good,
+    which made every stop spend its whole grace period on a group with nothing
+    running in it.
+    """
     try:
         os.killpg(group, 0)
     except ProcessLookupError:
         return False
-    return True
+    return _has_live_member(group)
 
 
 def _stop_group(process: subprocess.Popen) -> None:
@@ -79,24 +105,32 @@ def _stop_group(process: subprocess.Popen) -> None:
     Whatever is still running when the grace period ends is killed. The group is
     waited on, not just the child: the child dying closes the pipes, which says
     nothing about a display server that is still removing its lock.
+
+    The kill is in a `finally` because `main` turns SIGTERM into SystemExit, which
+    can arrive during the wait. Without it, a second SIGTERM would leave the wait
+    with the SIGKILL unsent and a rung that ignored the first one still running.
     """
     group = process.pid
     try:
         os.killpg(group, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    deadline = time.monotonic() + GROUP_STOP_GRACE_S
-    while time.monotonic() < deadline:
-        process.poll()  # reaps the child, which a zombie keeps in the group until then
-        if not _group_exists(group):
-            break
-        time.sleep(0.02)
-    else:
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    process.communicate()
+    stopped = False
+    try:
+        deadline = time.monotonic() + STOP_GRACE_S
+        while time.monotonic() < deadline:
+            process.poll()  # reaps the child, which a zombie keeps in the group until then
+            if not _group_exists(group):
+                stopped = True
+                break
+            time.sleep(0.02)
+    finally:
+        if not stopped:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.communicate()
 
 
 def run_rung_isolated(

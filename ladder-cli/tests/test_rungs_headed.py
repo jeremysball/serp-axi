@@ -9,9 +9,11 @@ climb would fail here even if it reused every constant.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,7 @@ class FakeProcess:
         self.stderr = _Reader(stderr)
         self.argv: list[str] = []
         self.pid = FAKE_SERVER_PID
+        self.wait_timeouts: list[float | None] = []
 
     def terminate(self) -> None:
         self.terminated = True
@@ -40,6 +43,7 @@ class FakeProcess:
         self.killed = True
 
     def wait(self, timeout: float | None = None) -> None:
+        self.wait_timeouts.append(timeout)
         # A server that shrugs off SIGTERM only stops waiting on SIGKILL.
         if self.ignores_terminate and not self.killed and timeout is not None:
             raise subprocess.TimeoutExpired("Xvfb", timeout)
@@ -395,7 +399,7 @@ def test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket(monkeypatch, tm
     two counted as "no server" and hid a socket that was still in place. Reading
     once and treating "gone" as "no lock" settles the slot from the socket.
     """
-    gone = _GoneLock()
+    gone = _GoneLock(tmp_path / "no-such-lock")
     monkeypatch.setattr(
         headed,
         "Path",
@@ -408,16 +412,20 @@ def test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket(monkeypatch, tm
 
 
 class _GoneLock:
-    """A lock that `exists()` reports and then cannot be read, as when its server exits between."""
+    """A lock that `exists()` reports and then cannot be read, as when its server exits between.
+
+    `missing` is a path nothing exists at, so the real `os.open` in `_read_lock`
+    raises the FileNotFoundError a vanished lock would.
+    """
+
+    def __init__(self, missing: Path) -> None:
+        self._missing = missing
+
+    def __fspath__(self) -> str:
+        return str(self._missing)
 
     def exists(self) -> bool:
         return True
-
-    def read_text(self) -> str:
-        raise FileNotFoundError("gone")
-
-    def open(self, *args, **kwargs):
-        raise FileNotFoundError("gone")
 
 
 def test_a_lock_we_could_not_remove_is_treated_as_held(monkeypatch, tmp_path) -> None:
@@ -435,6 +443,91 @@ def test_a_lock_we_could_not_remove_is_treated_as_held(monkeypatch, tmp_path) ->
     monkeypatch.setattr(headed.os, "getuid", lambda: someone_else)
 
     assert headed.display_is_free(312) is False
+
+
+def _returns_within(seconds: float, call, unblock):
+    """Run `call` on a thread, so a hang is a failed assertion instead of a stuck suite.
+
+    `unblock` is run if the call is still going after `seconds`, to let the
+    thread finish; the caller asserts on the returned `(finished, value)`.
+    """
+    outcome: list = []
+    thread = threading.Thread(target=lambda: outcome.append(call()), daemon=True)
+    thread.start()
+    thread.join(seconds)
+    finished = not thread.is_alive()
+    if not finished:
+        unblock()
+        thread.join(5)
+    return finished, outcome[0] if outcome else None
+
+
+@pytest.fixture
+def cleanup():
+    """Closes whatever a test opened, even when it fails."""
+    with contextlib.ExitStack() as stack:
+        yield stack
+
+
+def _lock_that_is_not_a_plain_file(kind: str, tmp_path: Path, cleanup: contextlib.ExitStack) -> Path:
+    """`.X316-lock` as a FIFO, a symlink to a dead server's lock, or a directory.
+
+    "fifo-holding-a-dead-pid" is a FIFO with a dead server's pid already written
+    into it, which reads without blocking and parses as a number: only the
+    check that the lock is a regular file tells it from a real leftover.
+    """
+    lock = tmp_path / ".X316-lock"
+    if kind in ("fifo", "fifo-holding-a-dead-pid"):
+        os.mkfifo(lock)
+        if kind == "fifo-holding-a-dead-pid":
+            held_open = os.open(lock, os.O_RDWR)
+            cleanup.callback(os.close, held_open)
+            os.write(held_open, f"{_dead_pid():>10}\n".encode())
+    elif kind == "symlink":
+        target = tmp_path / "elsewhere"
+        target.write_text(f"{_dead_pid():>10}\n")
+        lock.symlink_to(target)
+    else:
+        lock.mkdir()
+    return lock
+
+
+@pytest.mark.parametrize("kind", ["fifo", "fifo-holding-a-dead-pid", "symlink", "directory"])
+def test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on(monkeypatch, tmp_path, cleanup, kind) -> None:
+    """Review finding: `/tmp` is shared, so what sits at the lock path is not ours to trust.
+
+    Another user can leave a FIFO there, and opening one for reading blocks until
+    something writes to it, which would hang the display search for good. A symlink
+    is read as whatever it points at. Neither is something Xvfb wrote, so neither
+    says its server is dead, and neither may be waited on.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    lock = _lock_that_is_not_a_plain_file(kind, tmp_path, cleanup)
+
+    finished, free = _returns_within(
+        2.0,
+        lambda: headed.display_is_free(316),
+        # opens the other end, which lets a reader that was stuck on a FIFO through
+        unblock=lambda: os.close(os.open(lock, os.O_WRONLY | os.O_NONBLOCK)),
+    )
+
+    assert finished, f"display_is_free blocked on a {kind} at the lock path"
+    assert free is False, f"a {kind} at the lock path was read as a dead server's lock"
+
+
+def test_readiness_does_not_wait_on_a_fifo_at_the_lock_path(monkeypatch, tmp_path, cleanup) -> None:
+    """`_await_display` reads the same file, so it has the same hang to avoid."""
+    _x11_files_under(monkeypatch, tmp_path)
+    lock = _lock_that_is_not_a_plain_file("fifo", tmp_path, cleanup)
+
+    finished, named = _returns_within(
+        2.0,
+        lambda: headed._lock_names(lock, FAKE_SERVER_PID),
+        unblock=lambda: os.close(os.open(lock, os.O_WRONLY | os.O_NONBLOCK)),
+    )
+
+    assert finished, "_lock_names blocked on a FIFO"
+    assert named is False
 
 
 def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monkeypatch, tmp_path) -> None:
@@ -456,24 +549,53 @@ def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monke
     headed._await_display(313, process)
 
 
-def _remove_own_leftovers(number: int, server_pid: int) -> None:
+def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp")) -> None:
     """Delete what a test server left on its slot, and nothing a stranger owns.
 
     The slot came from `free_display`, but another process can take it between
-    that and this cleanup. If the lock names anyone else, it and the socket are
-    theirs, and removing them would hand that server a dead display.
+    that and this cleanup. If the lock names anyone else, or is gone, the lock and
+    socket are theirs or already cleaned up: a server that stopped when asked
+    removes both itself, and one that was killed leaves the lock, so a missing
+    lock never means a leftover of ours. Deleting the socket then would hand a
+    server that took the slot in the meantime a dead display.
     """
-    lock = Path(f"/tmp/.X{number}-lock")
+    lock = root / f".X{number}-lock"
     try:
         owner = int(lock.read_text().strip())
-    except FileNotFoundError:
-        owner = server_pid
-    except ValueError:
+    except (FileNotFoundError, ValueError):
         return
     if owner != server_pid:
         return
     lock.unlink(missing_ok=True)
-    Path(f"/tmp/.X11-unix/X{number}").unlink(missing_ok=True)
+    (root / ".X11-unix" / f"X{number}").unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    ("lock_text", "removes_files"),
+    [
+        (f"{FAKE_SERVER_PID:>10}\n", True),  # ours: a server that was killed leaves exactly this
+        (f"{FAKE_SERVER_PID + 1:>10}\n", False),  # a stranger took the slot
+        ("not a pid", False),
+        (None, False),  # no lock: a clean stop removed both, so there is nothing of ours
+    ],
+)
+def test_test_cleanup_removes_a_slot_only_when_its_lock_still_names_our_server(tmp_path, lock_text, removes_files) -> None:
+    """The cleanup of the real-Xvfb tests must not delete a server that took the slot after ours.
+
+    The case that matters is no lock at all: a socket beside it belongs to
+    whoever started since, and removing it hands that server a dead display.
+    """
+    (tmp_path / ".X11-unix").mkdir()
+    socket_path = tmp_path / ".X11-unix" / "X315"
+    socket_path.write_text("")
+    lock = tmp_path / ".X315-lock"
+    if lock_text is not None:
+        lock.write_text(lock_text)
+
+    _remove_own_leftovers(315, FAKE_SERVER_PID, root=tmp_path)
+
+    assert not socket_path.exists() if removes_files else socket_path.exists()
+    assert not lock.exists() if removes_files else lock.exists() == (lock_text is not None)
 
 
 def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
@@ -595,7 +717,7 @@ def test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period(monkeyp
     monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
     monkeypatch.setattr(headed, "display_is_free", lambda number: True)
     monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
-    monkeypatch.setattr(headed, "XVFB_STOP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(headed, "STOP_GRACE_S", 0.01)
     monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"title": "", "text": "", "status": None})
 
     headed.fetch("https://example.com/")
@@ -603,6 +725,29 @@ def test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period(monkeyp
     assert process.terminated, "it is asked to stop first"
     assert process.killed, "and killed when it does not"
     assert process.waited, "and reaped either way"
+
+
+def test_the_display_and_the_rung_group_are_given_one_grace_period(monkeypatch) -> None:
+    """Review finding: two files each owned a 5 second constant for the same wait.
+
+    `rungs.STOP_GRACE_S` says it is read by both stops. That is checked from both
+    ends: the two modules hold the one value, and the display stop waits for the
+    value its module holds, not a number of its own.
+    """
+    from ladder_cli import cli, rungs
+
+    assert headed.STOP_GRACE_S == cli.STOP_GRACE_S == rungs.STOP_GRACE_S
+
+    process = FakeProcess()
+    monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
+    monkeypatch.setattr(headed, "display_is_free", lambda number: True)
+    monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
+    monkeypatch.setattr(headed, "STOP_GRACE_S", 7.25)
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"title": "", "text": "", "status": None})
+
+    headed.fetch("https://example.com/")
+
+    assert process.wait_timeouts == [7.25]
 
 
 def test_the_turnstile_click_is_not_restated() -> None:
