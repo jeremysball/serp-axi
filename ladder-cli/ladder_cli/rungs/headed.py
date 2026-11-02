@@ -33,6 +33,9 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
+# How long Xvfb gets after SIGTERM to remove its lock before it is killed. It
+# exits in milliseconds when asked; this only bounds a server that is wedged.
+XVFB_STOP_TIMEOUT_S = 5.0
 
 
 class _DisplayCollision(RuntimeError):
@@ -44,9 +47,41 @@ def display_for_pid(pid: int) -> str:
     return f":{XVFB_DISPLAY_LOW + pid % (XVFB_DISPLAY_HIGH - XVFB_DISPLAY_LOW + 1)}"
 
 
+def _lock_is_held(lock: Path) -> bool:
+    """Whether the server named in an Xvfb lock file is still there.
+
+    The lock holds the server's pid. Xvfb itself starts over a lock whose pid is
+    gone, so a leftover from a SIGKILL, a crash or a reboot does not take the
+    slot. Anything that cannot be read as a live-or-dead pid counts as held:
+    claiming a slot needs proof the server is dead, not the absence of proof.
+    """
+    try:
+        pid = int(lock.read_text().strip())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def display_is_free(number: int) -> bool:
-    """Xvfb's own lock, which is what a second server on the slot would fail on."""
-    return not (Path(f"/tmp/.X{number}-lock").exists() or Path(f"/tmp/.X11-unix/X{number}").exists())
+    """Xvfb's own lock, which is what a second server on the slot would fail on.
+
+    A lock only counts while its server is alive; a socket with no lock at all
+    still counts, since nothing says whose it is.
+    """
+    lock = Path(f"/tmp/.X{number}-lock")
+    if lock.exists():
+        return not _lock_is_held(lock)
+    return not Path(f"/tmp/.X11-unix/X{number}").exists()
 
 
 def free_display(preferred: str) -> int:
@@ -103,11 +138,25 @@ def display(url: str, options: dict[str, Any], ctx: RungContext | None = None) -
                 os.environ.pop("DISPLAY", None)
             else:
                 os.environ["DISPLAY"] = previous
-            process.kill()
-            process.wait()
+            _stop_display(process)
             if process.stderr is not None:
                 process.stderr.close()
     raise RuntimeError("all Xvfb display allocations collided")
+
+
+def _stop_display(process: subprocess.Popen) -> None:
+    """Ask Xvfb to stop, so it removes its own lock and socket, and reap it.
+
+    SIGKILL gives it no chance to, and every kill left one lock behind until
+    the 500 slots ran out. The kill stays as the answer to a server that has
+    not stopped within the grace period.
+    """
+    process.terminate()
+    try:
+        process.wait(timeout=XVFB_STOP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _await_display(number: int, process: subprocess.Popen) -> None:

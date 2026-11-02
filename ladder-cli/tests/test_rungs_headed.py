@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,17 +20,25 @@ from ladder_cli.rungs import RungVerdict, headed, zendriver
 
 
 class FakeProcess:
-    def __init__(self, exit_code: int | None = None, stderr: bytes = b"") -> None:
+    def __init__(self, exit_code: int | None = None, stderr: bytes = b"", ignores_terminate: bool = False) -> None:
+        self.terminated = False
         self.killed = False
         self.waited = False
+        self.ignores_terminate = ignores_terminate
         self.exit_code = exit_code
         self.stderr = _Reader(stderr)
         self.argv: list[str] = []
 
+    def terminate(self) -> None:
+        self.terminated = True
+
     def kill(self) -> None:
         self.killed = True
 
-    def wait(self, *args: object) -> None:
+    def wait(self, timeout: float | None = None) -> None:
+        # A server that shrugs off SIGTERM only stops waiting on SIGKILL.
+        if self.ignores_terminate and not self.killed and timeout is not None:
+            raise subprocess.TimeoutExpired("Xvfb", timeout)
         self.waited = True
 
     def poll(self) -> int | None:
@@ -126,7 +135,8 @@ def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypa
         assert len(attempts) >= 2
         assert all(process.poll() is not None and process.stderr.closed for process in attempts)
     finally:
-        owner.kill()
+        # SIGTERM, not kill: the server removes its own lock, which a kill would leave behind
+        owner.terminate()
         owner.wait(timeout=10)
         owner.stderr.close()
 
@@ -257,7 +267,8 @@ def test_the_display_is_torn_down_and_restored_even_when_the_climb_fails(monkeyp
     with pytest.raises(AssertionError):
         headed.fetch("https://example.com/")
 
-    assert process.killed, "the display is torn down"
+    assert process.terminated, "the display is torn down"
+    assert not process.killed, "with SIGTERM, which lets Xvfb remove its own lock"
     assert process.waited, "and reaped, so it is not left as an unreaped child"
     assert process.stderr.closed, "the Xvfb stderr pipe is closed when the climb fails"
     assert os.environ["DISPLAY"] == "kept-for-the-next-caller", "the caller's display is restored"
@@ -290,7 +301,8 @@ def test_the_display_is_reaped_on_success_too(monkeypatch) -> None:
     assert seen["url"] == "https://example.com/"
     assert seen["options"] == headed.launch_options()
     assert seen["display"] == f":{free_slot(process.argv)}", "the climb sees the display it was given"
-    assert process.killed and process.waited
+    assert process.terminated and process.waited
+    assert not process.killed, "a display that stops when asked is not killed"
     assert process.stderr.closed, "the Xvfb stderr pipe is closed after a successful climb"
     assert "DISPLAY" not in os.environ, "nothing is left advertising a killed display"
 
@@ -298,6 +310,111 @@ def test_the_display_is_reaped_on_success_too(monkeypatch) -> None:
 def free_slot(argv: list[str]) -> int:
     """Pull the slot back out of the argv the helper passed to Xvfb."""
     return int(argv[1].lstrip(":"))
+
+
+def _dead_pid() -> int:
+    """A pid that belonged to a real process which has since exited and been reaped."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _x11_files_under(monkeypatch, tmp_path: Path) -> None:
+    """Point the lock and socket paths at tmp_path: `.X<n>-lock` and `X<n>`, by name."""
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
+
+
+def test_a_slot_is_free_once_the_server_that_locked_it_is_gone(monkeypatch, tmp_path) -> None:
+    """A SIGKILL, a crash or a reboot leaves the lock behind; Xvfb reclaims such a slot itself.
+
+    So a lock only counts while the pid written in it is alive. Checking that
+    the file exists, which this used to do, burns a slot per dead server.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X300-lock").write_text(f"{os.getpid():>10}\n")
+    (tmp_path / ".X301-lock").write_text(f"{_dead_pid():>10}\n")
+
+    assert headed.display_is_free(300) is False, "a lock held by a live process is respected"
+    assert headed.display_is_free(301) is True, "a lock left by a dead process is not"
+
+
+def test_a_lock_that_does_not_name_a_pid_is_treated_as_held(monkeypatch, tmp_path) -> None:
+    """Free needs proof the server is dead; a lock we cannot read proves nothing."""
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X302-lock").write_text("not a pid\n")
+    (tmp_path / ".X303-lock").write_text("")
+
+    assert headed.display_is_free(302) is False
+    assert headed.display_is_free(303) is False
+    assert headed.display_is_free(304) is True, "with no lock and no socket the slot is free"
+
+
+def test_a_socket_with_no_lock_still_holds_its_slot(monkeypatch, tmp_path) -> None:
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / "X305").write_text("")
+
+    assert headed.display_is_free(305) is False
+    assert headed.display_is_free(306) is True
+
+
+def test_a_slot_whose_real_xvfb_was_killed_is_free_again() -> None:
+    """The finding itself: `display_is_free` said False with no Xvfb alive."""
+    number = headed.free_display(headed.display_for_pid(os.getpid()))
+    lock, socket = Path(f"/tmp/.X{number}-lock"), Path(f"/tmp/.X11-unix/X{number}")
+    server = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
+    try:
+        headed._await_display(number, server)
+        assert headed.display_is_free(number) is False, "a running server holds its slot"
+        server.kill()
+        server.wait(timeout=10)
+        assert lock.exists(), "precondition: SIGKILL leaves the lock behind"
+        assert headed.display_is_free(number) is True
+    finally:
+        server.kill()
+        server.wait(timeout=10)
+        server.stderr.close()
+        lock.unlink(missing_ok=True)
+        socket.unlink(missing_ok=True)
+
+
+def test_a_real_display_leaves_no_lock_behind_when_it_is_torn_down(monkeypatch) -> None:
+    """The lock is Xvfb's to remove, and SIGKILL denies it the chance.
+
+    Killing the server on every exit left one lock per headed fetch until the
+    500 slots ran out, at which point rung 4 failed with "no free Xvfb display".
+    """
+    seen: dict = {}
+
+    def climb(url: str, options: dict, ctx=None) -> dict:
+        number = os.environ["DISPLAY"].lstrip(":")
+        seen["lock"] = Path(f"/tmp/.X{number}-lock")
+        seen["socket"] = Path(f"/tmp/.X11-unix/X{number}")
+        seen["lock_while_up"] = seen["lock"].exists()
+        return {"title": "", "text": "", "status": None}
+
+    monkeypatch.setattr(zendriver, "climb", climb)
+
+    headed.fetch("https://example.com/")
+
+    assert seen["lock_while_up"], "the display has a lock while it is up"
+    assert not seen["lock"].exists(), "and none once it has been torn down"
+    assert not seen["socket"].exists(), "nor a socket"
+
+
+def test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period(monkeypatch) -> None:
+    """Asking first must not mean waiting forever on a server that will not stop."""
+    process = FakeProcess(ignores_terminate=True)
+    monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
+    monkeypatch.setattr(headed, "display_is_free", lambda number: True)
+    monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
+    monkeypatch.setattr(headed, "XVFB_STOP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"title": "", "text": "", "status": None})
+
+    headed.fetch("https://example.com/")
+
+    assert process.terminated, "it is asked to stop first"
+    assert process.killed, "and killed when it does not"
+    assert process.waited, "and reaped either way"
 
 
 def test_the_turnstile_click_is_not_restated() -> None:

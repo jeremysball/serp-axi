@@ -279,6 +279,42 @@ BELIEFS: list[Belief] = [
         test="tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",
         why="Chrome flushes cookies lazily and stop() kills it first, which is why the jar exists.",
     ),
+    # ---- rung 4 gives its virtual display back ----
+    Belief(
+        name="a display slot whose server is dead is free again",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except ProcessLookupError:\n        return False\n",
+        new="    except ProcessLookupError:\n        return True\n",
+        test="tests/test_rungs_headed.py::test_a_slot_is_free_once_the_server_that_locked_it_is_gone",
+        why="A lock left by a killed Xvfb takes its slot for good, and 500 headed fetches later rung 4 finds no display.",
+    ),
+    Belief(
+        name="a display lock that does not name a pid is treated as held",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except (OSError, ValueError):\n        return True\n",
+        new="    except (OSError, ValueError):\n        return False\n",
+        test="tests/test_rungs_headed.py::test_a_lock_that_does_not_name_a_pid_is_treated_as_held",
+        why="Claiming a slot needs proof its server is dead; a lock we cannot read could be a live server mid-write.",
+    ),
+    Belief(
+        name="a display is asked to stop before it is killed",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    process.terminate()\n    try:",
+        new="    process.kill()\n    try:",
+        # A fake process, not the real-Xvfb test: this gate runs under a read-only
+        # bwrap root where Xvfb cannot write /tmp/.X<n>-lock, so a real server
+        # never comes up. The real-server version runs in the ordinary suite.
+        test="tests/test_rungs_headed.py::test_the_display_is_reaped_on_success_too",
+        why="Xvfb removes its own lock and socket on SIGTERM; SIGKILL leaves both behind on every fetch.",
+    ),
+    Belief(
+        name="a display that ignores the request to stop is killed",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except subprocess.TimeoutExpired:\n        process.kill()\n        process.wait()",
+        new="    except subprocess.TimeoutExpired:\n        pass",
+        test="tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",
+        why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
+    ),
 ]
 
 
