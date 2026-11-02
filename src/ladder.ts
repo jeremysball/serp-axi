@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StoredConfig } from "./config.ts";
 import { boundedDetail, SerpAxiError } from "./errors.ts";
+import { firstDefined } from "./option-sources.ts";
 
 export type LadderVerdict = "ok" | "dead" | "blocked" | "error";
 
@@ -261,11 +262,8 @@ export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   // names where it came from, so an error points at the spelling the caller
   // actually wrote rather than saying "from env" and covering three places.
   const axisLayer = (key: AxisKey): { raw: string | undefined; source: AxisSource | null } => {
-    const layers = [readRaw(sources, key), bundleMember(bundle, key, profile), readConfig(sources, key)];
-    for (const layer of layers) {
-      if (layer.value !== undefined) return { raw: layer.value, source: layer.source };
-    }
-    return { raw: undefined, source: null };
+    const picked = firstDefined([readRaw(sources, key), bundleMember(bundle, key, profile), readConfig(sources, key)]);
+    return { raw: picked?.value, source: picked?.source ?? null };
   };
 
   for (const key of VALUE_KEYS) {

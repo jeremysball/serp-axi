@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SerpAxiError } from "./errors.ts";
-import { parseIntegerSetting, pickOption, settingExamples, type IntegerSettingShape } from "./option-sources.ts";
+import { firstDefined, parseIntegerSetting, pickOption, settingExamples, type IntegerSettingShape } from "./option-sources.ts";
 
 const shape: IntegerSettingShape = {
   names: { flag: "--wait-ms", env: "SERP_AXI_WAIT_MS", config: "waitMs" },
@@ -34,6 +34,28 @@ test("pickOption counts only undefined as unset, so an empty string, null or 0 s
   assert.deepEqual(pickOption(undefined, "", "c"), { value: "", source: "env" });
   assert.deepEqual(pickOption<unknown>(undefined, undefined, null), { value: null, source: "config" });
   assert.deepEqual(pickOption<unknown>(undefined, undefined, 0), { value: 0, source: "config" });
+});
+
+test("firstDefined returns the first layer that has a value, with the source it carries", () => {
+  assert.deepEqual(
+    firstDefined([
+      { value: undefined, source: "profile" },
+      { value: 7, source: "config" },
+      { value: 9, source: "default" },
+    ]),
+    { value: 7, source: "config" },
+  );
+});
+
+test("firstDefined returns undefined when no layer has a value, or there are none", () => {
+  assert.equal(firstDefined([{ value: undefined, source: "a" }]), undefined);
+  assert.equal(firstDefined<number, string>([]), undefined);
+});
+
+test("firstDefined counts only undefined as unset, so null, an empty string and 0 still win", () => {
+  assert.deepEqual(firstDefined<unknown, string>([{ value: null, source: "a" }, { value: 1, source: "b" }]), { value: null, source: "a" });
+  assert.deepEqual(firstDefined<unknown, string>([{ value: "", source: "a" }]), { value: "", source: "a" });
+  assert.deepEqual(firstDefined<unknown, string>([{ value: 0, source: "a" }]), { value: 0, source: "a" });
 });
 
 test("settingExamples spells one sample value in each home's own syntax", () => {

@@ -27,17 +27,33 @@ export function settingExamples(names: SettingNames, text: string, json: string 
   return { flag: `${names.flag} ${text}`, env: `${names.env}=${text}`, config: `"${names.config}": ${json}` };
 }
 
+/** One place a setting may come from: the value it holds, if any, and a label for where that is. */
+export interface Layer<T, S> {
+  value: T | undefined;
+  source: S;
+}
+
 /**
- * Flag > env > config. Returns the winning value and which home it came from, or
- * undefined when none of them spoke. Only `undefined` counts as unset: an empty
- * string, `null` and `0` are values, so the validator sees them and says why they
- * are wrong. A caller that wants `null` to mean unset must test for it first.
+ * The first layer that holds a value, with its source, or undefined when none
+ * does. Only `undefined` counts as unset: an empty string, `null` and `0` are
+ * values, so a validator sees them and says why they are wrong. A caller that
+ * wants `null` to mean unset must turn it into `undefined` before the layer
+ * is built.
  */
-export function pickOption<T>(flag: T | undefined, env: T | undefined, config: T | undefined): PickedOption<T> | undefined {
-  if (flag !== undefined) return { value: flag, source: "flag" };
-  if (env !== undefined) return { value: env, source: "env" };
-  if (config !== undefined) return { value: config, source: "config" };
+export function firstDefined<T, S>(layers: readonly Layer<T, S>[]): { value: T; source: S } | undefined {
+  for (const layer of layers) {
+    if (layer.value !== undefined) return { value: layer.value, source: layer.source };
+  }
   return undefined;
+}
+
+/** Flag > env > config. Returns the winning value and which home it came from, or undefined when none of them spoke. */
+export function pickOption<T>(flag: T | undefined, env: T | undefined, config: T | undefined): PickedOption<T> | undefined {
+  return firstDefined<T, OptionSource>([
+    { value: flag, source: "flag" },
+    { value: env, source: "env" },
+    { value: config, source: "config" },
+  ]);
 }
 
 /** How an integer setting is written and what to call it when the value is wrong. */
