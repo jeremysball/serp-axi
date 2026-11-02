@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from ladder_cli import cli
+from ladder_cli import cli, procfs
 from ladder_cli.rungs import RungResult, RungVerdict
 
 
@@ -319,6 +319,170 @@ def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_t
                 os.waitpid(group, 0)
             except (ProcessLookupError, ChildProcessError):
                 pass
+
+
+def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(tmp_path, monkeypatch) -> None:
+    """Review finding: the first `killpg` sat outside the `try` that holds the kill.
+
+    `main` turns SIGTERM into SystemExit, which can surface in that very call.
+    Then nothing had been sent and nothing was left to send it, and a rung that
+    ignores SIGTERM outlived the CLI that was stopping it. The stand-in raises
+    from the first SIGTERM before it reaches the group, which is where the
+    handler's exception would surface. The kill reaches the real group.
+    """
+    ready = tmp_path / "ready"
+    child = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    real_killpg = os.killpg
+
+    def interrupted(group: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            raise SystemExit(128 + 15)
+        real_killpg(group, sig)
+
+    group = None
+    try:
+        monkeypatch.setattr(cli.os, "killpg", interrupted)
+        with pytest.raises(SystemExit):
+            cli.run_rung_isolated(
+                "http",
+                "https://example.com/article",
+                timeout_s=1.5,
+                argv=[sys.executable, "-c", child, str(ready)],
+            )
+        monkeypatch.undo()
+        assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
+        group = int(ready.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(group, 0)
+    finally:
+        if group is not None:
+            # a failure above leaves the child running; this is the test's own cleanup, not the code's
+            try:
+                os.killpg(group, signal.SIGKILL)
+                os.waitpid(group, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
+
+def _fake_proc(root, entries: dict[int, tuple[str, int] | None]) -> None:
+    """A /proc under `root`: pid -> (state, group), or None for a stat file that cannot be read.
+
+    Reading a directory raises IsADirectoryError, which is an OSError that is
+    neither "no such file" nor "no such process": the unreadable case without
+    needing a user the test does not have.
+    """
+    for pid, entry in entries.items():
+        (root / str(pid)).mkdir()
+        if entry is None:
+            (root / str(pid) / "stat").mkdir()
+        else:
+            state, pgrp = entry
+            (root / str(pid) / "stat").write_text(f"{pid} (name) {state} 1 {pgrp} {pgrp} 0\n")
+
+
+def _sleeper_in_its_own_group() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+
+def _reaped_pid() -> int:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def test_a_group_is_taken_to_be_running_when_proc_cannot_be_listed(monkeypatch, tmp_path) -> None:
+    """Review finding: `iterdir()` raised, so a stop on a host without /proc crashed instead of waiting.
+
+    `killpg(group, 0)` had already said something is in the group; with no way
+    to look closer that stays the answer, and the grace period then decides.
+    """
+    child = _sleeper_in_its_own_group()
+    try:
+        monkeypatch.setattr(procfs, "PROC", tmp_path / "no-such-proc")
+
+        assert cli._group_exists(child.pid) is True
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+
+
+def test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone(monkeypatch, tmp_path) -> None:
+    """Review finding: any OSError on the read counted as "it exited", so SIGKILL could be skipped.
+
+    A process that cannot be read cannot be shown to be a zombie, so if its
+    group is ours it counts as running. Its group comes from `getpgid`, which
+    does not need the read to succeed.
+    """
+    child = _sleeper_in_its_own_group()
+    try:
+        _fake_proc(tmp_path, {child.pid: None})
+        monkeypatch.setattr(procfs, "PROC", tmp_path)
+
+        assert cli._has_live_member(child.pid) is True
+    finally:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+
+
+def test_an_unreadable_process_in_another_group_does_not_keep_a_group_running(monkeypatch, tmp_path) -> None:
+    """The other half of the one above: `hidepid=1` hides other users' processes, and they are not ours."""
+    gone = _reaped_pid()
+    _fake_proc(tmp_path, {os.getpid(): None, 1: ("S", 1)})
+    monkeypatch.setattr(procfs, "PROC", tmp_path)
+
+    assert cli._has_live_member(gone) is False
+
+
+def test_a_group_is_taken_to_be_running_when_nothing_in_proc_could_be_classified(monkeypatch, tmp_path) -> None:
+    """A scan that read nothing has not shown the group gone.
+
+    The listing works but every entry in it is either empty or unreadable and
+    already exited, so no process was ever classified as in the group or out of
+    it. `killpg` said something is there, so the answer stays "running".
+    """
+    gone = _reaped_pid()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    _fake_proc(unreadable, {gone: None})
+
+    for root in (empty, unreadable):
+        monkeypatch.setattr(procfs, "PROC", root)
+        assert cli._scan_for_live_member(gone) is True, root.name
+
+
+def test_a_group_is_not_called_stopped_on_one_empty_scan_alone(monkeypatch) -> None:
+    """Review finding: a child forked after /proc was listed is missed by that scan.
+
+    The scan cannot be made atomic, so the answer "nothing is running" has to
+    survive a second scan that starts after the first one ended: a child
+    forked during the first is in the second's listing. The stand-in is a scan
+    that misses it once; the race itself cannot be reproduced on demand.
+    """
+    scans = iter([False, True])
+    monkeypatch.setattr(cli, "_scan_for_live_member", lambda group: next(scans))
+
+    assert cli._has_live_member(4242) is True
+
+
+def test_a_group_is_stopped_when_two_scans_in_a_row_find_nothing_running(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def empty(group: int) -> bool:
+        calls.append(group)
+        return False
+
+    monkeypatch.setattr(cli, "_scan_for_live_member", empty)
+
+    assert cli._has_live_member(4242) is False
+    assert calls == [4242, 4242]
 
 
 _ORPHANS_THE_GRANDCHILD_TO_A_PARENT_THAT_NEVER_REAPS = (

@@ -379,6 +379,23 @@ def test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held(monkeypatch, 
     assert headed.display_is_free(308) is False
 
 
+def test_a_lock_longer_than_xvfb_writes_is_treated_as_held(monkeypatch, tmp_path) -> None:
+    """Review finding: a bounded read of 64 bytes took the number at the front of a longer file.
+
+    Xvfb writes `"%10d\\n"`, which is eleven bytes (read off a real server's
+    lock). A file past the read bound is not one it wrote, so the number at its
+    front names no server, and a dead pid there used to free a slot whose lock
+    was somebody else's file. Right-aligned in ten columns, then a newline,
+    then 100 spaces and text: the first 64 bytes parse as a dead pid.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X317-lock").write_text(f"{_dead_pid():>10}\n" + " " * 100 + "garbage")
+    (tmp_path / ".X318-lock").write_text(f"{_dead_pid():>10}\n")
+
+    assert headed.display_is_free(317) is False, "a lock past what Xvfb writes is not read as a pid"
+    assert headed.display_is_free(318) is True, "the same pid in the file Xvfb writes is a dead server's"
+
+
 def test_a_lock_whose_server_we_may_not_signal_is_treated_as_held(monkeypatch, tmp_path) -> None:
     """PermissionError from `os.kill` means the pid exists and belongs to someone else."""
     _x11_files_under(monkeypatch, tmp_path)
@@ -550,7 +567,7 @@ def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monke
 
 
 def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp")) -> None:
-    """Delete what a test server left on its slot, and nothing a stranger owns.
+    """Delete what a test server left on its slot, unless the lock says it is not ours.
 
     The slot came from `free_display`, but another process can take it between
     that and this cleanup. If the lock names anyone else, or is gone, the lock and
@@ -558,11 +575,19 @@ def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp"
     removes both itself, and one that was killed leaves the lock, so a missing
     lock never means a leftover of ours. Deleting the socket then would hand a
     server that took the slot in the meantime a dead display.
+
+    The lock is read the way the code under test reads it (`headed._read_lock`),
+    so a FIFO or a symlink another user left at that path is not waited on or
+    followed. One window stays: a stranger who replaces the lock between the read
+    and the unlink loses it. Closing that needs the check and the removal to be
+    one step, which a file system does not offer without renaming a file that
+    is not ours; two syscalls on a slot `free_display` had just found free is the
+    residue, and it is why this is test cleanup and not a library function.
     """
     lock = root / f".X{number}-lock"
     try:
-        owner = int(lock.read_text().strip())
-    except (FileNotFoundError, ValueError):
+        owner = headed._read_lock(lock)[1]
+    except (OSError, ValueError):
         return
     if owner != server_pid:
         return
@@ -596,6 +621,44 @@ def test_test_cleanup_removes_a_slot_only_when_its_lock_still_names_our_server(t
 
     assert not socket_path.exists() if removes_files else socket_path.exists()
     assert not lock.exists() if removes_files else lock.exists() == (lock_text is not None)
+
+
+def test_test_cleanup_does_not_wait_on_a_fifo_at_the_lock_path(tmp_path, cleanup) -> None:
+    """Review finding: the cleanup read the lock with `read_text`, which blocks on a FIFO.
+
+    A hung cleanup holds the whole suite, and it ran in a `finally` after the
+    test had already failed, which is when the reason for the failure matters most.
+    """
+    (tmp_path / ".X11-unix").mkdir()
+    socket_path = tmp_path / ".X11-unix" / "X319"
+    socket_path.write_text("")
+    lock = tmp_path / ".X319-lock"
+    os.mkfifo(lock)
+
+    finished, _ = _returns_within(
+        2.0,
+        lambda: _remove_own_leftovers(319, FAKE_SERVER_PID, root=tmp_path),
+        unblock=lambda: os.close(os.open(lock, os.O_WRONLY | os.O_NONBLOCK)),
+    )
+
+    assert finished, "the cleanup blocked on a FIFO at the lock path"
+    assert lock.exists() and socket_path.exists(), "what is not a lock of ours is left alone"
+
+
+def test_test_cleanup_does_not_follow_a_symlink_at_the_lock_path(tmp_path) -> None:
+    """A link to a file holding our server's pid is not our lock: the link is not Xvfb's."""
+    (tmp_path / ".X11-unix").mkdir()
+    socket_path = tmp_path / ".X11-unix" / "X320"
+    socket_path.write_text("")
+    target = tmp_path / "elsewhere"
+    target.write_text(f"{FAKE_SERVER_PID:>10}\n")
+    lock = tmp_path / ".X320-lock"
+    lock.symlink_to(target)
+
+    _remove_own_leftovers(320, FAKE_SERVER_PID, root=tmp_path)
+
+    assert lock.is_symlink(), "the link was removed"
+    assert socket_path.exists(), "the socket beside a link that is not our lock was removed"
 
 
 def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:

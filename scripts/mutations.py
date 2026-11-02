@@ -282,9 +282,9 @@ BELIEFS: list[Belief] = [
     # ---- rung 4 gives its virtual display back ----
     Belief(
         name="a display slot whose server is dead is free again",
-        path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except ProcessLookupError:\n        return False\n",
-        new="    except ProcessLookupError:\n        return True\n",
+        path=LADDER / "ladder_cli/procfs.py",
+        old="    except ProcessLookupError:\n        return Liveness.GONE\n",
+        new="    except ProcessLookupError:\n        return Liveness.EXISTS\n",
         test="tests/test_rungs_headed.py::test_a_slot_is_free_once_the_server_that_locked_it_is_gone",
         why="A lock left by a killed Xvfb takes its slot for good, and 500 headed fetches later rung 4 finds no display.",
     ),
@@ -316,12 +316,20 @@ BELIEFS: list[Belief] = [
         why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
     ),
     Belief(
-        name="a display lock naming a pid too large to probe is treated as held",
+        name="a display lock whose owner cannot be asked about is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except (PermissionError, OverflowError):\n        return True\n",
-        new="    except PermissionError:\n        return True\n",
+        old="    return procfs.probe(pid) is not procfs.Liveness.GONE\n",
+        new="    return procfs.probe(pid) is procfs.Liveness.EXISTS\n",
         test="tests/test_rungs_headed.py::test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held",
-        why="os.kill raises OverflowError for a pid past 2**31; one such lock would crash every headed fetch's slot search.",
+        why="Only a pid that is shown to be gone frees a slot; one that cannot be asked about (too large for a pid_t, or someone else's) is not shown to be anything.",
+    ),
+    Belief(
+        name="a display lock longer than Xvfb writes is not read as a pid",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="        text = os.read(fd, LOCK_MAX_BYTES + 1)\n",
+        new="        text = os.read(fd, LOCK_MAX_BYTES)\n",
+        test="tests/test_rungs_headed.py::test_a_lock_longer_than_xvfb_writes_is_treated_as_held",
+        why="A read capped at the bound cannot tell a file of exactly that length from a longer one, so the number at the front of a longer file passed for a server's pid.",
     ),
     Belief(
         name="a display lock another user owns is treated as held",
@@ -383,10 +391,26 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a rung's process group is asked to stop before it is killed",
         path=LADDER / "ladder_cli/cli.py",
-        old="        os.killpg(group, signal.SIGTERM)\n",
-        new="        os.killpg(group, signal.SIGKILL)\n",
+        old="            os.killpg(group, signal.SIGTERM)\n",
+        new="            os.killpg(group, signal.SIGKILL)\n",
         test="tests/test_cli.py::test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first",
         why="Xvfb leaves its lock file behind on SIGKILL, so every rung 4 timeout burned a display slot for good.",
+    ),
+    Belief(
+        name="the first request to stop is inside the try that holds the kill",
+        path=LADDER / "ladder_cli/cli.py",
+        old=(
+            "    try:\n        try:\n            os.killpg(group, signal.SIGTERM)\n"
+            "        except ProcessLookupError:\n            pass\n"
+            "        deadline = time.monotonic() + STOP_GRACE_S\n"
+        ),
+        new=(
+            "    try:\n        os.killpg(group, signal.SIGTERM)\n"
+            "    except ProcessLookupError:\n        pass\n"
+            "    try:\n        deadline = time.monotonic() + STOP_GRACE_S\n"
+        ),
+        test="tests/test_cli.py::test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it",
+        why="`main` turns SIGTERM into SystemExit, which can surface in the first killpg; outside the try, nothing is left to send the SIGKILL.",
     ),
     Belief(
         name="a rung is not done until everything it started has stopped",
@@ -420,14 +444,79 @@ BELIEFS: list[Belief] = [
         test="tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
         why="Under a PID 1 that never waits, an orphaned grandchild is a zombie for good; counting it makes every stop spend the whole grace period.",
     ),
+    Belief(
+        name="a zombie in the group does not count as running",
+        path=LADDER / "ladder_cli/cli.py",
+        old='        if stat.pgrp == group and stat.state != "Z":\n',
+        new="        if stat.pgrp == group:\n",
+        test="tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
+        why="Same cost as the belief above, reached through the scan itself: a zombie is the stop's answer, not a reason to wait.",
+    ),
+    Belief(
+        name="a group is not called stopped on one empty scan",
+        path=LADDER / "ladder_cli/cli.py",
+        old="    return _scan_for_live_member(group) or _scan_for_live_member(group)\n",
+        new="    return _scan_for_live_member(group)\n",
+        test="tests/test_cli.py::test_a_group_is_not_called_stopped_on_one_empty_scan_alone",
+        why="A scan of /proc is not atomic: a child forked after the listing is missed, and calling the group stopped then skips the SIGKILL.",
+    ),
+    Belief(
+        name="a group member whose state cannot be read is asked about its group directly",
+        path=LADDER / "ladder_cli/cli.py",
+        old="                if os.getpgid(pid) == group:\n                    return True\n",
+        new="                pass\n",
+        test="tests/test_cli.py::test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone",
+        why="An unreadable stat is not an exit; counting it as gone lets a hidepid mount or a malformed line skip the SIGKILL.",
+    ),
+    Belief(
+        name="a /proc that cannot be listed leaves the group counted as running",
+        path=LADDER / "ladder_cli/cli.py",
+        old="    except OSError:\n        return True\n    classified = False\n",
+        new="    except ValueError:\n        return True\n    classified = False\n",
+        test="tests/test_cli.py::test_a_group_is_taken_to_be_running_when_proc_cannot_be_listed",
+        why="`iterdir` raising turned a stop on a host without /proc into a crash with the rung still running.",
+    ),
+    Belief(
+        name="a /proc with nothing classifiable leaves the group counted as running",
+        path=LADDER / "ladder_cli/cli.py",
+        old="    return not classified\n",
+        new="    return False\n",
+        test="tests/test_cli.py::test_a_group_is_taken_to_be_running_when_nothing_in_proc_could_be_classified",
+        why="`killpg` already said something is in the group; a scan that read nothing has not shown it gone.",
+    ),
+    # ---- what the kernel says about a process, asked in one place ----
+    Belief(
+        name="the stat line is read after the last parenthesis",
+        path=LADDER / "ladder_cli/procfs.py",
+        old='text.rsplit(")", 1)[1]',
+        new='text.split(")", 1)[1]',
+        test="tests/test_procfs.py::test_read_stat_takes_the_state_and_group_after_the_last_parenthesis",
+        why="The comm field is a process name and can hold a `)`; splitting at the first one reads the wrong fields.",
+    ),
+    Belief(
+        name="a pid too large to probe is unknown, not a crash",
+        path=LADDER / "ladder_cli/procfs.py",
+        old="    except (PermissionError, OverflowError):\n        return Liveness.UNKNOWN\n",
+        new="    except PermissionError:\n        return Liveness.UNKNOWN\n",
+        test="tests/test_procfs.py::test_probe_a_pid_too_large_to_ask_about_is_unknown[2147483648]",
+        why="os.kill raises OverflowError past a pid_t; one planted lock would crash every caller that asks.",
+    ),
     # ---- a profile lock whose owner cannot be probed is refused, not a crash ----
     Belief(
-        name="a profile lock naming a pid too large to probe is refused with a reason",
+        name="a profile lock whose owner cannot be asked about is refused with a reason",
         path=LADDER / "ladder_cli/state/jars.py",
-        old="    except (PermissionError, OverflowError) as error:\n",
-        new="    except PermissionError as error:\n",
+        old="    if liveness is procfs.Liveness.UNKNOWN:\n",
+        new="    if False:\n",
         test="tests/test_jars.py::test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock",
-        why="os.kill raises OverflowError past a pid_t; without the catch, one planted symlink crashes launch with an unclassified error.",
+        why="Without the refusal an owner that cannot be checked falls through and its lock is cleared.",
+    ),
+    Belief(
+        name="a profile lock whose owner has exited but is not reaped is cleared",
+        path=LADDER / "ladder_cli/state/jars.py",
+        old='        if state != "Z":\n',
+        new="        if True:\n",
+        test="tests/test_jars.py::test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner",
+        why="A zombie exists to signal 0 but is gone; refusing its lock strands the profile until something reaps it.",
     ),
 ]
 

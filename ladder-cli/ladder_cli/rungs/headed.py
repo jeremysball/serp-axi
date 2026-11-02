@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from .. import procfs
 from . import STOP_GRACE_S, RungContext, RungResult, zendriver
 
 # ladder.py:82 `headless=not headed` with headed True
@@ -34,6 +35,11 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
+# What a lock may hold before it is not one Xvfb wrote. Xvfb writes `"%10d\n"`,
+# eleven bytes (read off a real server's lock, 2026-11-02). The bound is looser
+# than that on purpose: it is there to refuse a file with more in it, not to
+# pin the format.
+LOCK_MAX_BYTES = 64
 
 
 class _DisplayCollision(RuntimeError):
@@ -54,14 +60,20 @@ def _read_lock(lock: Path) -> tuple[int, int]:
     whatever that points at. This opens non-blocking and without following a
     link, and accepts only a regular file; anything else raises OSError, which
     both callers read as "not a lock we can vouch for". A missing lock raises
-    FileNotFoundError. A file that does not hold a number raises ValueError.
+    FileNotFoundError. A file that does not hold a number raises ValueError, and
+    so does one longer than `LOCK_MAX_BYTES`: Xvfb writes the pid as `%10d\\n`,
+    eleven bytes, so a longer file is not one it wrote, and reading only its
+    first bytes would take the number at its front for a server's pid.
     """
     fd = os.open(lock, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     try:
         status = os.fstat(fd)
         if not stat.S_ISREG(status.st_mode):
             raise OSError(f"{lock} is not a regular file")
-        return status.st_uid, int(os.read(fd, 64).strip())
+        text = os.read(fd, LOCK_MAX_BYTES + 1)
+        if len(text) > LOCK_MAX_BYTES:
+            raise ValueError(f"{lock} is longer than the {LOCK_MAX_BYTES} bytes a lock may hold")
+        return status.st_uid, int(text.strip())
     finally:
         os.close(fd)
 
@@ -89,13 +101,9 @@ def _lock_is_held(lock: Path) -> bool:
         return True
     if owner != os.getuid() or pid <= 0:
         return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OverflowError):
-        return True
-    return True
+    # A zombie counts as held: it still occupies the pid, and Xvfb treats a lock
+    # whose pid answers signal 0 as active.
+    return procfs.probe(pid) is not procfs.Liveness.GONE
 
 
 def display_is_free(number: int) -> bool:

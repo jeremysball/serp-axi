@@ -115,10 +115,46 @@ nothing in the group is still running, so a rung that stops promptly costs
 nothing extra. A zombie does not count as running: under a PID 1 that never
 waits, a rung's orphaned grandchild stays one for good.
 
+"Nothing is running" is read off `/proc` twice in a row, because one scan is
+not atomic: a child forked after the listing is in neither the listing nor the
+answer, and a stop that called the group empty would skip the SIGKILL. The
+second scan starts after the first ended, so one missed fork is caught. That
+narrows the window and does not close it: a child that forks again and exits
+inside the first scan can still be in neither. SIGKILL is not sent
+unconditionally to cover that, because by the time it ran the group id could
+belong to something else. A `/proc` that cannot be listed, or a scan that
+classified no process at all, counts as running, so the grace period decides
+and not a crash or an early "stopped".
+
 **When this becomes a real bug:** if a group that ignores SIGTERM survives the
-grace period (including when a second SIGTERM lands during the wait), if the
-wait runs the full 5 seconds when nothing is left running, or if a timed-out
-rung 4 leaves a lock behind for a pid that is dead.
+grace period (including when a second SIGTERM lands during the wait, or lands
+in the first `killpg` itself), if the wait runs the full 5 seconds when nothing
+is left running, if a group is called stopped while a member that cannot be
+read is still in it, or if a timed-out rung 4 leaves a lock behind for a pid
+that is dead.
+
+## The display stop and the rung-group stop are two loops, not one
+
+**What you see:** `headed._stop_display` and `cli._stop_group` both send
+SIGTERM, wait up to `STOP_GRACE_S`, then send SIGKILL, in loops that look
+copyable from one into the other.
+
+**Why:** they wait on different things. The display has a `Popen`, so
+`Popen.wait(timeout)` returns the instant the server exits. A process group has
+no wait: the only question the kernel answers is whether something in it is
+still there, so `_stop_group` polls every 20 ms, has to tell a zombie from a
+running process, and has to survive a SIGTERM landing mid-wait. Giving the
+display that loop would add a poll where a wait suffices, and giving the group
+the display's wait would watch only the group leader and miss a grandchild
+removing its own lock. What the two share is the grace period, one constant.
+`test_the_display_and_the_rung_group_are_given_one_grace_period` pins that
+`headed`, `cli` and `rungs` hold the same value and that the display stop waits
+for it; the group stop's own use of it is covered by the test that makes a
+group ignore SIGTERM until the grace period ends.
+
+**When this becomes a real bug:** if the two disagree on the order (SIGTERM
+before SIGKILL), on the grace period, or on killing what is left after it, or
+if a third stop appears that copies one of them instead of reusing it.
 
 ## A display slot with a lock we cannot prove dead is skipped, never reclaimed
 
@@ -129,13 +165,19 @@ fails with `no free Xvfb display between :200 and :699`.
 **Why:** a slot is taken back only when its lock names a pid that no longer
 exists and the lock belongs to the current user. A lock owned by someone else
 sits in a sticky `/tmp`, where we cannot remove it, so the slot is not ours to take.
-A lock that is empty, garbled, names a pid too large to probe, or is not a
-regular file at all (a FIFO, a symlink, a directory) is skipped for the same
-reason: claiming a slot needs proof, not a lack of proof. Such a lock is never
-opened in a way that waits, so a FIFO planted in `/tmp` cannot hang the search. A dead
-server's pid that the kernel has since handed to another process also reads as
-held. A lock for a dead pid that we own is reclaimed, because Xvfb starts over
-it (checked against a real server, over both a leftover lock and its socket).
+A lock that is empty, garbled, longer than 64 bytes, names a pid too large to
+probe, or is not a regular file at all (a FIFO, a symlink, a directory) is
+skipped for the same reason: claiming a slot needs proof, not a lack of proof.
+Xvfb writes eleven bytes (`"%10d\n"`, read off a real server's lock on
+2026-11-02), so a longer file is not one it wrote, and reading only its first
+64 bytes would take the number at the front of it for a server's pid. Such a
+lock is never opened in a way that waits, so a FIFO planted in `/tmp` cannot
+hang the search. A dead server's pid that the kernel has since handed to
+another process also reads as held, and so does a pid that is a zombie: a real
+Xvfb refuses to start over a lock naming one ("Server is already active",
+checked 2026-11-02). A lock for a dead pid that we own is reclaimed, because
+Xvfb starts over it (checked against a real server, over both a leftover lock
+and its socket).
 
 **When this becomes a real bug:** if a lock we own that names a dead pid is
 skipped, since that is the leak this exists to close, or if the headed rung
@@ -157,6 +199,24 @@ shows no gap, not that none can exist.
 **When this becomes a real bug:** if a headed fetch fails to connect to its
 display right after `_await_display` returned, on a machine where the lock is
 there and the socket is not yet.
+
+## The real-Xvfb tests clean up with a read and then an unlink
+
+**What you see:** `_remove_own_leftovers` in `tests/test_rungs_headed.py` reads
+a slot's lock, finds its own test server's pid, and then unlinks the lock and
+the socket as two further steps. If another process replaces the lock between
+the read and the unlink, the replacement loses it.
+
+**Why:** a file system has no "remove this if it still says X". Closing the gap
+means renaming a file that may not be ours out of the way first, which is a
+worse thing to do to a stranger's lock than the gap is. The slot came from
+`free_display` a moment earlier, so the gap needs another process to take that
+exact slot between two system calls. This is test cleanup and not library code,
+which is why the pattern lives in the test file.
+
+**When this becomes a real bug:** if the same read-then-unlink appears in
+`ladder_cli`, where it would delete a lock that is not ours, or if a run of the
+suite is seen removing another process's lock.
 
 ## Old working-directory profiles are not picked up automatically
 

@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import IO, Iterable, Sequence
 
+from . import procfs
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
 from .rungs import RUNGS, STOP_GRACE_S, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
 
@@ -59,27 +60,58 @@ def _context_from(args: Sequence[str]) -> RungContext:
     return RungContext(jar_in=jar_in, jar_out=jar_out)
 
 
-def _has_live_member(group: int) -> bool:
-    """Whether any process in the group is still running, which a zombie is not.
+def _scan_for_live_member(group: int) -> bool:
+    """One pass over /proc: whether a process in the group is running, which a zombie is not.
 
-    Reads each process's state and group from /proc (`pid (comm) state ppid
-    pgrp ...`; the comm field can hold spaces and parentheses, so the fields are
-    taken after its last `)`). If no process could be read at all, the answer is
-    True: the caller's `killpg` already said something is there, and without a
-    way to look closer that stays the answer.
+    A process that is not readable is not taken for gone. Only an exit says "gone"
+    (FileNotFoundError, or `getpgid` raising ProcessLookupError); any other reason
+    a stat cannot be read, such as a `hidepid` mount or a stat line that does not
+    parse, falls back to `getpgid`, which asks the kernel for the group without
+    needing the read to succeed. If that says the process is in this group, it
+    counts as running, because it cannot be shown to be a zombie.
+
+    If /proc cannot be listed at all, or nothing in it could be classified, the
+    answer is True: the caller's `killpg` already said something is there, and
+    with no way to look closer that stays the answer, so the grace period
+    decides, not a crash and not an early "stopped".
     """
-    readable = False
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
+    try:
+        entries = [entry for entry in procfs.PROC.iterdir() if entry.name.isdigit()]
+    except OSError:
+        return True
+    classified = False
+    for entry in entries:
+        pid = int(entry.name)
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
+            stat = procfs.read_stat(pid)
+        except (FileNotFoundError, ProcessLookupError):
             continue  # it exited between the listing and the read
-        readable = True
-        if int(fields[2]) == group and fields[0] != "Z":
+        except (OSError, ValueError):
+            try:
+                if os.getpgid(pid) == group:
+                    return True
+            except OSError:
+                continue  # ProcessLookupError: it exited; anything else: no answer, so no vote
+            classified = True
+            continue
+        classified = True
+        if stat.pgrp == group and stat.state != "Z":
             return True
-    return not readable
+    return not classified
+
+
+def _has_live_member(group: int) -> bool:
+    """Whether any process in the group is still running, asked twice.
+
+    A scan of /proc is not atomic: a process forked into the group after the
+    listing was taken is not in it. A second scan, which starts after the first
+    ended, has a child forked during the first in its listing, so one missed fork
+    is not enough to call a running group stopped. This narrows the window and
+    does not close it: a child that forks again and exits inside the first scan
+    can still be in neither. SIGKILL is not sent unconditionally to cover that,
+    because by the time it ran the group id could belong to something else.
+    """
+    return _scan_for_live_member(group) or _scan_for_live_member(group)
 
 
 def _group_exists(group: int) -> bool:
@@ -107,16 +139,18 @@ def _stop_group(process: subprocess.Popen) -> None:
     nothing about a display server that is still removing its lock.
 
     The kill is in a `finally` because `main` turns SIGTERM into SystemExit, which
-    can arrive during the wait. Without it, a second SIGTERM would leave the wait
-    with the SIGKILL unsent and a rung that ignored the first one still running.
+    can arrive during the wait, or in the first `killpg` itself. Without it, a
+    SIGTERM landing there would leave with the SIGKILL unsent and a rung that
+    ignored the first one still running. The first `killpg` is inside the `try`
+    for that reason: a SystemExit out of it is a stop that has sent nothing.
     """
     group = process.pid
-    try:
-        os.killpg(group, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
     stopped = False
     try:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         deadline = time.monotonic() + STOP_GRACE_S
         while time.monotonic() < deadline:
             process.poll()  # reaps the child, which a zombie keeps in the group until then

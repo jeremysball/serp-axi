@@ -33,6 +33,8 @@ from functools import cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import procfs
+
 # solver_probe.py:27 `KEEP = ("cf_clearance", "_px3", "_pxhd", "datadome")`.
 # The four defence cookies the measured run carried; anything else is a
 # browsing cookie and has no business travelling with the fetch.
@@ -245,18 +247,16 @@ def clear_locks(profile_dir: Path) -> int:
         raise RuntimeError(f"profile lock owner is unknown: {lock}") from error
     if host != socket.gethostname() or pid <= 0:
         raise RuntimeError(f"profile lock is not a verifiable local owner: {lock}")
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        pass
-    except (PermissionError, OverflowError) as error:
-        # PermissionError: the pid exists and is someone else's. OverflowError: the pid
-        # does not fit a pid_t, so `os.kill` cannot be asked about it at all.
-        raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
-    else:
+    liveness = procfs.probe(pid)
+    if liveness is procfs.Liveness.UNKNOWN:
+        # The pid is someone else's, or does not fit a pid_t, so it cannot be asked about.
+        raise RuntimeError(f"profile lock owner cannot be checked: {lock}")
+    if liveness is procfs.Liveness.EXISTS:
+        # A zombie exists to `probe` but has exited, so its lock is stale: only a
+        # running owner (or one whose state cannot be read) keeps the lock.
         try:
-            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        except (OSError, IndexError) as error:
+            state = procfs.read_stat(pid).state
+        except (OSError, ValueError) as error:
             raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
         if state != "Z":
             raise RuntimeError(f"profile lock owner is still running: {lock}")
