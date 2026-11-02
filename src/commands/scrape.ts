@@ -9,14 +9,22 @@ import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, resolveLadderAxes, resolveLadde
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
 import {
+  FULL_MAX_CHARS_ENV,
   INCLUDE_MARKUP_ENV,
+  MAX_CHARS_ENV,
   limitFor,
+  requestCharLimits,
+  resolveCharLimits,
   resolveIncludeMarkup,
   shapeScrapeRecord,
+  type CharLimitRequest,
+  type CharLimits,
 } from "../scrape-output.ts";
 
 export const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
+  "max-chars": "string",
+  "full-max-chars": "string",
   "include-markup": "boolean",
   provider: "string",
   "dataset-id": "string",
@@ -61,9 +69,9 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-const SCRAPE_HELP = `serp-axi scrape <url> [--full] [--include-markup]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--include-markup] [--dataset-id <id>]
-serp-axi scrape <url> [--full] [--include-markup] --ladder
+const SCRAPE_HELP = `serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] --ladder
 
 Fetch and extract readable text from one or more web pages.
 
@@ -81,7 +89,18 @@ Providers:
                       beside this package, or PATH.
 
 Flags:
-  --full                Return up to 50,000 characters per page instead of the default 1,200.
+  --full                Cut page text at 50,000 characters instead of the default 1,200.
+                         The cap applies to the page's text field; for Bright Data, to
+                         every top-level string field except url.
+  --max-chars <n>       Cut the same fields at n characters instead of the default 1,200.
+                         Not valid with --full, which has its own cap.
+                         Also: ${MAX_CHARS_ENV}=<n>, or "maxChars": <n> in the config file.
+  --full-max-chars <n>  Change the 50,000-character cap that --full uses. Only valid with --full.
+                         Also: ${FULL_MAX_CHARS_ENV}=<n>, or "fullMaxChars": <n> in the config file.
+                         Each cap: flag > env > config > built-in default. Both are whole
+                         numbers of at least 1. A bad value fails the run that uses it. A run
+                         without --full also checks the --full cap, because its hint names
+                         it; a --full run never reads the normal cap.
   --include-markup      Keep raw-HTML fields instead of omitting them. The character limit
                          still applies to what is kept; add --full to raise it. Serper and
                          --ladder return no raw-HTML field of their own, so the flag matters
@@ -114,6 +133,8 @@ Rungs 1-4 fetch pages. Rung 5 is deferred and is not attempted; audio helpers ar
 Examples:
   serp-axi scrape https://example.com/article
   serp-axi scrape https://example.com/article --full
+  serp-axi scrape https://example.com/article --max-chars 4000
+  serp-axi scrape https://example.com/article --full --full-max-chars 100000
   serp-axi scrape https://example.com https://example.com/1 --provider brightdata
   serp-axi scrape https://example.com/article --ladder
   serp-axi scrape https://example.com/article --ladder --cookie-state jar --jar-out ~/clearance.cookies.json`;
@@ -224,12 +245,16 @@ function withMarkupFlag(rerun: string, includeMarkup: boolean): string {
 function shapeBrightDataRecord(
   record: BrightDataRecord,
   full: boolean,
+  limits: CharLimits,
+  capFlags: string,
   includeMarkup: boolean,
   datasetFlag: string,
 ): AxiOutput {
   const url = shellQuote(typeof record.url === "string" ? record.url : "<url>");
   return shapeScrapeRecord(record, {
     full,
+    limits,
+    capFlags,
     includeMarkup,
     rerun: withMarkupFlag(`serp-axi scrape ${url} --provider brightdata${datasetFlag}`, includeMarkup),
     scope: { kind: "every-string", except: NON_TRUNCATED_RECORD_FIELDS },
@@ -238,9 +263,18 @@ function shapeBrightDataRecord(
 
 // Serper and the ladder each return one body of text; the record's other strings
 // (a title, the ladder's warning) ride along outside the limit's scope.
-function shapeTextRecord(record: AxiOutput, full: boolean, includeMarkup: boolean, rerun: string): AxiOutput {
+function shapeTextRecord(
+  record: AxiOutput,
+  full: boolean,
+  limits: CharLimits,
+  capFlags: string,
+  includeMarkup: boolean,
+  rerun: string,
+): AxiOutput {
   return shapeScrapeRecord(record, {
     full,
+    limits,
+    capFlags,
     includeMarkup,
     rerun: withMarkupFlag(rerun, includeMarkup),
     scope: { kind: "field", key: "text" },
@@ -254,6 +288,7 @@ async function runBrightDataScrape(
   env: NodeJS.ProcessEnv,
   config: StoredConfig | undefined,
   requestedMarkup: boolean | undefined,
+  charRequest: CharLimitRequest,
 ): Promise<AxiOutput> {
   if (positionals.length === 0) {
     throw new SerpAxiError(
@@ -272,25 +307,42 @@ async function runBrightDataScrape(
       "export BRIGHTDATA_API_KEY=<your key> and re-run",
     );
   }
-  // Bright Data is the one provider whose records carry raw-HTML fields of their
-  // own, so it is the one that consults the config key. It does so here, after the
-  // input checks, so a bad URL or a missing key is reported as that rather than as
-  // a problem with a file the run never needed.
-  const includeMarkup =
-    requestedMarkup ?? resolveIncludeMarkup({ config: config ?? loadStoredConfig(os.homedir(), env) });
+  // The config file is read here, after the input checks, so a bad URL or a
+  // missing key is reported as that rather than as a problem with a file the run
+  // never needed. Every scrape reads it for the character limits; Bright Data is
+  // also the one provider that reads it for `includeMarkup`, because its records
+  // are the ones that carry raw-HTML fields of their own.
+  const stored = config ?? loadStoredConfig(os.homedir(), env);
+  const includeMarkup = requestedMarkup ?? resolveIncludeMarkup({ config: stored });
+  const limits = resolveCharLimits(charRequest, stored);
 
   const datasetFlagValue = nonEmpty(flags["dataset-id"] as string | undefined);
   const datasetId = datasetFlagValue ?? nonEmpty(env.BRIGHTDATA_DATASET_ID) ?? BRIGHT_DATA_DEFAULT_DATASET_ID;
   const datasetFlag = datasetFlagValue === undefined ? "" : ` --dataset-id ${shellQuote(datasetFlagValue)}`;
 
   const full = Boolean(flags.full);
-  const records = await scrapeBrightData(apiKey, datasetId, urls, limitFor(full), fetchImpl);
+  const records = await scrapeBrightData(apiKey, datasetId, urls, limitFor(full, limits), fetchImpl);
 
   return {
     provider: "brightdata",
     datasetId,
-    results: records.map((record) => shapeBrightDataRecord(record, full, includeMarkup, datasetFlag)),
+    results: records.map((record) =>
+      shapeBrightDataRecord(record, full, limits, charRequest.capFlags, includeMarkup, datasetFlag),
+    ),
   };
+}
+
+// What the flags and env vars say about the two character caps; the config file
+// fills the rest later. A malformed value, or `--max-chars` with `--full`, fails
+// here, before any network call.
+function charLimitRequest(flags: Record<string, string | boolean>, env: NodeJS.ProcessEnv): CharLimitRequest {
+  return requestCharLimits({
+    full: Boolean(flags.full),
+    flagMaxChars: flags["max-chars"] as string | undefined,
+    flagFullMaxChars: flags["full-max-chars"] as string | undefined,
+    envMaxChars: nonEmpty(env[MAX_CHARS_ENV]),
+    envFullMaxChars: nonEmpty(env[FULL_MAX_CHARS_ENV]),
+  });
 }
 
 // What the flag or the env var says about markup, or undefined when neither
@@ -314,9 +366,10 @@ export async function runScrape(
 ): Promise<AxiOutput> {
   const { positionals, flags } = parseFlags(args, SCRAPE_FLAGS, "scrape");
   const requestedMarkup = markupFromFlagOrEnv(flags, env);
+  const charRequest = charLimitRequest(flags, env);
 
   if (flags.ladder) {
-    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false);
+    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false, charRequest);
   }
 
   for (const axis of LADDER_AXIS_FLAGS) {
@@ -332,7 +385,7 @@ export async function runScrape(
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
-    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup);
+    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup, charRequest);
   }
 
   if (flags["dataset-id"] !== undefined) {
@@ -352,7 +405,7 @@ export async function runScrape(
     throw new SerpAxiError(
       `unexpected argument${positionals.length > 2 ? "s" : ""} ${extras} for \`scrape\``,
       "usage",
-      "usage: serp-axi scrape <url> [--full] [--include-markup] (pass multiple URLs with --provider brightdata)",
+      "usage: serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] (pass multiple URLs with --provider brightdata)",
     );
   }
   const url = validateUrl(raw);
@@ -362,6 +415,9 @@ export async function runScrape(
     throw new SerpAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
   }
 
+  // After the URL and key checks, for the reason given in runBrightDataScrape.
+  const limits = resolveCharLimits(charRequest, config ?? loadStoredConfig(os.homedir(), env));
+
   const response = await scrapeSerper(apiKey, url.toString(), fetchImpl);
 
   const record: AxiOutput = { url: url.toString() };
@@ -369,7 +425,14 @@ export async function runScrape(
     record.title = response.metadata.title;
   }
   record.text = response.text;
-  return shapeTextRecord(record, Boolean(flags.full), requestedMarkup ?? false, `serp-axi scrape ${shellQuote(url.toString())}`);
+  return shapeTextRecord(
+    record,
+    Boolean(flags.full),
+    limits,
+    charRequest.capFlags,
+    requestedMarkup ?? false,
+    `serp-axi scrape ${shellQuote(url.toString())}`,
+  );
 }
 
 async function runLadderScrape(
@@ -381,6 +444,7 @@ async function runLadderScrape(
   // the binary check out.
   config: StoredConfig | undefined,
   includeMarkup: boolean,
+  charRequest: CharLimitRequest,
 ): Promise<AxiOutput> {
   if (flags.provider !== undefined) {
     throw new SerpAxiError(
@@ -409,7 +473,9 @@ async function runLadderScrape(
   }
   const url = validateUrl(raw);
   const bin = resolveLadderBin(env);
-  const axes = resolveLadderAxes({ flag: flags, env, config: config ?? loadStoredConfig(os.homedir(), env) });
+  const stored = config ?? loadStoredConfig(os.homedir(), env);
+  const axes = resolveLadderAxes({ flag: flags, env, config: stored });
+  const limits = resolveCharLimits(charRequest, stored);
   let response;
   try {
     response = await fetchViaLadder(url.toString(), { bin }, axes);
@@ -451,6 +517,8 @@ async function runLadderScrape(
   const output = shapeTextRecord(
     record,
     Boolean(flags.full),
+    limits,
+    charRequest.capFlags,
     includeMarkup,
     `serp-axi scrape ${shellQuote(url.toString())} --ladder${axisFlags}`,
   );

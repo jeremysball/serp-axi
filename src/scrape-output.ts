@@ -2,13 +2,21 @@ import { SerpAxiError, describeValue } from "./errors.ts";
 import { truncate, type AxiOutput } from "./output.ts";
 import type { StoredConfig } from "./config.ts";
 
-export const DEFAULT_LIMIT = 1200;
-export const FULL_LIMIT = 50000;
+export const DEFAULT_MAX_CHARS = 1200;
+export const DEFAULT_FULL_MAX_CHARS = 50000;
 export const INCLUDE_MARKUP_ENV = "SERP_AXI_INCLUDE_MARKUP";
+export const MAX_CHARS_ENV = "SERP_AXI_MAX_CHARS";
+export const FULL_MAX_CHARS_ENV = "SERP_AXI_FULL_MAX_CHARS";
+
+/** The two caps a scrape can run under. `--full` picks `fullMaxChars`; every other run uses `maxChars`. */
+export interface CharLimits {
+  maxChars: number;
+  fullMaxChars: number;
+}
 
 /** The character limit for one run. Every cut a scrape makes, locally or upstream, takes it from here. */
-export function limitFor(full: boolean): number {
-  return full ? FULL_LIMIT : DEFAULT_LIMIT;
+export function limitFor(full: boolean, limits: CharLimits): number {
+  return full ? limits.fullMaxChars : limits.maxChars;
 }
 
 /**
@@ -22,14 +30,29 @@ export type TruncationScope =
   | { kind: "every-string"; except: ReadonlySet<string> };
 
 export interface ShapeOptions {
+  /** Whether `--full` was given: it picks which cap applies and how a hint is worded. */
   full: boolean;
+  /**
+   * Both caps. The hint names the `--full` cap even on a run that is not `--full`.
+   * On a `--full` run `maxChars` is never read, so it holds the built-in default.
+   */
+  limits: CharLimits;
   includeMarkup: boolean;
   /**
-   * The command that produced the record, without `--full`. It carries every flag
-   * that changes what the record holds (`--include-markup` for a provider it
-   * matters to), so a hint reruns the same thing rather than a neighbour of it.
+   * The command that produced the record, without `--full` and without the cap
+   * flags. It carries every flag that changes what the record holds
+   * (`--include-markup` for a provider it matters to), so a hint reruns the same
+   * thing rather than a neighbour of it.
    */
   rerun: string;
+  /**
+   * The cap flags this run was given, as text to append to `rerun` (`" --max-chars
+   * 500"`, `" --full --full-max-chars 7000"`, or `""`). The `--include-markup`
+   * hint appends it so the markup comes back under the cap the reader chose. The
+   * `--full` hint does not: that rerun sets its own cap, and `--max-chars` is
+   * refused alongside `--full`.
+   */
+  capFlags: string;
   scope: TruncationScope;
 }
 
@@ -92,7 +115,7 @@ function markerFor(scope: TruncationScope, key: string): string {
  * Stripping comes first so the limit is spent on content, not on a page's HTML.
  */
 export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): AxiOutput {
-  const limit = limitFor(options.full);
+  const limit = limitFor(options.full, options.limits);
   const out: AxiOutput = {};
   const omitted: string[] = [];
 
@@ -132,20 +155,168 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
   const hints: string[] = [];
   if (cutTotals.length > 0) {
     const total = cutTotals.length === 1 ? ` (${cutTotals[0]} total)` : "";
-    hints.push(
-      options.full
-        ? `content is capped at ${FULL_LIMIT} characters even with --full`
-        : `Run \`${options.rerun} --full\` to see up to ${FULL_LIMIT} characters${total}`,
-    );
+    // `--full` only helps when its cap is higher than the one that just cut the
+    // content. A run whose own cap already meets or beats it would be told to rerun
+    // for the same or fewer characters.
+    if (options.full) {
+      hints.push(`content is capped at ${limit} characters even with --full`);
+    } else if (options.limits.fullMaxChars > limit) {
+      hints.push(`Run \`${options.rerun} --full\` to see up to ${options.limits.fullMaxChars} characters${total}`);
+    } else {
+      hints.push(`content is capped at ${limit} characters${total}`);
+    }
   }
   if (omitted.length > 0) {
     out.markupOmitted = omitted;
-    hints.push(`Run \`${options.rerun} --include-markup\` to keep the omitted markup`);
+    hints.push(`Run \`${options.rerun}${options.capFlags} --include-markup\` to keep the omitted markup`);
   }
   if (hints.length > 0) {
     out.help = hints.join(" ");
   }
   return out;
+}
+
+interface CharLimitNames {
+  flag: string;
+  env: string;
+  config: string;
+}
+
+const MAX_CHARS_NAMES: CharLimitNames = { flag: "--max-chars", env: MAX_CHARS_ENV, config: "maxChars" };
+const FULL_MAX_CHARS_NAMES: CharLimitNames = {
+  flag: "--full-max-chars",
+  env: FULL_MAX_CHARS_ENV,
+  config: "fullMaxChars",
+};
+
+/**
+ * One cap, from one source. Flag and env values arrive as strings and must be
+ * all digits; a config value must already be a JSON integer. Either way the
+ * error names the setting the bad value came from, so the reader fixes the right
+ * place. The only upper bound is the largest integer a number holds exactly.
+ */
+function validateCharLimit(raw: unknown, source: "flag" | "env" | "config", names: CharLimitNames): number {
+  const field = names[source];
+  const example = source === "flag" ? `${field} 5000` : source === "env" ? `${field}=5000` : `"${field}": 5000`;
+  let value: number;
+  if (source === "config") {
+    if (typeof raw !== "number" || !Number.isInteger(raw)) {
+      throw new SerpAxiError(
+        `${field} must be a JSON integer number of characters, got ${describeValue(raw)}`,
+        "usage",
+        `example: ${example}`,
+      );
+    }
+    value = raw;
+  } else {
+    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+      throw new SerpAxiError(
+        `${field} must be a whole number of characters, got ${describeValue(raw)}`,
+        "usage",
+        `example: ${example}`,
+      );
+    }
+    value = Number(raw);
+  }
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new SerpAxiError(
+      `${field} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
+      "usage",
+      `example: ${example}`,
+    );
+  }
+  return value;
+}
+
+export interface CharLimitSources {
+  /** Whether `--full` was given. Decides which of the two flags may appear. */
+  full: boolean;
+  flagMaxChars?: string;
+  flagFullMaxChars?: string;
+  envMaxChars?: string;
+  envFullMaxChars?: string;
+}
+
+/** The caps the flags and env vars set. A cap neither speaks for is left for the config file. */
+export interface CharLimitRequest {
+  /** Whether `--full` was given, so `maxChars` is not wanted from any source. */
+  full: boolean;
+  maxChars?: number;
+  fullMaxChars?: number;
+  /** The cap flags as typed, ready to append to a rerun command. See `ShapeOptions.capFlags`. */
+  capFlags: string;
+}
+
+/**
+ * Flag > env, for each cap on its own, before any config file is opened. Only the
+ * source that wins is checked: a bad `SERP_AXI_MAX_CHARS` does not fail a run that
+ * passes `--max-chars`.
+ *
+ * The cap a run uses is always resolved, and so is the `--full` cap on a run that
+ * is not `--full`, because its hint names that number. The normal cap is the one
+ * thing a `--full` run never reads, so a bad `SERP_AXI_MAX_CHARS` does not fail
+ * it: that is what lets the `--full` rerun a hint suggests work after a
+ * `--max-chars` flag got past the bad value.
+ *
+ * Two flags are refused for the run they cannot affect, as `--dataset-id` is
+ * without `--provider brightdata`: `--max-chars` with `--full` (the run uses the
+ * `--full` cap, so the flag would be dropped), and `--full-max-chars` without
+ * `--full` (the run would never use it). The env vars and config keys for the cap
+ * a run does not use are not conflicts, so one setting works for both kinds of run.
+ */
+export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
+  if (sources.full && sources.flagMaxChars !== undefined) {
+    throw new SerpAxiError(
+      "--max-chars cannot be combined with --full",
+      "usage",
+      "--full has its own cap: drop --full, or set it with --full-max-chars <n>",
+    );
+  }
+  if (!sources.full && sources.flagFullMaxChars !== undefined) {
+    throw new SerpAxiError(
+      "--full-max-chars only applies with --full",
+      "usage",
+      "add --full, or use --max-chars <n> to change the default cap",
+    );
+  }
+  const pick = (flag: string | undefined, env: string | undefined, names: CharLimitNames): number | undefined => {
+    if (flag !== undefined) return validateCharLimit(flag, "flag", names);
+    if (env !== undefined) return validateCharLimit(env, "env", names);
+    return undefined;
+  };
+  const maxChars = sources.full ? undefined : pick(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_NAMES);
+  const fullMaxChars = pick(sources.flagFullMaxChars, sources.envFullMaxChars, FULL_MAX_CHARS_NAMES);
+  // Built after the picks, so a flag value that reaches the rerun text has passed
+  // validation and is all digits: nothing in it needs shell quoting.
+  let capFlags = "";
+  if (sources.full) {
+    capFlags = sources.flagFullMaxChars === undefined ? " --full" : ` --full ${FULL_MAX_CHARS_NAMES.flag} ${sources.flagFullMaxChars}`;
+  } else if (sources.flagMaxChars !== undefined) {
+    capFlags = ` ${MAX_CHARS_NAMES.flag} ${sources.flagMaxChars}`;
+  }
+  return { full: sources.full, maxChars, fullMaxChars, capFlags };
+}
+
+function charLimitFromConfig(raw: unknown, names: CharLimitNames): number | undefined {
+  // Null and absent both mean "not set", as they do for the other config keys.
+  if (raw === undefined || raw === null) return undefined;
+  return validateCharLimit(raw, "config", names);
+}
+
+/**
+ * Fills each cap the flags and env left open: `maxChars` / `fullMaxChars` in the
+ * config, then the built-in default. On a `--full` run `maxChars` is not wanted,
+ * so the config key is not read and the default stands in.
+ */
+export function resolveCharLimits(request: CharLimitRequest, config: StoredConfig): CharLimits {
+  const maxChars = request.full
+    ? DEFAULT_MAX_CHARS
+    : (request.maxChars ?? charLimitFromConfig(config.maxChars, MAX_CHARS_NAMES) ?? DEFAULT_MAX_CHARS);
+  return {
+    maxChars,
+    fullMaxChars:
+      request.fullMaxChars ?? charLimitFromConfig(config.fullMaxChars, FULL_MAX_CHARS_NAMES) ?? DEFAULT_FULL_MAX_CHARS,
+  };
 }
 
 export interface IncludeMarkupSources {

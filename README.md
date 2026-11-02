@@ -86,14 +86,15 @@ Serper is the default and accepts one URL. Bright Data accepts multiple URLs
 in one batched request and requires `BRIGHTDATA_API_KEY`.
 
 ```
-serp-axi scrape <url> [--full] [--include-markup]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full] [--include-markup] [--dataset-id <id>]
-serp-axi scrape <url> --ladder [--full] [--include-markup]
+serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> --ladder [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
 ```
 
 Bright Data uses dataset `gd_m6gjtfmeh43we6cqc` by default. Override it with
 `--dataset-id` or `BRIGHTDATA_DATASET_ID`. `--full` returns up to 50,000
-characters per page instead of the default 1,200. Bright Data returns a
+characters per page instead of the default 1,200; the next section says how to
+change either number. Bright Data returns a
 batched object with `provider`, `datasetId`, and dataset-specific `results`.
 Truncated result fields include a `<field>TruncatedFrom` count and a `help`
 hint showing how to retry with `--full`.
@@ -109,7 +110,8 @@ uses up the 1,200 characters.
 
 `--include-markup` keeps the omitted fields. The character limit still applies to
 them, so a kept `page_html` is cut to 1,200 characters unless you add `--full`
-(up to 50,000). `SERP_AXI_INCLUDE_MARKUP=1` does the same, and so does
+(up to 50,000; see [Character limits](#character-limits) to change either
+number). `SERP_AXI_INCLUDE_MARKUP=1` does the same, and so does
 `"includeMarkup": true` in the config file, which only the Bright Data path
 reads. Precedence is flag, then env, then config, then off.
 `SERP_AXI_INCLUDE_MARKUP=0` turns it back off for one run when the config file
@@ -120,6 +122,59 @@ than coming back empty. Serper and `--ladder` records have no raw-HTML field of
 their own, so the flag changes their output only when the title is itself a
 whole HTML document. Their `text` is whatever the provider extracted; for
 `--ladder` that is plain, whitespace-normalized text, not markdown.
+
+#### Character limits
+
+Every scrape path cuts page text to a character cap. There are two caps, and
+`--full` only picks which one applies.
+
+| Cap | Flag | Env var | Config key | Default |
+| --- | --- | --- | --- | --- |
+| Normal run | `--max-chars <n>` | `SERP_AXI_MAX_CHARS` | `maxChars` | 1200 |
+| `--full` run | `--full-max-chars <n>` | `SERP_AXI_FULL_MAX_CHARS` | `fullMaxChars` | 50000 |
+
+What gets cut depends on the path. Serper and `--ladder` cut the body `text`
+field; a `title`, or the ladder's `warning`, is left whole. Bright Data cuts every
+top-level string field except `url`, and marks each one it cut with a
+`<field>TruncatedFrom` count. Strings inside a nested object or array are not
+cut, since a Bright Data record's shape is not ours to know. The cap counts
+UTF-16 code units (JavaScript string length). A cut that would land between the
+two halves of an emoji, or any other surrogate pair, backs up one unit, so a cut
+field can come out one short of the cap.
+
+Each cap goes flag, then env var, then the config file, then the default. The
+config file is `$XDG_CONFIG_HOME/serp-axi/config.json` (default
+`~/.config/serp-axi/config.json`), and `"maxChars": 3000` there raises the
+normal cap for every run. A value is a whole number from 1 up; there is no
+upper bound short of `Number.MAX_SAFE_INTEGER`. In the config file it must be a
+JSON integer, so `"3000"` and `3000.5` are errors. An empty env var counts as
+unset.
+
+Two flag pairs are refused as usage errors, before any network call:
+`--max-chars` with `--full` (the run uses the `--full` cap, so use
+`--full-max-chars <n>` or drop `--full`), and `--full-max-chars` without
+`--full` (nothing would read it). An env var or config key for the other mode's
+cap is not a conflict; it just sits unused.
+
+The rerun hint under a truncated field names the real `--full` cap, for example
+"to see up to 8000 characters", and drops the `--full` suggestion when that cap
+is no higher than the cap this run already used. It never suggests
+`--max-chars`, because `--full` refuses it. The hint that brings omitted markup
+back (`--include-markup`) does repeat the cap flags you typed, such as
+`--max-chars 500` or `--full --full-max-chars 7000`, so the markup returns under
+the same cap. A cap that came from the env or the config file is not repeated;
+the rerun picks it up on its own.
+
+A run without `--full` checks both caps, because its hint prints the `--full`
+cap. A malformed `SERP_AXI_FULL_MAX_CHARS` therefore fails a run that never uses
+`--full`. The reverse does not hold: a `--full` run never reads the normal cap,
+so a bad `SERP_AXI_MAX_CHARS` or `maxChars` cannot fail it.
+
+Every scrape path now opens the config file once its input has passed, so a
+corrupt `config.json` fails a Serper scrape too. Before the caps were
+configurable, Serper never read it, `--ladder` read it for its axes, and Bright
+Data read it only when neither `--include-markup` nor
+`SERP_AXI_INCLUDE_MARKUP` had already settled the markup choice.
 
 ### `update`
 
@@ -150,6 +205,8 @@ is completable with flags alone.
 | `SERP_AXI_SEARXNG_ENGINES` | optional engine list for `search --provider searxng` |
 | `SERP_AXI_SEARCH_TIMEOUT_MS` | optional timeout override for `search --provider searxng` |
 | `SERP_AXI_INCLUDE_MARKUP` | optional `1`/`0` (or `true`/`false`); keeps raw-HTML fields in `scrape` output (`--include-markup` wins) |
+| `SERP_AXI_MAX_CHARS` | optional whole number; the character cap for page text on a normal `scrape` run, default 1200 (`--max-chars` wins; a `--full` run never reads it) |
+| `SERP_AXI_FULL_MAX_CHARS` | optional whole number; the cap for `scrape --full`, default 50000 (`--full-max-chars` wins) |
 
 ## In progress: scraping escalation ladder
 

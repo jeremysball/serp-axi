@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
-import { INCLUDE_MARKUP_ENV } from "../scrape-output.ts";
+import { FULL_MAX_CHARS_ENV, INCLUDE_MARKUP_ENV, MAX_CHARS_ENV } from "../scrape-output.ts";
 
 async function withApiKey<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
   const original = process.env.SERPER_API_KEY;
@@ -159,7 +159,7 @@ test("runScrape truncates to the default 1200-character limit", async () => {
     const longText = "y".repeat(2000);
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ text: longText, metadata: { title: "Big Page" } }), { status: 200 })) as typeof fetch;
-    const output = await runScrape(["https://example.com/big"], fetchImpl);
+    const output = await runScrape(["https://example.com/big"], fetchImpl, hermeticEnv(), {});
     assert.equal((output.text as string).length, 1200);
     assert.equal(output.title, "Big Page");
     assert.equal(output.truncatedFrom, 2000);
@@ -171,7 +171,7 @@ test("runScrape --full raises the limit to 50000 characters", async () => {
   await withApiKey("test-key", async () => {
     const longText = "z".repeat(2000);
     const fetchImpl = (async () => new Response(JSON.stringify({ text: longText, metadata: {} }), { status: 200 })) as typeof fetch;
-    const output = await runScrape(["https://example.com/big", "--full"], fetchImpl);
+    const output = await runScrape(["https://example.com/big", "--full"], fetchImpl, hermeticEnv(), {});
     assert.equal((output.text as string).length, 2000);
     assert.equal(output.truncatedFrom, undefined);
     assert.equal(output.title, undefined);
@@ -200,11 +200,13 @@ async function withBrightData<T>(
 }
 
 // The env these process.env-driven tests hand to runScrape: what withBrightData
-// set, minus the one setting a developer's shell might export. Paired with an
+// set, minus the settings a developer's shell might export. Paired with an
 // empty config so no test reads the machine's real config file.
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env[INCLUDE_MARKUP_ENV];
+  delete env[MAX_CHARS_ENV];
+  delete env[FULL_MAX_CHARS_ENV];
   return env;
 }
 
@@ -407,6 +409,8 @@ test("runScrape --ladder returns rung text with no API key", async () => {
     const output = await runScrape(
       ["https://example.com/article", "--ladder"],
       (async () => new Response("{}")) as typeof fetch,
+      hermeticEnv(),
+      {},
     );
     assert.equal(output.verdict, "ok");
     assert.equal(output.rungReached, 1);
@@ -725,7 +729,7 @@ test("runScrape's extra-URL usage hint lists every flag the command takes", asyn
       ),
     (error: unknown) => {
       assert.ok(error instanceof SerpAxiError);
-      assert.match(error.help, /\[--full\] \[--include-markup\]/);
+      assert.match(error.help, /\[--full \[--full-max-chars <n>\] \| --max-chars <n>\] \[--include-markup\]/);
       return true;
     },
   );
@@ -821,4 +825,313 @@ test("runScrape --ladder reads the config file once, from the injected env", asy
       );
     });
   });
+});
+
+// --- the character caps ----------------------------------------------------
+// --max-chars / SERP_AXI_MAX_CHARS / "maxChars" set the default cap (1200), and
+// --full-max-chars / SERP_AXI_FULL_MAX_CHARS / "fullMaxChars" set the --full cap (50000).
+
+const LONG_URL = `https://example.com/${"a".repeat(2000)}`;
+
+// A Serper stub that serves `length` characters of text and counts its calls.
+function serperServing(length: number) {
+  const calls = { count: 0 };
+  const fetchImpl = (async () => {
+    calls.count += 1;
+    return new Response(JSON.stringify({ text: "y".repeat(length), metadata: {} }));
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+async function serperTextLength(
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+  config: Record<string, unknown> = {},
+  served = 5000,
+): Promise<number> {
+  const { fetchImpl } = serperServing(served);
+  const output = await runScrape(["https://example.com/big", ...args], fetchImpl, { SERPER_API_KEY: "k", ...env }, config);
+  return (output.text as string).length;
+}
+
+// The `limit_per_input` the Bright Data request carried.
+async function brightDataLimit(
+  args: string[],
+  env: NodeJS.ProcessEnv = {},
+  config: Record<string, unknown> = {},
+): Promise<number> {
+  let captured: { limit_per_input: number } | undefined;
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    captured = JSON.parse(init?.body as string) as { limit_per_input: number };
+    return new Response("");
+  }) as typeof fetch;
+  await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, { ...BRIGHT_DATA_ENV, ...env }, config);
+  assert.ok(captured, "Bright Data was never called");
+  return captured.limit_per_input;
+}
+
+test("runScrape's default cap goes flag > env > config > 1200", async () => {
+  assert.equal(await serperTextLength([]), 1200);
+  assert.equal(await serperTextLength([], {}, { maxChars: 300 }), 300);
+  assert.equal(await serperTextLength([], { [MAX_CHARS_ENV]: "400" }, { maxChars: 300 }), 400);
+  assert.equal(await serperTextLength(["--max-chars", "500"], { [MAX_CHARS_ENV]: "400" }, { maxChars: 300 }), 500);
+});
+
+test("runScrape's --full cap goes flag > env > config > 50000", async () => {
+  assert.equal(await serperTextLength(["--full"], {}, {}, 60000), 50000);
+  assert.equal(await serperTextLength(["--full"], {}, { fullMaxChars: 2000 }), 2000);
+  assert.equal(await serperTextLength(["--full"], { [FULL_MAX_CHARS_ENV]: "3000" }, { fullMaxChars: 2000 }), 3000);
+  assert.equal(
+    await serperTextLength(["--full", "--full-max-chars", "4000"], { [FULL_MAX_CHARS_ENV]: "3000" }, { fullMaxChars: 2000 }),
+    4000,
+  );
+});
+
+test("runScrape keeps the two caps apart: each setting moves only its own mode", async () => {
+  const env = { [MAX_CHARS_ENV]: "300", [FULL_MAX_CHARS_ENV]: "4000" };
+
+  assert.equal(await serperTextLength([], env), 300);
+  assert.equal(await serperTextLength(["--full"], env), 4000);
+});
+
+test("runScrape applies the caps on the Bright Data path, to what it asks Bright Data for and to what it returns", async () => {
+  assert.equal(await brightDataLimit([]), 1200);
+  assert.equal(await brightDataLimit(["--max-chars", "321"]), 321);
+  assert.equal(await brightDataLimit([], { [MAX_CHARS_ENV]: "322" }), 322);
+  assert.equal(await brightDataLimit([], {}, { maxChars: 323 }), 323);
+  assert.equal(await brightDataLimit(["--full"]), 50000);
+  assert.equal(await brightDataLimit(["--full", "--full-max-chars", "7777"]), 7777);
+  assert.equal(await brightDataLimit(["--full"], { [FULL_MAX_CHARS_ENV]: "7778" }), 7778);
+  assert.equal(await brightDataLimit(["--full"], {}, { fullMaxChars: 7779 }), 7779);
+
+  const long = JSON.stringify({ url: "https://example.org/", markdown: "m".repeat(2000) });
+  const fetchImpl = (async () => new Response(long)) as typeof fetch;
+  const output = await runScrape(
+    ["https://example.org/", "--provider", "brightdata", "--max-chars", "250"],
+    fetchImpl,
+    BRIGHT_DATA_ENV,
+    {},
+  );
+  assert.equal((brightDataResults(output)[0].markdown as string).length, 250);
+});
+
+test("runScrape --ladder applies the caps", async () => {
+  await withLadderStub("ok", async () => {
+    const run = async (args: string[], env: NodeJS.ProcessEnv = {}, config: Record<string, unknown> = {}) => {
+      const output = await runScrape(
+        [LONG_URL, "--ladder", ...args],
+        (async () => new Response("{}")) as typeof fetch,
+        { ...hermeticEnv(), ...env },
+        config,
+      );
+      return (output.text as string).length;
+    };
+
+    assert.equal(await run([]), 1200);
+    assert.equal(await run(["--max-chars", "50"]), 50);
+    assert.equal(await run([], { [MAX_CHARS_ENV]: "60" }), 60);
+    assert.equal(await run([], {}, { maxChars: 70 }), 70);
+    assert.equal(await run(["--full", "--full-max-chars", "80"]), 80);
+  });
+});
+
+test("runScrape's hint names the --full cap in force and never offers --max-chars back", async () => {
+  const { fetchImpl } = serperServing(5000);
+  const url = "https://example.com/big";
+
+  const plain = await runScrape([url, "--max-chars", "100"], fetchImpl, { SERPER_API_KEY: "k" }, {});
+  const configured = await runScrape([url], fetchImpl, { SERPER_API_KEY: "k", [FULL_MAX_CHARS_ENV]: "8000" }, {});
+
+  // Positive trigger first: a --full rerun is offered, with the real cap.
+  assert.equal(configured.help, `Run \`serp-axi scrape '${url}' --full\` to see up to 8000 characters (5000 total)`);
+  assert.equal(plain.help, `Run \`serp-axi scrape '${url}' --full\` to see up to 50000 characters (5000 total)`);
+  assert.doesNotMatch(plain.help as string, /--max-chars/);
+});
+
+test("runScrape's hint does not offer a --full rerun whose cap is no higher than the default cap", async () => {
+  const { fetchImpl } = serperServing(5000);
+  const env = { SERPER_API_KEY: "k", [FULL_MAX_CHARS_ENV]: "1000" };
+
+  const output = await runScrape(["https://example.com/big"], fetchImpl, env, {});
+
+  assert.equal(output.help, "content is capped at 1200 characters (5000 total)");
+});
+
+test("runScrape --full reports the --full cap it hit", async () => {
+  const { fetchImpl } = serperServing(5000);
+
+  const output = await runScrape(
+    ["https://example.com/big", "--full", "--full-max-chars", "900"],
+    fetchImpl,
+    { SERPER_API_KEY: "k" },
+    {},
+  );
+
+  assert.equal((output.text as string).length, 900);
+  assert.match(output.help as string, /capped at 900 characters even with --full/);
+});
+
+test("runScrape refuses --max-chars with --full, and --full-max-chars without it, before any network call", async () => {
+  const conflicts: Array<{ args: string[]; message: RegExp }> = [
+    { args: ["--max-chars", "10", "--full"], message: /--max-chars cannot be combined with --full/ },
+    { args: ["--full", "--max-chars", "10"], message: /--max-chars cannot be combined with --full/ },
+    { args: ["--full-max-chars", "10"], message: /--full-max-chars only applies with --full/ },
+  ];
+  const providers: string[][] = [[], ["--provider", "brightdata"], ["--ladder"]];
+  for (const provider of providers) {
+    for (const { args, message } of conflicts) {
+      const { fetchImpl, calls } = serperServing(2000);
+      const env = { SERPER_API_KEY: "k", BRIGHTDATA_API_KEY: "k" };
+      const label = `${provider.join(" ") || "serper"} ${args.join(" ")}`;
+      await assert.rejects(
+        () => runScrape(["https://example.com/big", ...provider, ...args], fetchImpl, env, {}),
+        (error: unknown) => {
+          assert.ok(error instanceof SerpAxiError, label);
+          assert.equal(error.kind, "usage", label);
+          assert.match(error.message, message, label);
+          return true;
+        },
+        label,
+      );
+      assert.equal(calls.count, 0, `${label} reached the network`);
+    }
+  }
+
+  // Positive trigger: the same flags in the run they apply to do reach the network.
+  const ok = serperServing(2000);
+  await runScrape(["https://example.com/big", "--max-chars", "10"], ok.fetchImpl, { SERPER_API_KEY: "k" }, {});
+  await runScrape(["https://example.com/big", "--full", "--full-max-chars", "10"], ok.fetchImpl, { SERPER_API_KEY: "k" }, {});
+  assert.equal(ok.calls.count, 2);
+});
+
+test("runScrape does not call SERP_AXI_MAX_CHARS or a config cap for the other mode a conflict", async () => {
+  assert.equal(await serperTextLength(["--full"], { [MAX_CHARS_ENV]: "300" }, { maxChars: 100 }), 5000);
+  assert.equal(await serperTextLength([], { [FULL_MAX_CHARS_ENV]: "9000" }, { fullMaxChars: 100 }), 1200);
+});
+
+test("runScrape names the flag, env var or config key a bad cap came from, before any network call", async () => {
+  const cases: Array<{ name: string; args?: string[]; env?: NodeJS.ProcessEnv; config?: Record<string, unknown>; message: RegExp }> = [
+    { name: "flag", args: ["--max-chars", "abc"], message: /^--max-chars must be a whole number of characters, got string "abc"/ },
+    { name: "flag zero", args: ["--max-chars", "0"], message: /^--max-chars must be a whole number of characters from 1 to \d+, got 0/ },
+    { name: "flag negative", args: ["--max-chars", "-5"], message: /^--max-chars must be a whole number/ },
+    { name: "flag too big", args: ["--max-chars", "99999999999999999999"], message: /^--max-chars must be a whole number of characters from 1 to/ },
+    { name: "full flag", args: ["--full", "--full-max-chars", "x"], message: /^--full-max-chars must be/ },
+    { name: "env", env: { [MAX_CHARS_ENV]: "abc" }, message: /^SERP_AXI_MAX_CHARS must be a whole number of characters, got string "abc"/ },
+    { name: "full env under --full", args: ["--full"], env: { [FULL_MAX_CHARS_ENV]: "1.5" }, message: /^SERP_AXI_FULL_MAX_CHARS must be/ },
+    { name: "config string", config: { maxChars: "300" }, message: /^maxChars must be a JSON integer number of characters, got string "300"/ },
+    { name: "config fraction", config: { maxChars: 1.5 }, message: /^maxChars must be a JSON integer/ },
+    { name: "config zero", config: { maxChars: 0 }, message: /^maxChars must be a whole number of characters from 1 to \d+, got 0/ },
+    { name: "full config under --full", args: ["--full"], config: { fullMaxChars: -1 }, message: /^fullMaxChars must be/ },
+  ];
+  for (const { name, args = [], env = {}, config = {}, message } of cases) {
+    const { fetchImpl, calls } = serperServing(2000);
+    await assert.rejects(
+      () => runScrape(["https://example.com/big", ...args], fetchImpl, { SERPER_API_KEY: "k", ...env }, config),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError, name);
+        assert.equal(error.kind, "usage", name);
+        assert.match(error.message, message, name);
+        assert.ok(error.help.length > 0, `${name} has no help line`);
+        return true;
+      },
+      name,
+    );
+    assert.equal(calls.count, 0, `${name} reached the network`);
+  }
+
+  // Positive trigger: the network is reached when the values are good.
+  const good = serperServing(2000);
+  await runScrape(["https://example.com/big", "--max-chars", "10"], good.fetchImpl, { SERPER_API_KEY: "k" }, { maxChars: 20 });
+  assert.equal(good.calls.count, 1);
+});
+
+test("runScrape validates only the source that wins, and reads an empty env or a null config as unset", async () => {
+  // A bad env value under a flag, and a bad config value under an env var, never matter.
+  assert.equal(await serperTextLength(["--max-chars", "5"], { [MAX_CHARS_ENV]: "abc" }, { maxChars: "x" }), 5);
+  assert.equal(await serperTextLength([], { [MAX_CHARS_ENV]: "6" }, { maxChars: "x" }), 6);
+  assert.equal(await serperTextLength([], { [MAX_CHARS_ENV]: "" }), 1200);
+  assert.equal(await serperTextLength([], {}, { maxChars: null }), 1200);
+});
+
+test("runScrape checks the --full cap on every run, so a bad --full setting fails a run that never uses --full", async () => {
+  const bad: Array<{ env?: NodeJS.ProcessEnv; config?: Record<string, unknown>; message: RegExp }> = [
+    { env: { [FULL_MAX_CHARS_ENV]: "abc" }, message: /SERP_AXI_FULL_MAX_CHARS must be/ },
+    { config: { fullMaxChars: "abc" }, message: /fullMaxChars must be a JSON integer/ },
+  ];
+  for (const { env = {}, config = {}, message } of bad) {
+    await assert.rejects(() => serperTextLength([], env, config), message);
+  }
+
+  // Positive trigger: the same settings, valid, are used.
+  assert.equal(await serperTextLength([], { [FULL_MAX_CHARS_ENV]: "9000" }), 1200);
+});
+
+test("runScrape never reads the default cap on a --full run, so a bad default setting cannot fail it", async () => {
+  // Positive trigger: the same bad settings fail a run that does use the default cap.
+  await assert.rejects(() => serperTextLength([], { [MAX_CHARS_ENV]: "abc" }), /SERP_AXI_MAX_CHARS must be/);
+  await assert.rejects(() => serperTextLength([], {}, { maxChars: "abc" }), /maxChars must be a JSON integer/);
+
+  assert.equal(await serperTextLength(["--full"], { [MAX_CHARS_ENV]: "abc" }), 5000);
+  assert.equal(await serperTextLength(["--full"], {}, { maxChars: "abc" }), 5000);
+  // The Bright Data and ladder paths share the rule.
+  assert.equal(await brightDataLimit(["--full"], { [MAX_CHARS_ENV]: "abc" }, { maxChars: "abc" }), 50000);
+});
+
+test("runScrape's --full hint still works after a --max-chars flag got past a bad SERP_AXI_MAX_CHARS", async () => {
+  const url = "https://example.com/big";
+  const env = { [MAX_CHARS_ENV]: "bad" };
+  const { fetchImpl } = serperServing(5000);
+
+  const first = await runScrape([url, "--max-chars", "100"], fetchImpl, { SERPER_API_KEY: "k", ...env }, {});
+  const hinted = /^Run `(serp-axi scrape '[^']+' --full)`/.exec(first.help as string);
+  assert.ok(hinted, `no --full rerun in ${String(first.help)}`);
+
+  // Run the command the hint printed, in the same environment.
+  const args = hinted[1].replace("serp-axi scrape ", "").replaceAll("'", "").split(" ");
+  assert.deepEqual(args, [url, "--full"]);
+  const rerun = await runScrape(args, fetchImpl, { SERPER_API_KEY: "k", ...env }, {});
+  assert.equal((rerun.text as string).length, 5000);
+});
+
+test("runScrape's --include-markup hint repeats the cap flags it was given", async () => {
+  // Positive trigger: with no cap flag the hint is the bare rerun.
+  assert.match((brightDataResults(await scrapeFixture([]))[0].help as string), /--provider brightdata --include-markup`/);
+
+  const capped = brightDataResults(await scrapeFixture(["--max-chars", "300"]))[0];
+  assert.match(capped.help as string, /--provider brightdata --max-chars 300 --include-markup`/);
+
+  const full = brightDataResults(await scrapeFixture(["--full", "--full-max-chars", "7000"]))[0];
+  assert.match(full.help as string, /--provider brightdata --full --full-max-chars 7000 --include-markup`/);
+
+  // Env and config settings are standing, so the rerun picks them up without being told.
+  const viaEnv = brightDataResults(await scrapeFixture([], { [MAX_CHARS_ENV]: "300" }))[0];
+  assert.doesNotMatch(viaEnv.help as string, /--max-chars/);
+});
+
+test("runScrape opens the config file for Serper only once its input is valid", async () => {
+  await withBrokenConfig(async (xdg) => {
+    const env = { SERPER_API_KEY: "k", XDG_CONFIG_HOME: xdg };
+    const { fetchImpl, calls } = serperServing(2000);
+
+    await assert.rejects(() => runScrape(["https://example.com/a"], fetchImpl, env), /config file .* is not valid JSON/);
+    assert.equal(calls.count, 0);
+  });
+});
+
+test("runScrape reads a character cap from the config file on disk, from the injected env", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "serp-axi-config-"));
+  try {
+    mkdirSync(path.join(dir, "serp-axi"));
+    writeFileSync(path.join(dir, "serp-axi", "config.json"), JSON.stringify({ maxChars: 77, fullMaxChars: 88 }));
+    const { fetchImpl } = serperServing(5000);
+    const env = { SERPER_API_KEY: "k", XDG_CONFIG_HOME: dir };
+
+    const plain = await runScrape(["https://example.com/big"], fetchImpl, env);
+    const full = await runScrape(["https://example.com/big", "--full"], fetchImpl, env);
+
+    assert.equal((plain.text as string).length, 77);
+    assert.equal((full.text as string).length, 88);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
