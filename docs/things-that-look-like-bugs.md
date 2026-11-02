@@ -222,15 +222,24 @@ or if a test that hands in a config still reads the developer's own file.
 or a ladder axis flag only if that flag was on the command line. A value that came
 from `SERP_AXI_INCLUDE_MARKUP`, `BRIGHTDATA_DATASET_ID`, or the config file is
 not repeated, except that `--include-markup` is added whenever markup is on,
-whichever way it was turned on.
+whichever way it was turned on. The `--include-markup` hint also repeats the cap
+flags as typed (`--max-chars 500`, or `--full --full-max-chars 7000`), and the
+`--full` hint does not: it repeats nothing of `--max-chars`, because `--full`
+refuses it. A cap that came from `SERP_AXI_MAX_CHARS`, `SERP_AXI_FULL_MAX_CHARS`,
+or the config file is never repeated.
 
 **Why:** the env and config settings apply to the rerun by themselves, in the
 same shell. The hint is shorter, and a pasted command does not pin a value that
-the reader may have changed.
+the reader may have changed. A typed cap flag is the one flag-only setting that
+changes what the rerun returns without changing which record it fetches, so
+dropping it from the markup hint would bring the markup back under a different
+cap than the reader chose. The cap flags are repeated only after they passed the
+whole-number check, so they need no shell quoting.
 
 **When this becomes a real bug:** if the rerun fetches a different dataset, or
 uses different ladder axes, than the run that printed it, with the same
-environment.
+environment; or if the `--include-markup` hint drops a cap flag the run was
+given, or the `--full` hint carries `--max-chars`.
 
 ## Kept text fields can still contain tags, and `markdown` and `html2text` can repeat each other
 
@@ -328,40 +337,47 @@ per-run override: env outranks config.
 **When this becomes a real bug:** if the env override stops beating the config
 key, or `SERP_AXI_INCLUDE_MARKUP=0` is read as true.
 
-## A bad `--full` cap fails a run that never uses `--full`
+## A bad `--full` cap fails a run that never uses `--full`, but not the other way round
 
 **What you see:** `SERP_AXI_FULL_MAX_CHARS=abc serp-axi scrape <url>` exits with a
 usage error naming `SERP_AXI_FULL_MAX_CHARS`, though the run never asked for
-`--full`. A bad `maxChars` in the config file fails a `--full` run the same way.
-Only the source that wins for each cap is checked, so a bad env value under a
-flag, or a bad config value under an env var, never fails anything.
+`--full`. The reverse is not true: `SERP_AXI_MAX_CHARS=abc serp-axi scrape <url>
+--full` runs, because a `--full` run never reads the normal cap. A bad `maxChars`
+in the config file is skipped the same way. Only the source that wins for each cap
+is checked, so a bad env value under a flag, or a bad config value under an env
+var, never fails anything.
 
 **Why:** the rerun hint under a truncated field prints the real `--full` cap
 ("to see up to 8000 characters"), so a normal run has to resolve it. A hint that
 printed a number nobody validated would be a wrong fact, and resolving the cap
 lazily would make the failure depend on whether the page happened to be long
-enough to truncate.
+enough to truncate. A `--full` run prints no hint that names the normal cap, so
+it has nothing to validate. That also keeps the `--full` rerun that a hint
+offers working when the original run got past a bad `SERP_AXI_MAX_CHARS` with a
+`--max-chars` flag.
 
 **When this becomes a real bug:** if a value that loses to a flag or an env var
-is checked and fails the run, or if a malformed cap passes and a hint prints it.
+is checked and fails the run, if a malformed cap passes and a hint prints it, or
+if a `--full` run fails on `SERP_AXI_MAX_CHARS` or `maxChars`.
 
-## `--max-chars` is refused with `--full`, and a hint never offers `--max-chars`
+## `--max-chars` is refused with `--full`, and the `--full` hint never offers `--max-chars`
 
 **What you see:** `serp-axi scrape <url> --full --max-chars 500` exits with
 "--max-chars cannot be combined with --full", and `--full-max-chars 500` without
 `--full` exits with "--full-max-chars only applies with --full". The rerun hint
 says `Run \`serp-axi scrape '<url>' --full\` to see up to N characters` and
 leaves `--max-chars` off, even when the run being repeated used it. An env var or
-config key for the cap that the run does not use (`SERP_AXI_FULL_MAX_CHARS` on a
-normal run) is accepted and ignored.
+config key for the cap that the run does not use is not a conflict:
+`SERP_AXI_FULL_MAX_CHARS` on a normal run is still checked (see the entry above),
+and `SERP_AXI_MAX_CHARS` on a `--full` run is not read at all.
 
 **Why:** `--full` picks which cap applies, so `--max-chars` beside it would name
 a cap the run does not use, and `--full-max-chars` alone would be read by
 nothing. Accepting either and ignoring it is the silent failure the other
 flag-conflict checks in `scrape` already refuse. Env and config settings are not
-conflicts because they are standing defaults for both modes. The hint omits
-`--max-chars` because the rerun is the `--full` run, where `--max-chars` is an
-error; the `--full` cap it prints is the one that rerun will use.
+conflicts because they are standing defaults for both modes. The `--full` hint
+omits `--max-chars` because the rerun is the `--full` run, where `--max-chars` is
+an error; the `--full` cap it prints is the one that rerun will use.
 
 **When this becomes a real bug:** if a hint suggests a command that exits with
 the usage error above, or if a conflicting pair reaches the network.
@@ -377,7 +393,10 @@ reported as itself, ahead of the file error.
 **Why:** `maxChars` and `fullMaxChars` apply to every path, so every path needs
 the file. It is read once, after the URL and key checks, so a broken file never
 replaces a more useful error. Unlike `includeMarkup`, these keys cannot be left
-out of a path.
+out of a path. The file is opened even when a flag or env var already settles both
+caps, because skipping the read in that case would make a corrupt file fail a
+run only when the settings happen to leave a cap open, which is harder to
+diagnose than failing every run the same way.
 
 **When this becomes a real bug:** if a run opens the config file before it has
 checked its URL, its API key (or ladder binary), and the cap flags, or if a
@@ -400,3 +419,39 @@ cut is what guarantees the cap.
 **When this becomes a real bug:** if a live request shows Bright Data rejecting
 the field, or reading it as a record count so that the cap changes how many
 records come back.
+
+## The Bright Data cap covers top-level strings, not nested ones
+
+**What you see:** a Bright Data record with a long string inside a nested object
+or an array (`{"reviews": [{"text": "<50,000 characters>"}]}`) comes back with
+that string whole, under the 1,200-character default, and no `TruncatedFrom`
+marker names it. A long top-level string in the same record is cut.
+
+**Why:** the cut walks the record's own entries and cuts each value that is a
+string (`shapeScrapeRecord` in `src/scrape-output.ts`). It does not descend into
+objects or arrays, because the shape of a Bright Data record depends on the
+dataset and is not ours to know, and a marker such as `reviews[3].textTruncatedFrom`
+has no obvious home in the output. Only `url` is exempt from the top-level cut,
+so that it stays usable as a link. The cap is a bound on the fields a record is
+known to hold, not a promise about its total size.
+
+**When this becomes a real bug:** if a dataset puts its page text in a nested
+field and a normal run returns it uncapped, since the cap would then fail at what
+it is for. The fix is to descend, with a marker that names the path.
+
+## A cut can come out one character short of the cap
+
+**What you see:** `--max-chars 3` on a field that starts `ab` followed by an emoji
+returns `ab` (two characters), not three, and the marker reports the real total.
+With `--max-chars 1` on a field that starts with an emoji, the field comes back
+empty.
+
+**Why:** the cap counts UTF-16 code units, like JavaScript's string length, and an
+emoji or other character outside the Basic Multilingual Plane takes two of them.
+A cut between the halves would leave half a character, which Node writes to
+stdout as the replacement character U+FFFD. `truncate` in
+`src/output.ts` backs up one unit instead. The `totalChars` it reports stays in
+code units, so it can exceed the number of characters a reader counts.
+
+**When this becomes a real bug:** if a cut field ends in half of a surrogate pair,
+or if backing up removes more than one unit.

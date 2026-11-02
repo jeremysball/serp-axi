@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { SerpAxiError } from "./errors.ts";
 import {
-  DEFAULT_CHAR_LIMITS,
   DEFAULT_FULL_MAX_CHARS,
   DEFAULT_MAX_CHARS,
   FULL_MAX_CHARS_ENV,
@@ -13,20 +12,24 @@ import {
   resolveCharLimits,
   resolveIncludeMarkup,
   shapeScrapeRecord,
+  type CharLimitRequest,
   type CharLimitSources,
+  type CharLimits,
   type ShapeOptions,
 } from "./scrape-output.ts";
 
 const EVERY_STRING = { kind: "every-string", except: new Set(["url"]) } as const;
 const TEXT_FIELD = { kind: "field", key: "text" } as const;
 const RERUN = "serp-axi scrape 'https://example.com/a'";
+const DEFAULT_LIMITS: CharLimits = { maxChars: DEFAULT_MAX_CHARS, fullMaxChars: DEFAULT_FULL_MAX_CHARS };
 
 const HTML_DOCUMENT = '<!doctype html><html lang="en"><head><title>T</title></head><body><p>hi</p></body></html>';
 
 function shape(record: Record<string, unknown>, overrides: Partial<ShapeOptions> = {}) {
   return shapeScrapeRecord(record, {
     full: false,
-    limits: DEFAULT_CHAR_LIMITS,
+    limits: DEFAULT_LIMITS,
+    capFlags: "",
     includeMarkup: false,
     rerun: RERUN,
     scope: EVERY_STRING,
@@ -250,8 +253,8 @@ test("shapeScrapeRecord classifies a field of many comments in linear time", () 
 });
 
 test("limitFor is the one place the character limit is chosen", () => {
-  assert.equal(limitFor(false, DEFAULT_CHAR_LIMITS), DEFAULT_MAX_CHARS);
-  assert.equal(limitFor(true, DEFAULT_CHAR_LIMITS), DEFAULT_FULL_MAX_CHARS);
+  assert.equal(limitFor(false, DEFAULT_LIMITS), DEFAULT_MAX_CHARS);
+  assert.equal(limitFor(true, DEFAULT_LIMITS), DEFAULT_FULL_MAX_CHARS);
   assert.equal(limitFor(false, { maxChars: 7, fullMaxChars: 9 }), 7);
   assert.equal(limitFor(true, { maxChars: 7, fullMaxChars: 9 }), 9);
 });
@@ -381,14 +384,62 @@ test("shapeScrapeRecord under --full reports the --full cap it hit, whatever its
   assert.match(out.help as string, /capped at 1500 characters even with --full/);
 });
 
+test("shapeScrapeRecord on a --full run does not depend on the normal cap", () => {
+  // resolveCharLimits leaves the default in `maxChars` on a --full run because
+  // nothing reads it; this is the check that nothing does.
+  const record = { url: "https://example.com/a", markdown: "m".repeat(2000), page_html: HTML_DOCUMENT };
+  const outputs = [1, 100, 1200, 99999].map((maxChars) =>
+    shape(record, { full: true, capFlags: " --full", limits: { maxChars, fullMaxChars: 1500 } }),
+  );
+
+  assert.equal((outputs[0].markdown as string).length, 1500);
+  for (const out of outputs) assert.deepEqual(out, outputs[0]);
+});
+
+test("shapeScrapeRecord's --include-markup hint repeats the cap flags the run was given", () => {
+  const record = { url: "https://example.com/a", markdown: "m".repeat(2000), page_html: HTML_DOCUMENT };
+
+  // Positive trigger: with no cap flags the hint is the bare rerun, as before.
+  assert.match(shape(record).help as string, /Run `serp-axi scrape 'https:\/\/example.com\/a' --include-markup` to keep/);
+
+  const capped = shape(record, { capFlags: " --max-chars 500", limits: { maxChars: 500, fullMaxChars: 50000 } });
+  assert.match(capped.help as string, / `serp-axi scrape 'https:\/\/example.com\/a' --max-chars 500 --include-markup` to keep/);
+
+  const full = shape(record, {
+    full: true,
+    capFlags: " --full --full-max-chars 7000",
+    limits: { maxChars: 1200, fullMaxChars: 7000 },
+  });
+  assert.match(
+    full.help as string,
+    / `serp-axi scrape 'https:\/\/example.com\/a' --full --full-max-chars 7000 --include-markup` to keep/,
+  );
+});
+
+test("shapeScrapeRecord's --full hint drops the --max-chars flag, which --full refuses", () => {
+  const record = { url: "https://example.com/a", markdown: "m".repeat(2000) };
+
+  const out = shape(record, { capFlags: " --max-chars 500", limits: { maxChars: 500, fullMaxChars: 50000 } });
+
+  assert.equal(out.help, `Run \`${RERUN} --full\` to see up to 50000 characters (2000 total)`);
+  assert.doesNotMatch(out.help as string, /--max-chars/);
+});
+
 test("requestCharLimits leaves a cap unset when neither flag nor env speaks for it", () => {
-  assert.deepEqual(requestCharLimits(sources()), { maxChars: undefined, fullMaxChars: undefined });
+  assert.deepEqual(requestCharLimits(sources()), {
+    full: false,
+    maxChars: undefined,
+    fullMaxChars: undefined,
+    capFlags: "",
+  });
 });
 
 test("requestCharLimits lets the flag beat the env, for each cap on its own", () => {
   assert.deepEqual(requestCharLimits(sources({ envMaxChars: "300", envFullMaxChars: "9000" })), {
+    full: false,
     maxChars: 300,
     fullMaxChars: 9000,
+    capFlags: "",
   });
   assert.deepEqual(requestCharLimits(sources({ flagMaxChars: "400", envMaxChars: "300" })).maxChars, 400);
   assert.deepEqual(
@@ -429,11 +480,45 @@ test("requestCharLimits refuses --full-max-chars without --full", () => {
 
 test("requestCharLimits does not call an env cap for the other mode a conflict", () => {
   // The env vars hold a standing preference for both kinds of run.
-  const full = requestCharLimits(sources({ full: true, envMaxChars: "300" }));
   const plain = requestCharLimits(sources({ envFullMaxChars: "9000" }));
-
-  assert.equal(full.maxChars, 300);
   assert.equal(plain.fullMaxChars, 9000);
+
+  // Positive trigger: the same env value is read, and wins, on a run that uses it.
+  assert.equal(requestCharLimits(sources({ envMaxChars: "300" })).maxChars, 300);
+  // A --full run does not conflict with it either; it just never reads it.
+  assert.doesNotThrow(() => requestCharLimits(sources({ full: true, envMaxChars: "300" })));
+});
+
+test("requestCharLimits never reads the normal cap on a --full run, so a bad value there cannot fail it", () => {
+  // Positive trigger: the same bad env value fails a run that uses the normal cap.
+  assert.throws(() => requestCharLimits(sources({ envMaxChars: "bad" })), usageError(/SERP_AXI_MAX_CHARS/));
+
+  // The --full rerun a hint suggests after `--max-chars 500` got past the bad value.
+  const rerun = requestCharLimits(sources({ full: true, envMaxChars: "bad" }));
+  assert.equal(rerun.maxChars, undefined);
+  assert.equal(rerun.full, true);
+
+  // The cap the run does use is still checked.
+  assert.throws(() => requestCharLimits(sources({ full: true, envFullMaxChars: "bad" })), usageError(/SERP_AXI_FULL_MAX_CHARS/));
+});
+
+test("requestCharLimits still checks the --full cap on a run without --full, which names it in a hint", () => {
+  assert.throws(() => requestCharLimits(sources({ envFullMaxChars: "bad" })), usageError(/SERP_AXI_FULL_MAX_CHARS/));
+  // Positive trigger: a flag that wins over the bad env value clears it.
+  assert.equal(requestCharLimits(sources({ full: true, flagFullMaxChars: "5", envFullMaxChars: "bad" })).fullMaxChars, 5);
+});
+
+test("requestCharLimits hands back the cap flags as typed, for a rerun command", () => {
+  assert.equal(requestCharLimits(sources()).capFlags, "");
+  assert.equal(requestCharLimits(sources({ flagMaxChars: "500" })).capFlags, " --max-chars 500");
+  assert.equal(requestCharLimits(sources({ full: true })).capFlags, " --full");
+  assert.equal(
+    requestCharLimits(sources({ full: true, flagFullMaxChars: "7000" })).capFlags,
+    " --full --full-max-chars 7000",
+  );
+  // Env values are standing settings the rerun picks up on its own, so they are not repeated.
+  assert.equal(requestCharLimits(sources({ envMaxChars: "300", envFullMaxChars: "9000" })).capFlags, "");
+  assert.equal(requestCharLimits(sources({ full: true, envFullMaxChars: "9000" })).capFlags, " --full");
 });
 
 test("requestCharLimits rejects anything but a whole number of at least 1, naming the flag", () => {
@@ -464,41 +549,57 @@ test("requestCharLimits names the env var, with an example, when the env value i
   assert.throws(() => requestCharLimits(sources({ envFullMaxChars: "0" })), usageError(new RegExp(`^${FULL_MAX_CHARS_ENV} must be`)));
 });
 
+function request(overrides: Partial<CharLimitRequest> = {}): CharLimitRequest {
+  return { full: false, capFlags: "", ...overrides };
+}
+
 test("resolveCharLimits falls back to the built-in defaults", () => {
-  assert.deepEqual(resolveCharLimits({}, {}), { maxChars: 1200, fullMaxChars: 50000 });
-  assert.deepEqual(resolveCharLimits({}, {}), DEFAULT_CHAR_LIMITS);
+  assert.deepEqual(resolveCharLimits(request(), {}), { maxChars: 1200, fullMaxChars: 50000 });
+  assert.deepEqual(resolveCharLimits(request(), {}), DEFAULT_LIMITS);
 });
 
 test("resolveCharLimits lets a request beat the config, and the config beat the default, for each cap", () => {
-  assert.deepEqual(resolveCharLimits({}, { maxChars: 300, fullMaxChars: 9000 }), { maxChars: 300, fullMaxChars: 9000 });
-  assert.deepEqual(resolveCharLimits({ maxChars: 50 }, { maxChars: 300, fullMaxChars: 9000 }), {
+  assert.deepEqual(resolveCharLimits(request(), { maxChars: 300, fullMaxChars: 9000 }), { maxChars: 300, fullMaxChars: 9000 });
+  assert.deepEqual(resolveCharLimits(request({ maxChars: 50 }), { maxChars: 300, fullMaxChars: 9000 }), {
     maxChars: 50,
     fullMaxChars: 9000,
   });
-  assert.deepEqual(resolveCharLimits({ fullMaxChars: 70 }, { maxChars: 300, fullMaxChars: 9000 }), {
+  assert.deepEqual(resolveCharLimits(request({ fullMaxChars: 70 }), { maxChars: 300, fullMaxChars: 9000 }), {
     maxChars: 300,
     fullMaxChars: 70,
   });
 });
 
 test("resolveCharLimits treats a null config value as unset, like the other config keys", () => {
-  assert.deepEqual(resolveCharLimits({}, { maxChars: null, fullMaxChars: null }), DEFAULT_CHAR_LIMITS);
+  assert.deepEqual(resolveCharLimits(request(), { maxChars: null, fullMaxChars: null }), DEFAULT_LIMITS);
 });
 
 test("resolveCharLimits ignores a bad config value for a cap the request already set", () => {
   // Positive trigger: the same bad value is an error when nothing beats it.
-  assert.throws(() => resolveCharLimits({}, { maxChars: "lots" }), usageError(/maxChars/));
+  assert.throws(() => resolveCharLimits(request(), { maxChars: "lots" }), usageError(/maxChars/));
 
-  assert.equal(resolveCharLimits({ maxChars: 5 }, { maxChars: "lots" }).maxChars, 5);
+  assert.equal(resolveCharLimits(request({ maxChars: 5 }), { maxChars: "lots" }).maxChars, 5);
 });
 
 test("resolveCharLimits requires a JSON integer from the config and names the key", () => {
   const bad: unknown[] = ["300", "abc", 1.5, 0, -1, true, [], {}, Number.MAX_SAFE_INTEGER + 2];
   for (const value of bad) {
-    assert.throws(() => resolveCharLimits({}, { maxChars: value }), usageError(/^maxChars must be a JSON integer|^maxChars must be a whole number/), `maxChars ${JSON.stringify(value)}`);
-    assert.throws(() => resolveCharLimits({}, { fullMaxChars: value }), usageError(/^fullMaxChars must be/), `fullMaxChars ${JSON.stringify(value)}`);
+    assert.throws(() => resolveCharLimits(request(), { maxChars: value }), usageError(/^maxChars must be a JSON integer|^maxChars must be a whole number/), `maxChars ${JSON.stringify(value)}`);
+    assert.throws(() => resolveCharLimits(request(), { fullMaxChars: value }), usageError(/^fullMaxChars must be/), `fullMaxChars ${JSON.stringify(value)}`);
   }
-  assert.equal(resolveCharLimits({}, { maxChars: 1 }).maxChars, 1);
+  assert.equal(resolveCharLimits(request(), { maxChars: 1 }).maxChars, 1);
+});
+
+test("resolveCharLimits does not read the normal cap's config key on a --full run", () => {
+  // Positive trigger: the same bad config value fails a run that uses the normal cap.
+  assert.throws(() => resolveCharLimits(request(), { maxChars: "lots" }), usageError(/^maxChars must be/));
+
+  const limits = resolveCharLimits(request({ full: true }), { maxChars: "lots", fullMaxChars: 9000 });
+  assert.equal(limits.fullMaxChars, 9000);
+  // The default stands in for a cap nothing reads; a configured 300 is not carried along.
+  assert.equal(resolveCharLimits(request({ full: true }), { maxChars: 300 }).maxChars, DEFAULT_MAX_CHARS);
+  // The cap the run does use is still checked.
+  assert.throws(() => resolveCharLimits(request({ full: true }), { fullMaxChars: "lots" }), usageError(/^fullMaxChars must be/));
 });
 
 test("the built-in defaults are the numbers the docs name", () => {

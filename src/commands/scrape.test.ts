@@ -1053,7 +1053,7 @@ test("runScrape validates only the source that wins, and reads an empty env or a
   assert.equal(await serperTextLength([], {}, { maxChars: null }), 1200);
 });
 
-test("runScrape validates both caps on every run, so a bad --full setting fails a run that never uses --full", async () => {
+test("runScrape checks the --full cap on every run, so a bad --full setting fails a run that never uses --full", async () => {
   const bad: Array<{ env?: NodeJS.ProcessEnv; config?: Record<string, unknown>; message: RegExp }> = [
     { env: { [FULL_MAX_CHARS_ENV]: "abc" }, message: /SERP_AXI_FULL_MAX_CHARS must be/ },
     { config: { fullMaxChars: "abc" }, message: /fullMaxChars must be a JSON integer/ },
@@ -1062,11 +1062,50 @@ test("runScrape validates both caps on every run, so a bad --full setting fails 
     await assert.rejects(() => serperTextLength([], env, config), message);
   }
 
-  // The reverse also holds: a bad default cap fails a --full run.
-  await assert.rejects(() => serperTextLength(["--full"], {}, { maxChars: "abc" }), /maxChars must be a JSON integer/);
-
   // Positive trigger: the same settings, valid, are used.
   assert.equal(await serperTextLength([], { [FULL_MAX_CHARS_ENV]: "9000" }), 1200);
+});
+
+test("runScrape never reads the default cap on a --full run, so a bad default setting cannot fail it", async () => {
+  // Positive trigger: the same bad settings fail a run that does use the default cap.
+  await assert.rejects(() => serperTextLength([], { [MAX_CHARS_ENV]: "abc" }), /SERP_AXI_MAX_CHARS must be/);
+  await assert.rejects(() => serperTextLength([], {}, { maxChars: "abc" }), /maxChars must be a JSON integer/);
+
+  assert.equal(await serperTextLength(["--full"], { [MAX_CHARS_ENV]: "abc" }), 5000);
+  assert.equal(await serperTextLength(["--full"], {}, { maxChars: "abc" }), 5000);
+  // The Bright Data and ladder paths share the rule.
+  assert.equal(await brightDataLimit(["--full"], { [MAX_CHARS_ENV]: "abc" }, { maxChars: "abc" }), 50000);
+});
+
+test("runScrape's --full hint still works after a --max-chars flag got past a bad SERP_AXI_MAX_CHARS", async () => {
+  const url = "https://example.com/big";
+  const env = { [MAX_CHARS_ENV]: "bad" };
+  const { fetchImpl } = serperServing(5000);
+
+  const first = await runScrape([url, "--max-chars", "100"], fetchImpl, { SERPER_API_KEY: "k", ...env }, {});
+  const hinted = /^Run `(serp-axi scrape '[^']+' --full)`/.exec(first.help as string);
+  assert.ok(hinted, `no --full rerun in ${String(first.help)}`);
+
+  // Run the command the hint printed, in the same environment.
+  const args = hinted[1].replace("serp-axi scrape ", "").replaceAll("'", "").split(" ");
+  assert.deepEqual(args, [url, "--full"]);
+  const rerun = await runScrape(args, fetchImpl, { SERPER_API_KEY: "k", ...env }, {});
+  assert.equal((rerun.text as string).length, 5000);
+});
+
+test("runScrape's --include-markup hint repeats the cap flags it was given", async () => {
+  // Positive trigger: with no cap flag the hint is the bare rerun.
+  assert.match((brightDataResults(await scrapeFixture([]))[0].help as string), /--provider brightdata --include-markup`/);
+
+  const capped = brightDataResults(await scrapeFixture(["--max-chars", "300"]))[0];
+  assert.match(capped.help as string, /--provider brightdata --max-chars 300 --include-markup`/);
+
+  const full = brightDataResults(await scrapeFixture(["--full", "--full-max-chars", "7000"]))[0];
+  assert.match(full.help as string, /--provider brightdata --full --full-max-chars 7000 --include-markup`/);
+
+  // Env and config settings are standing, so the rerun picks them up without being told.
+  const viaEnv = brightDataResults(await scrapeFixture([], { [MAX_CHARS_ENV]: "300" }))[0];
+  assert.doesNotMatch(viaEnv.help as string, /--max-chars/);
 });
 
 test("runScrape opens the config file for Serper only once its input is valid", async () => {

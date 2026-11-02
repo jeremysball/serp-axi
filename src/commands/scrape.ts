@@ -89,15 +89,18 @@ Providers:
                       beside this package, or PATH.
 
 Flags:
-  --full                Return up to 50,000 characters per page instead of the default 1,200.
-  --max-chars <n>       Cap each page at n characters instead of the default 1,200.
+  --full                Cut page text at 50,000 characters instead of the default 1,200.
+                         The cap applies to the page's text field; for Bright Data, to
+                         every top-level string field except url.
+  --max-chars <n>       Cut the same fields at n characters instead of the default 1,200.
                          Not valid with --full, which has its own cap.
                          Also: ${MAX_CHARS_ENV}=<n>, or "maxChars": <n> in the config file.
   --full-max-chars <n>  Change the 50,000-character cap that --full uses. Only valid with --full.
                          Also: ${FULL_MAX_CHARS_ENV}=<n>, or "fullMaxChars": <n> in the config file.
                          Each cap: flag > env > config > built-in default. Both are whole
-                         numbers of at least 1, and a bad env or config value fails the run
-                         whether or not --full is given.
+                         numbers of at least 1. A bad value fails the run that uses it. A run
+                         without --full also checks the --full cap, because its hint names
+                         it; a --full run never reads the normal cap.
   --include-markup      Keep raw-HTML fields instead of omitting them. The character limit
                          still applies to what is kept; add --full to raise it. Serper and
                          --ladder return no raw-HTML field of their own, so the flag matters
@@ -243,6 +246,7 @@ function shapeBrightDataRecord(
   record: BrightDataRecord,
   full: boolean,
   limits: CharLimits,
+  capFlags: string,
   includeMarkup: boolean,
   datasetFlag: string,
 ): AxiOutput {
@@ -250,6 +254,7 @@ function shapeBrightDataRecord(
   return shapeScrapeRecord(record, {
     full,
     limits,
+    capFlags,
     includeMarkup,
     rerun: withMarkupFlag(`serp-axi scrape ${url} --provider brightdata${datasetFlag}`, includeMarkup),
     scope: { kind: "every-string", except: NON_TRUNCATED_RECORD_FIELDS },
@@ -262,12 +267,14 @@ function shapeTextRecord(
   record: AxiOutput,
   full: boolean,
   limits: CharLimits,
+  capFlags: string,
   includeMarkup: boolean,
   rerun: string,
 ): AxiOutput {
   return shapeScrapeRecord(record, {
     full,
     limits,
+    capFlags,
     includeMarkup,
     rerun: withMarkupFlag(rerun, includeMarkup),
     scope: { kind: "field", key: "text" },
@@ -319,7 +326,9 @@ async function runBrightDataScrape(
   return {
     provider: "brightdata",
     datasetId,
-    results: records.map((record) => shapeBrightDataRecord(record, full, limits, includeMarkup, datasetFlag)),
+    results: records.map((record) =>
+      shapeBrightDataRecord(record, full, limits, charRequest.capFlags, includeMarkup, datasetFlag),
+    ),
   };
 }
 
@@ -420,6 +429,7 @@ export async function runScrape(
     record,
     Boolean(flags.full),
     limits,
+    charRequest.capFlags,
     requestedMarkup ?? false,
     `serp-axi scrape ${shellQuote(url.toString())}`,
   );
@@ -508,6 +518,7 @@ async function runLadderScrape(
     record,
     Boolean(flags.full),
     limits,
+    charRequest.capFlags,
     includeMarkup,
     `serp-axi scrape ${shellQuote(url.toString())} --ladder${axisFlags}`,
   );

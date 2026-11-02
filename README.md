@@ -125,13 +125,22 @@ whole HTML document. Their `text` is whatever the provider extracted; for
 
 #### Character limits
 
-Every scrape path cuts each text field to a character cap. There are two caps,
-and `--full` only picks which one applies.
+Every scrape path cuts page text to a character cap. There are two caps, and
+`--full` only picks which one applies.
 
 | Cap | Flag | Env var | Config key | Default |
 | --- | --- | --- | --- | --- |
 | Normal run | `--max-chars <n>` | `SERP_AXI_MAX_CHARS` | `maxChars` | 1200 |
 | `--full` run | `--full-max-chars <n>` | `SERP_AXI_FULL_MAX_CHARS` | `fullMaxChars` | 50000 |
+
+What gets cut depends on the path. Serper and `--ladder` cut the body `text`
+field; a `title`, or the ladder's `warning`, is left whole. Bright Data cuts every
+top-level string field except `url`, and marks each one it cut with a
+`<field>TruncatedFrom` count. Strings inside a nested object or array are not
+cut, since a Bright Data record's shape is not ours to know. The cap counts
+UTF-16 code units (JavaScript string length). A cut that would land between the
+two halves of an emoji, or any other surrogate pair, backs up one unit, so a cut
+field can come out one short of the cap.
 
 Each cap goes flag, then env var, then the config file, then the default. The
 config file is `$XDG_CONFIG_HOME/serp-axi/config.json` (default
@@ -150,10 +159,16 @@ cap is not a conflict; it just sits unused.
 The rerun hint under a truncated field names the real `--full` cap, for example
 "to see up to 8000 characters", and drops the `--full` suggestion when that cap
 is no higher than the cap this run already used. It never suggests
-`--max-chars`.
+`--max-chars`, because `--full` refuses it. The hint that brings omitted markup
+back (`--include-markup`) does repeat the cap flags you typed, such as
+`--max-chars 500` or `--full --full-max-chars 7000`, so the markup returns under
+the same cap. A cap that came from the env or the config file is not repeated;
+the rerun picks it up on its own.
 
-Both caps are checked on every run, because the hint prints the `--full` cap. A
-malformed `SERP_AXI_FULL_MAX_CHARS` fails a run that never uses `--full`.
+A run without `--full` checks both caps, because its hint prints the `--full`
+cap. A malformed `SERP_AXI_FULL_MAX_CHARS` therefore fails a run that never uses
+`--full`. The reverse does not hold: a `--full` run never reads the normal cap,
+so a bad `SERP_AXI_MAX_CHARS` or `maxChars` cannot fail it.
 
 Every scrape path now opens the config file once its input has passed, so a
 corrupt `config.json` fails a Serper scrape too. Before the caps were
@@ -190,7 +205,7 @@ is completable with flags alone.
 | `SERP_AXI_SEARXNG_ENGINES` | optional engine list for `search --provider searxng` |
 | `SERP_AXI_SEARCH_TIMEOUT_MS` | optional timeout override for `search --provider searxng` |
 | `SERP_AXI_INCLUDE_MARKUP` | optional `1`/`0` (or `true`/`false`); keeps raw-HTML fields in `scrape` output (`--include-markup` wins) |
-| `SERP_AXI_MAX_CHARS` | optional whole number; the per-field character cap for a normal `scrape` run, default 1200 (`--max-chars` wins) |
+| `SERP_AXI_MAX_CHARS` | optional whole number; the character cap for page text on a normal `scrape` run, default 1200 (`--max-chars` wins; a `--full` run never reads it) |
 | `SERP_AXI_FULL_MAX_CHARS` | optional whole number; the cap for `scrape --full`, default 50000 (`--full-max-chars` wins) |
 
 ## In progress: scraping escalation ladder

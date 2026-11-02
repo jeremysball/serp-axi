@@ -43,3 +43,28 @@ test("truncate cuts long text and reports the total length", () => {
   assert.equal(result.truncated, true);
   assert.equal(result.totalChars, 11);
 });
+
+test("truncate never ends a cut in half of a surrogate pair", () => {
+  const grin = "\u{1F600}";
+  const text = `ab${grin}cd`;
+
+  // Positive trigger: a cut on either side of the pair keeps or drops all of it.
+  assert.equal(truncate(text, 4).text, `ab${grin}`);
+  assert.equal(truncate(text, 2).text, "ab");
+
+  // A cut between the two halves backs up one unit, so the text is one shorter than the limit.
+  const split = truncate(text, 3);
+  assert.equal(split.text, "ab");
+  assert.equal(split.truncated, true);
+  assert.equal(split.totalChars, 6);
+  assert.doesNotMatch(split.text, /[\ud800-\udbff]$/);
+
+  // A pair that is the whole first character leaves nothing at a limit of 1.
+  assert.equal(truncate(`${grin}hello`, 1).text, "");
+  assert.equal(truncate(`${grin}hello`, 2).text, grin);
+});
+
+test("truncate leaves a lone high surrogate that is already in the text alone", () => {
+  // Only a cut that splits a pair backs up; a stray surrogate the page held is its own.
+  assert.equal(truncate("ab\ud83dcd", 3).text, "ab\ud83d");
+});
