@@ -315,6 +315,63 @@ BELIEFS: list[Belief] = [
         test="tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",
         why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
     ),
+    Belief(
+        name="a display lock naming a pid too large to probe is treated as held",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except (PermissionError, OverflowError):\n        return True\n",
+        new="    except PermissionError:\n        return True\n",
+        test="tests/test_rungs_headed.py::test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held",
+        why="os.kill raises OverflowError for a pid past 2**31; one such lock would crash every headed fetch's slot search.",
+    ),
+    Belief(
+        name="a display lock another user owns is treated as held",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    if owner != os.getuid() or pid <= 0:\n        return True\n",
+        new="    if pid <= 0:\n        return True\n",
+        test="tests/test_rungs_headed.py::test_a_lock_we_could_not_remove_is_treated_as_held",
+        why="/tmp is sticky, so a lock we do not own is one nothing of ours can clear; its slot is not ours to take.",
+    ),
+    Belief(
+        name="a display lock that vanishes mid-check falls back to the socket",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old='    except FileNotFoundError:\n        return not Path(f"/tmp/.X11-unix/X{number}").exists()\n',
+        new="    except FileNotFoundError:\n        return True\n",
+        test="tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",
+        why="A lock removed between the check and the read says nothing about a socket that is still there.",
+    ),
+    Belief(
+        name="a display is ready only when its lock names the server we started",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="        return int(lock.read_text().strip()) == pid\n",
+        new="        return int(lock.read_text().strip()) > 0\n",
+        test="tests/test_rungs_headed.py::test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one",
+        why="A slot reclaimed from a dead server still holds the old pid; reading that as ready starts the browser early.",
+    ),
+    # ---- a rung that blows its budget is stopped, not just removed ----
+    Belief(
+        name="a rung's process group is asked to stop before it is killed",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        os.killpg(group, signal.SIGTERM)\n",
+        new="        os.killpg(group, signal.SIGKILL)\n",
+        test="tests/test_cli.py::test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first",
+        why="Xvfb leaves its lock file behind on SIGKILL, so every rung 4 timeout burned a display slot for good.",
+    ),
+    Belief(
+        name="a rung is not done until everything it started has stopped",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        if not _group_exists(group):\n            break\n",
+        new="        if process.poll() is not None:\n            break\n",
+        test="tests/test_cli.py::test_a_rung_is_not_done_until_what_it_started_has_finished_stopping",
+        why="The rung's own process dying says nothing about a display server still removing its lock.",
+    ),
+    Belief(
+        name="a rung group that ignores the request to stop is killed",
+        path=LADDER / "ladder_cli/cli.py",
+        old="    else:\n        try:\n            os.killpg(group, signal.SIGKILL)\n",
+        new="    else:\n        try:\n            os.killpg(group, signal.SIGTERM)\n",
+        test="tests/test_cli.py::test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period",
+        why="Asking first must not let a rung that will not stop hold the budget open indefinitely.",
+    ),
 ]
 
 

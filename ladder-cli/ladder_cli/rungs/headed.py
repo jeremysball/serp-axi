@@ -33,8 +33,8 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
-# How long Xvfb gets after SIGTERM to remove its lock before it is killed. It
-# exits in milliseconds when asked; this only bounds a server that is wedged.
+# How long Xvfb gets after SIGTERM to remove its lock before it is killed. A
+# bound for a server that does not stop when asked, not a measured stop time.
 XVFB_STOP_TIMEOUT_S = 5.0
 
 
@@ -51,23 +51,31 @@ def _lock_is_held(lock: Path) -> bool:
     """Whether the server named in an Xvfb lock file is still there.
 
     The lock holds the server's pid. Xvfb itself starts over a lock whose pid is
-    gone, so a leftover from a SIGKILL, a crash or a reboot does not take the
-    slot. Anything that cannot be read as a live-or-dead pid counts as held:
-    claiming a slot needs proof the server is dead, not the absence of proof.
+    gone (tested against a real server), so a leftover from a SIGKILL, a crash
+    or a reboot does not take the slot. Anything that cannot be read as a
+    live-or-dead pid counts as held: claiming a slot needs proof the server is
+    dead, not the absence of proof. That includes a lock another user owns,
+    since /tmp is sticky and Xvfb could not remove it to start over, and a pid
+    too large to probe at all (`os.kill` raises OverflowError for those).
+
+    Raises FileNotFoundError when there is no lock, so the caller decides what
+    an absent lock means with one read rather than a stat and a read.
     """
     try:
-        pid = int(lock.read_text().strip())
+        with lock.open() as handle:
+            owner = os.fstat(handle.fileno()).st_uid
+            pid = int(handle.read().strip())
     except FileNotFoundError:
-        return False
+        raise
     except (OSError, ValueError):
         return True
-    if pid <= 0:
+    if owner != os.getuid() or pid <= 0:
         return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
+    except (PermissionError, OverflowError):
         return True
     return True
 
@@ -78,10 +86,10 @@ def display_is_free(number: int) -> bool:
     A lock only counts while its server is alive; a socket with no lock at all
     still counts, since nothing says whose it is.
     """
-    lock = Path(f"/tmp/.X{number}-lock")
-    if lock.exists():
-        return not _lock_is_held(lock)
-    return not Path(f"/tmp/.X11-unix/X{number}").exists()
+    try:
+        return not _lock_is_held(Path(f"/tmp/.X{number}-lock"))
+    except FileNotFoundError:
+        return not Path(f"/tmp/.X11-unix/X{number}").exists()
 
 
 def free_display(preferred: str) -> int:
@@ -159,11 +167,21 @@ def _stop_display(process: subprocess.Popen) -> None:
         process.wait()
 
 
+def _lock_names(lock: Path, pid: int) -> bool:
+    """Whether the lock file currently holds this pid. Unreadable counts as no."""
+    try:
+        return int(lock.read_text().strip()) == pid
+    except (OSError, ValueError):
+        return False
+
+
 def _await_display(number: int, process: subprocess.Popen) -> None:
     """Wait for the lock the server itself writes, or fail with its reason.
 
     A fixed sleep is what the spike did and it stays the floor, but a fixed
-    sleep alone cannot tell a slow display from a dead one.
+    sleep alone cannot tell a slow display from a dead one. The lock has to name
+    this server: a slot reclaimed from a dead one still holds the old pid until
+    the new server rewrites it, and that file is not evidence of anything.
     """
     deadline = time.monotonic() + XVFB_READY_TIMEOUT_S
     time.sleep(XVFB_SETTLE_S)
@@ -173,7 +191,7 @@ def _await_display(number: int, process: subprocess.Popen) -> None:
             if "Server is already active for display" in stderr:
                 raise _DisplayCollision(f"Xvfb :{number} was claimed by another server")
             raise RuntimeError(f"Xvfb :{number} exited immediately: {stderr or process.returncode}")
-        if Path(f"/tmp/.X{number}-lock").exists():
+        if _lock_names(Path(f"/tmp/.X{number}-lock"), process.pid):
             return
         time.sleep(0.05)
     raise RuntimeError(f"Xvfb :{number} never wrote its lock within {XVFB_READY_TIMEOUT_S:g}s")

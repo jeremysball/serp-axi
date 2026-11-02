@@ -101,6 +101,41 @@ Every live rung keeps the killable subprocess budget.
 **When this becomes a real bug:** if audio integration ships without adding a
 live rung, or the response claims rung 5 ran when only rung 4 was attempted.
 
+## A timed-out rung can run up to 5 seconds past its budget
+
+**What you see:** a rung with a 90-second budget sometimes returns its `error`
+at 90 to 95 seconds, not at 90.
+
+**Why:** the rung's process group gets SIGTERM first and up to
+`GROUP_STOP_GRACE_S` (5 seconds, `ladder_cli/cli.py`) to stop before SIGKILL.
+Rung 4 runs an Xvfb display server. On SIGTERM Xvfb removes its own
+`/tmp/.X<n>-lock` and socket; SIGKILL left both behind on every timeout. The wait ends as soon as the whole group is gone, so a rung that stops
+promptly costs nothing extra.
+
+**When this becomes a real bug:** if a group that ignores SIGTERM survives the
+grace period, if the wait runs the full 5 seconds when nothing is left running,
+or if a timed-out rung 4 leaves a lock behind for a pid that is dead.
+
+## A display slot with a lock we cannot prove dead is skipped, never reclaimed
+
+**What you see:** `/tmp/.X<n>-lock` files for slots in `:200` to `:699` that
+nothing is using, yet the headed rung steps over them. With enough of them it
+fails with `no free Xvfb display between :200 and :699`.
+
+**Why:** a slot is taken back only when its lock names a pid that no longer
+exists and the lock belongs to the current user. A lock owned by someone else
+sits in a sticky `/tmp`, where we cannot remove it, so the slot is not ours to take.
+A lock that is empty, garbled, or names a pid too large to probe is skipped for
+the same reason: claiming a slot needs proof, not a lack of proof. A dead
+server's pid that the kernel has since handed to another process also reads as
+held. A lock for a dead pid that we own is reclaimed, because Xvfb starts over
+it (checked against a real server, over both a leftover lock and its socket).
+
+**When this becomes a real bug:** if a lock we own that names a dead pid is
+skipped, since that is the leak this exists to close, or if the headed rung
+reports no free display while fewer than 500 slots hold a live, foreign, or
+unreadable lock.
+
 ## Old working-directory profiles are not picked up automatically
 
 **What you see:** after upgrading, an existing `profiles/` folder beside the

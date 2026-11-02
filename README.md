@@ -318,8 +318,8 @@ site's cookies, so only the target's own leave with the fetch.
 
 The scored verdicts are `ok`, `dead`, `blocked`, and `error`. Exhaustion reports
 `error` if the final rung malfunctioned, otherwise `blocked`. A rung that exceeds
-its 90-second subprocess budget is killed and reports `error`, allowing the
-next rung to run. The independent 120-second request cap can interrupt the
+its 90-second subprocess budget is stopped (SIGTERM, then SIGKILL after a
+5-second grace period) and reports `error`, allowing the next rung to run. The independent 120-second request cap can interrupt the
 whole climb before every rung finishes; that cap raises a request error.
 
 The committed datasets and harness ledger are in [`spikes/`](spikes/).

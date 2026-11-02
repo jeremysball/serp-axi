@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import os
 import subprocess
 import sys
 import time
@@ -154,6 +155,122 @@ def test_a_rung_that_blows_its_budget_is_killed() -> None:
     assert elapsed < 20, f"the SIGKILL did not land; waited {elapsed}s"
     assert result.verdict is RungVerdict.ERROR
     assert "budget" in result.reason
+
+
+_STOPS_ON_TERM = (
+    "import signal, sys, time\n"
+    "from pathlib import Path\n"
+    "stopped, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
+    "def stop(signum, frame):\n"
+    "    stopped.write_text('asked')\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "ready.write_text('ready')\n"
+    "time.sleep(60)\n"
+)
+
+
+def test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first(tmp_path) -> None:
+    """Whatever the rung started (a display server, a browser) gets to clean up after itself.
+
+    SIGKILL gives no process that chance, and Xvfb leaves its lock file behind
+    on one. The stand-in child starts a grandchild in its group that records
+    having been asked, then both hang until the budget expires.
+    """
+    stopped, ready = tmp_path / "stopped", tmp_path / "ready"
+    child = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"subprocess.Popen([sys.executable, '-c', {_STOPS_ON_TERM!r}, sys.argv[1], sys.argv[2]])\n"
+        "while not Path(sys.argv[2]).exists():\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(60)\n"
+    )
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=2.0,
+        argv=[sys.executable, "-c", child, str(stopped), str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the grandchild was up before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert stopped.exists(), "the group was killed outright, with no chance to stop itself"
+
+
+_SLOW_TO_STOP = (
+    "import signal, sys, time\n"
+    "from pathlib import Path\n"
+    "finished, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
+    "def stop(signum, frame):\n"
+    "    time.sleep(0.6)\n"
+    "    finished.write_text('cleaned up')\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "ready.write_text('ready')\n"
+    "time.sleep(60)\n"
+)
+
+
+def test_a_rung_is_not_done_until_what_it_started_has_finished_stopping(tmp_path) -> None:
+    """The rung itself dying is not the end of it: Xvfb outlives it while it removes its lock.
+
+    The grandchild's output goes to /dev/null, as Xvfb's does in the real rung, so
+    the pipes closing says nothing about it. Only waiting on the group does.
+    """
+    finished, ready = tmp_path / "finished", tmp_path / "ready"
+    child = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"subprocess.Popen([sys.executable, '-c', {_SLOW_TO_STOP!r}, sys.argv[1], sys.argv[2]],\n"
+        "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "while not Path(sys.argv[2]).exists():\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(60)\n"
+    )
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=1.5,
+        argv=[sys.executable, "-c", child, str(finished), str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the grandchild was up before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert finished.exists(), "the rung was reported stopped while its grandchild was still cleaning up"
+
+
+def test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period(tmp_path, monkeypatch) -> None:
+    """Asking first must not mean waiting forever on a rung that will not stop."""
+    monkeypatch.setattr(cli, "GROUP_STOP_GRACE_S", 0.3)
+    ready = tmp_path / "ready"
+    child = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(15)\n"
+    )
+    started = time.monotonic()
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=1.5,
+        argv=[sys.executable, "-c", child, str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert time.monotonic() - started < 10, "the kill did not land after the grace period"
+    try:
+        os.kill(int(ready.read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("the rung that ignored SIGTERM is still running")
 
 
 def test_a_final_rung_timeout_is_an_error_not_a_defended_page(make_request) -> None:

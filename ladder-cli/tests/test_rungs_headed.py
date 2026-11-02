@@ -18,6 +18,9 @@ import pytest
 
 from ladder_cli.rungs import RungVerdict, headed, zendriver
 
+# The pid a FakeProcess reports. No lock in these tests names it unless the test says so.
+FAKE_SERVER_PID = 4242
+
 
 class FakeProcess:
     def __init__(self, exit_code: int | None = None, stderr: bytes = b"", ignores_terminate: bool = False) -> None:
@@ -28,6 +31,7 @@ class FakeProcess:
         self.exit_code = exit_code
         self.stderr = _Reader(stderr)
         self.argv: list[str] = []
+        self.pid = FAKE_SERVER_PID
 
     def terminate(self) -> None:
         self.terminated = True
@@ -357,24 +361,208 @@ def test_a_socket_with_no_lock_still_holds_its_slot(monkeypatch, tmp_path) -> No
     assert headed.display_is_free(306) is True
 
 
-def test_a_slot_whose_real_xvfb_was_killed_is_free_again() -> None:
-    """The finding itself: `display_is_free` said False with no Xvfb alive."""
+def test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held(monkeypatch, tmp_path) -> None:
+    """`os.kill` raises OverflowError, not ProcessLookupError, past what fits a pid_t.
+
+    That is a lock whose owner cannot be shown dead, and the answer for those is
+    "held", not a crash out of the display search.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X307-lock").write_text(f"{2**31:>10}\n")
+    (tmp_path / ".X308-lock").write_text(f"{10**20:>10}\n")
+
+    assert headed.display_is_free(307) is False
+    assert headed.display_is_free(308) is False
+
+
+def test_a_lock_whose_server_we_may_not_signal_is_treated_as_held(monkeypatch, tmp_path) -> None:
+    """PermissionError from `os.kill` means the pid exists and belongs to someone else."""
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X309-lock").write_text(f"{_dead_pid():>10}\n")
+
+    def refuse(pid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(headed.os, "kill", refuse)
+
+    assert headed.display_is_free(309) is False
+
+
+def test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket(monkeypatch, tmp_path) -> None:
+    """A server shutting down removes its lock while its socket may still be there.
+
+    The old check asked `exists()` and then read, so a lock removed between the
+    two counted as "no server" and hid a socket that was still in place. Reading
+    once and treating "gone" as "no lock" settles the slot from the socket.
+    """
+    gone = _GoneLock()
+    monkeypatch.setattr(
+        headed,
+        "Path",
+        lambda path: gone if Path(path).name.endswith("-lock") else tmp_path / Path(path).name,
+    )
+    (tmp_path / "X310").write_text("")
+
+    assert headed.display_is_free(310) is False, "the socket is still there, so the slot is not"
+    assert headed.display_is_free(311) is True
+
+
+class _GoneLock:
+    """A lock that `exists()` reports and then cannot be read, as when its server exits between."""
+
+    def exists(self) -> bool:
+        return True
+
+    def read_text(self) -> str:
+        raise FileNotFoundError("gone")
+
+    def open(self, *args, **kwargs):
+        raise FileNotFoundError("gone")
+
+
+def test_a_lock_we_could_not_remove_is_treated_as_held(monkeypatch, tmp_path) -> None:
+    """/tmp is sticky: a dead server's lock left by another user is not ours to unlink.
+
+    Xvfb would have to start over it by removing it, which is the one thing it
+    cannot do there, so the slot is not ours to take. A uid mismatch is faked
+    because a test cannot create a file owned by someone else.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X312-lock").write_text(f"{_dead_pid():>10}\n")
+    assert headed.display_is_free(312) is True, "precondition: the same lock is free to its own user"
+
+    someone_else = os.getuid() + 1
+    monkeypatch.setattr(headed.os, "getuid", lambda: someone_else)
+
+    assert headed.display_is_free(312) is False
+
+
+def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monkeypatch, tmp_path) -> None:
+    """A slot reclaimed from a dead server still has the old pid in its lock until Xvfb rewrites it.
+
+    `exists()` is true for that file the whole time, so it said "ready" to a
+    server that had not yet written anything.
+    """
+    process = FakeProcess()
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
+    monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.2)
+    (tmp_path / ".X313-lock").write_text(f"{_dead_pid():>10}\n")
+
+    with pytest.raises(RuntimeError, match="never wrote its lock"):
+        headed._await_display(313, process)
+
+    (tmp_path / ".X313-lock").write_text(f"{process.pid:>10}\n")
+    headed._await_display(313, process)
+
+
+def _remove_own_leftovers(number: int, server_pid: int) -> None:
+    """Delete what a test server left on its slot, and nothing a stranger owns.
+
+    The slot came from `free_display`, but another process can take it between
+    that and this cleanup. If the lock names anyone else, it and the socket are
+    theirs, and removing them would hand that server a dead display.
+    """
+    lock = Path(f"/tmp/.X{number}-lock")
+    try:
+        owner = int(lock.read_text().strip())
+    except FileNotFoundError:
+        owner = server_pid
+    except ValueError:
+        return
+    if owner != server_pid:
+        return
+    lock.unlink(missing_ok=True)
+    Path(f"/tmp/.X11-unix/X{number}").unlink(missing_ok=True)
+
+
+def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
+    """The finding itself: `display_is_free` said False with no Xvfb alive.
+
+    Run against a real Xvfb because the claim in `_lock_is_held` is about what
+    Xvfb does: it starts over the lock a SIGKILL leaves, instead of failing on
+    it. A fake cannot say that, and without it freeing the slot would be a
+    guess that sends the next fetch to a display that never comes up.
+    """
     number = headed.free_display(headed.display_for_pid(os.getpid()))
     lock, socket = Path(f"/tmp/.X{number}-lock"), Path(f"/tmp/.X11-unix/X{number}")
-    server = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
+    pids: list[int] = []
+    servers: list[subprocess.Popen] = []
     try:
-        headed._await_display(number, server)
+        first = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
+        servers.append(first)
+        pids.append(first.pid)
+        headed._await_display(number, first)
         assert headed.display_is_free(number) is False, "a running server holds its slot"
-        server.kill()
-        server.wait(timeout=10)
+        first.kill()
+        first.wait(timeout=10)
         assert lock.exists(), "precondition: SIGKILL leaves the lock behind"
         assert headed.display_is_free(number) is True
+
+        second = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
+        servers.append(second)
+        pids.append(second.pid)
+        headed._await_display(number, second)
+        assert int(lock.read_text().strip()) == second.pid, "the replacement owns the lock it started over"
+        assert headed.display_is_free(number) is False
+        headed._stop_display(second)
+        assert not lock.exists(), "and removes it when stopped"
+        assert not socket.exists()
     finally:
-        server.kill()
-        server.wait(timeout=10)
-        server.stderr.close()
-        lock.unlink(missing_ok=True)
-        socket.unlink(missing_ok=True)
+        for server in servers:
+            if server.poll() is None:
+                server.kill()
+            server.wait(timeout=10)
+            if server.stderr is not None:
+                server.stderr.close()
+        for pid in pids:
+            _remove_own_leftovers(number, pid)
+
+
+def test_a_rung_killed_on_its_budget_leaves_no_display_lock_behind(tmp_path) -> None:
+    """Review finding: the timeout path SIGKILLed the whole group, Xvfb included.
+
+    `run_rung_isolated` is the real one, with a stand-in child that only starts
+    a real Xvfb and hangs, so the budget expires with a display up. Nothing here
+    depends on the rest of the rung.
+    """
+    from ladder_cli import cli
+
+    number = headed.free_display(headed.display_for_pid(os.getpid()))
+    lock, socket = Path(f"/tmp/.X{number}-lock"), Path(f"/tmp/.X11-unix/X{number}")
+    marker = tmp_path / "up"
+    child = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "marker, number = Path(sys.argv[1]), sys.argv[2]\n"
+        "server = subprocess.Popen(sys.argv[3:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "lock = Path(f'/tmp/.X{number}-lock')\n"
+        "while True:\n"
+        "    try:\n"
+        "        if int(lock.read_text().strip()) == server.pid:\n"
+        "            break\n"
+        "    except (FileNotFoundError, ValueError):\n"
+        "        pass\n"
+        "    time.sleep(0.01)\n"
+        "marker.write_text(str(server.pid))\n"
+        "time.sleep(60)\n"
+    )
+    server_pid = None
+    try:
+        result = cli.run_rung_isolated(
+            "headed",
+            "https://example.com/",
+            timeout_s=2.0,
+            argv=[sys.executable, "-c", child, str(marker), str(number), *headed.xvfb_command(number)],
+        )
+        assert marker.exists(), "precondition: the display was up before the budget ran out"
+        server_pid = int(marker.read_text())
+        assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+        assert not lock.exists(), "the display lock outlived the rung that was killed"
+        assert not socket.exists(), "and so did its socket"
+    finally:
+        if server_pid is not None:
+            _remove_own_leftovers(number, server_pid)
 
 
 def test_a_real_display_leaves_no_lock_behind_when_it_is_torn_down(monkeypatch) -> None:

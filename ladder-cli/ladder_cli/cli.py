@@ -21,11 +21,15 @@ from typing import IO, Iterable, Sequence
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
 from .rungs import RUNGS, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
 
-# One budget, owned by the code that enforces it: a rung is SIGKILLed at 90s.
+# One budget, owned by the code that enforces it: a rung is stopped at 90s.
 # It used to be overridable from the environment, which made two owners of one
 # deadline (the parent already bounds the whole request) and a tunable no test
 # ever exercised. Tests now inject `timeout_s` instead of exporting an env var.
 DEFAULT_RUNG_TIMEOUT_S = 90.0
+# How long a rung's process group gets after SIGTERM to clean up before it is
+# SIGKILLed. A bound for a group that does not stop when asked, not a measured
+# stop time; it is spent on top of the budget only when something is still up.
+GROUP_STOP_GRACE_S = 5.0
 
 
 def _jar_args(ctx: RungContext | None) -> list[str]:
@@ -59,6 +63,42 @@ def _context_from(args: Sequence[str]) -> RungContext:
     return RungContext(jar_in=jar_in, jar_out=jar_out)
 
 
+def _group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _stop_group(process: subprocess.Popen) -> None:
+    """Stop a rung and everything it started, and reap it.
+
+    The group is asked to stop with SIGTERM first, because SIGKILL gives nothing
+    in it the chance to clean up, and Xvfb leaves its lock file behind on one.
+    Whatever is still running when the grace period ends is killed. The group is
+    waited on, not just the child: the child dying closes the pipes, which says
+    nothing about a display server that is still removing its lock.
+    """
+    group = process.pid
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + GROUP_STOP_GRACE_S
+    while time.monotonic() < deadline:
+        process.poll()  # reaps the child, which a zombie keeps in the group until then
+        if not _group_exists(group):
+            break
+        time.sleep(0.02)
+    else:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.communicate()
+
+
 def run_rung_isolated(
     rung: str,
     url: str,
@@ -69,8 +109,8 @@ def run_rung_isolated(
     """Run one rung as a subprocess under a hard time budget.
 
     A subprocess is what makes the budget enforceable: it is the thing that can
-    be SIGKILLed. The child is started in its own session so the kill reaches
-    whatever it spawned underneath it, matching ladder.py:180.
+    be stopped (see ``_stop_group``). The child is started in its own session so
+    the stop reaches whatever it spawned underneath it, matching ladder.py:180.
 
     The jar flags are part of the child's argv because the jar is per request
     and the child's own arguments are how one request's paths reach it. A
@@ -93,11 +133,7 @@ def run_rung_isolated(
     try:
         out, err = process.communicate(timeout=budget)
     except BaseException as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
+        _stop_group(process)
         if isinstance(error, subprocess.TimeoutExpired):
             return RungResult(RungVerdict.ERROR, reason=f"rung {rung} exceeded its {budget:g}s budget")
         raise
