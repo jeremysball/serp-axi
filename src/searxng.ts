@@ -39,7 +39,7 @@ const URL_NAMES: SettingNames = { flag: "--searxng-url", env: "SERP_AXI_SEARXNG_
 const ENGINES_NAMES: SettingNames = { flag: "--engines", env: "SERP_AXI_SEARXNG_ENGINES", config: "searxngEngines" };
 const TIMEOUT_SHAPE: IntegerSettingShape = {
   names: { flag: "--search-timeout-ms", env: "SERP_AXI_SEARCH_TIMEOUT_MS", config: "searchTimeoutMs" },
-  examples: { flag: "--search-timeout-ms 30000", env: "--search-timeout-ms 30000", config: '"searchTimeoutMs": 30000' },
+  examples: { flag: "--search-timeout-ms 30000", env: "SERP_AXI_SEARCH_TIMEOUT_MS=30000", config: '"searchTimeoutMs": 30000' },
   textShape: "an integer number of milliseconds",
   configShape: "a JSON number of milliseconds",
 };
@@ -101,7 +101,7 @@ function validateTimeout(raw: unknown, source: OptionSource): number {
     throw new SerpAxiError(
       `${settingName(TIMEOUT_SHAPE.names, source)} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds, got "${String(raw)}"`,
       "usage",
-      "example: --search-timeout-ms 30000",
+      `example: ${TIMEOUT_SHAPE.examples[source]}`,
     );
   }
   return value;

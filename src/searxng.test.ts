@@ -11,6 +11,7 @@ import { runSearch } from "./commands/search.ts";
 import { runCli } from "./cli.ts";
 import { createAppOptions } from "./app.ts";
 import { SerpAxiError } from "./errors.ts";
+import { resolveSearxngOptions, type SearxngOptionSources } from "./searxng.ts";
 import { decode } from "@toon-format/toon";
 
 const KAGI_FIXTURE = readFileSync(
@@ -1004,6 +1005,31 @@ test("validation errors from env values name the env var", async (t) => {
       assert.match(error.message, /comma-separated/);
     });
   });
+});
+
+test("a bad timeout's help line shows the example for the source the value came from", () => {
+  const helpFor = (sources: SearxngOptionSources): string => {
+    try {
+      resolveSearxngOptions(sources);
+    } catch (error) {
+      assert.ok(error instanceof SerpAxiError);
+      return error.help;
+    }
+    throw new Error("expected resolveSearxngOptions to throw");
+  };
+  const flagExample = "example: --search-timeout-ms 30000";
+  const envExample = "example: SERP_AXI_SEARCH_TIMEOUT_MS=30000";
+  const configExample = 'example: "searchTimeoutMs": 30000';
+
+  // Wrong type: not all digits as text, not an integer in the config file.
+  assert.equal(helpFor({ flagTimeoutMs: "abc", config: {} }), flagExample);
+  assert.equal(helpFor({ envTimeoutMs: "abc", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searchTimeoutMs: "abc" } }), configExample);
+
+  // Right type, out of range.
+  assert.equal(helpFor({ flagTimeoutMs: "0", config: {} }), flagExample);
+  assert.equal(helpFor({ envTimeoutMs: "0", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searchTimeoutMs: 0 } }), configExample);
 });
 
 test("long upstream engine reasons are clamped in output", async (t) => {
