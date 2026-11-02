@@ -12,7 +12,6 @@ import {
   FULL_MAX_CHARS_ENV,
   INCLUDE_MARKUP_ENV,
   MAX_CHARS_ENV,
-  limitFor,
   requestCharLimits,
   resolveCharLimits,
   resolveIncludeMarkup,
@@ -321,7 +320,7 @@ async function runBrightDataScrape(
   const datasetFlag = datasetFlagValue === undefined ? "" : ` --dataset-id ${shellQuote(datasetFlagValue)}`;
 
   const full = Boolean(flags.full);
-  const records = await scrapeBrightData(apiKey, datasetId, urls, limitFor(full, limits), fetchImpl);
+  const records = await scrapeBrightData(apiKey, datasetId, urls, fetchImpl);
 
   return {
     provider: "brightdata",

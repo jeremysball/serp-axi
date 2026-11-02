@@ -358,15 +358,19 @@ test("runScrape Bright Data uses BRIGHTDATA_DATASET_ID when no flag is given", a
   });
 });
 
-test("runScrape Bright Data passes the full limit to the provider", async () => {
+test("runScrape Bright Data sends no character cap upstream, however the cap is set", async () => {
   await withBrightData("test-key", undefined, async () => {
-    let capturedBody: unknown;
-    const fetchImpl = (async (_url: string, init?: RequestInit) => {
-      capturedBody = JSON.parse(init?.body as string);
-      return new Response("");
-    }) as typeof fetch;
-    await runScrape(["https://example.com", "--provider", "brightdata", "--full"], fetchImpl, hermeticEnv(), {});
-    assert.equal((capturedBody as { limit_per_input: number }).limit_per_input, 50000);
+    for (const args of [[], ["--full"], ["--max-chars", "5"], ["--full", "--full-max-chars", "7777"]]) {
+      let capturedBody: Record<string, unknown> | undefined;
+      const fetchImpl = (async (_url: string, init?: RequestInit) => {
+        capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+        return new Response("");
+      }) as typeof fetch;
+      await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, hermeticEnv(), {});
+      assert.ok(capturedBody, `Bright Data was never called with ${JSON.stringify(args)}`);
+      // `limit_per_input` is a record count upstream; the cap is applied locally.
+      assert.deepEqual(Object.keys(capturedBody), ["input"], JSON.stringify(args));
+    }
   });
 });
 
@@ -854,20 +858,21 @@ async function serperTextLength(
   return (output.text as string).length;
 }
 
-// The `limit_per_input` the Bright Data request carried.
+// The cap a Bright Data run applied, read as the length of a record long enough to
+// hit it. Bright Data gets no cap in its request, so the local cut is the only
+// place the cap shows.
 async function brightDataLimit(
   args: string[],
   env: NodeJS.ProcessEnv = {},
   config: Record<string, unknown> = {},
+  served = 60000,
 ): Promise<number> {
-  let captured: { limit_per_input: number } | undefined;
-  const fetchImpl = (async (_url: string, init?: RequestInit) => {
-    captured = JSON.parse(init?.body as string) as { limit_per_input: number };
-    return new Response("");
-  }) as typeof fetch;
-  await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, { ...BRIGHT_DATA_ENV, ...env }, config);
-  assert.ok(captured, "Bright Data was never called");
-  return captured.limit_per_input;
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ url: "https://example.com", markdown: "m".repeat(served) }))) as typeof fetch;
+  const output = await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, { ...BRIGHT_DATA_ENV, ...env }, config);
+  const results = output.results as Array<Record<string, unknown>>;
+  assert.equal(results.length, 1, "expected one Bright Data record back");
+  return (results[0].markdown as string).length;
 }
 
 test("runScrape's default cap goes flag > env > config > 1200", async () => {

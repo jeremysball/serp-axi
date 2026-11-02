@@ -402,23 +402,27 @@ diagnose than failing every run the same way.
 checked its URL, its API key (or ladder binary), and the cap flags, or if a
 path opens it twice.
 
-## Bright Data gets the character cap as `limit_per_input`
+## Bright Data downloads the whole record, then the cap cuts it
 
-**What you see:** the Bright Data request body is
-`{"input": [...], "limit_per_input": <cap>}` with the character cap (1200,
-50000, or the configured value) in `limit_per_input`, and the response is cut to
-the same cap again on our side.
+**What you see:** `serp-axi scrape --provider brightdata --max-chars 5` asks
+Bright Data for the page with no limit in the request body (`{"input": [...]}`,
+nothing else), receives the full record, and cuts every long string to 5
+characters afterward.
 
-**Why:** the field was sent with the character limit before the caps became
-configurable, and this change passes the resolved cap through unchanged. Bright
-Data documents `limit_per_input` as a record count for discovery collections.
-Whether `/datasets/v3/scrape` reads it as a character count is unverified: no
-Bright Data document says so, and a live check needs a funded account. The local
-cut is what guarantees the cap.
+**Why:** the only limit the `/datasets/v3/scrape` reference names is
+`limit_per_input`, and it counts records per input, for discovery requests
+("Maximum records returned per input", schema `minimum: 1`). It is not a
+character limit. An earlier version sent the character cap in it anyway. Sent as
+a record count, `--max-chars 5` would have asked a discovery dataset for five
+records. The documented fields are `input`, `limit_per_input` and
+`custom_output_fields`; none limits the length of a string. Source:
+`https://docs.brightdata.com/api-reference/web-scraper-api/synchronous-requests`,
+read 2026-11-02. The cap is applied locally in `shapeScrapeRecord`.
 
-**When this becomes a real bug:** if a live request shows Bright Data rejecting
-the field, or reading it as a record count so that the cap changes how many
-records come back.
+**When this becomes a real bug:** if Bright Data adds a field-length limit to
+this endpoint, the download could shrink and this entry should go. Or if a live
+request shows the endpoint rejecting a body that holds only `input`; the opt-in
+live test (`SERP_AXI_LIVE_BRIGHTDATA`) sends exactly that.
 
 ## The Bright Data cap covers top-level strings, not nested ones
 

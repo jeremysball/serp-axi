@@ -174,7 +174,6 @@ export async function scrapeBrightData(
   apiKey: string,
   datasetId: string,
   urls: string[],
-  characterLimit: number,
   fetchImpl: typeof fetch = fetch,
 ): Promise<BrightDataRecord[]> {
   const endpoint =
@@ -189,10 +188,10 @@ export async function scrapeBrightData(
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        input: urls.map((url) => ({ url })),
-        limit_per_input: characterLimit,
-      }),
+      // Inputs only. Bright Data's `limit_per_input` caps records per input on
+      // discovery requests; it is not a character limit, so the cap is applied
+      // to the records after they arrive (docs/things-that-look-like-bugs.md).
+      body: JSON.stringify({ input: urls.map((url) => ({ url })) }),
     });
   } catch (cause) {
     throw new SerpAxiError(
