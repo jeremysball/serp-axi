@@ -1,0 +1,106 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { SerpAxiError } from "./errors.ts";
+import { parseIntegerSetting, pickOption, settingName, type IntegerSettingShape } from "./option-sources.ts";
+
+const shape: IntegerSettingShape = {
+  names: { flag: "--wait-ms", env: "SERP_AXI_WAIT_MS", config: "waitMs" },
+  examples: { flag: "--wait-ms 500", env: "SERP_AXI_WAIT_MS=500", config: '"waitMs": 500' },
+  textShape: "an integer number of milliseconds",
+  configShape: "a JSON number of milliseconds",
+};
+
+function usageError(pattern: RegExp) {
+  return (error: unknown) => {
+    assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
+    assert.equal(error.kind, "usage");
+    assert.match(error.message, pattern);
+    return true;
+  };
+}
+
+test("pickOption returns the flag first, then env, then config, and says which", () => {
+  assert.deepEqual(pickOption("f", "e", "c"), { value: "f", source: "flag" });
+  assert.deepEqual(pickOption(undefined, "e", "c"), { value: "e", source: "env" });
+  assert.deepEqual(pickOption(undefined, undefined, "c"), { value: "c", source: "config" });
+});
+
+test("pickOption returns undefined when no source speaks", () => {
+  assert.equal(pickOption(undefined, undefined, undefined), undefined);
+});
+
+test("pickOption counts only undefined as unset, so an empty string, null or 0 still wins", () => {
+  assert.deepEqual(pickOption("", "e", "c"), { value: "", source: "flag" });
+  assert.deepEqual(pickOption(undefined, "", "c"), { value: "", source: "env" });
+  assert.deepEqual(pickOption<unknown>(undefined, undefined, null), { value: null, source: "config" });
+  assert.deepEqual(pickOption<unknown>(undefined, undefined, 0), { value: 0, source: "config" });
+});
+
+test("settingName returns the name a source goes by", () => {
+  assert.equal(settingName(shape.names, "flag"), "--wait-ms");
+  assert.equal(settingName(shape.names, "env"), "SERP_AXI_WAIT_MS");
+  assert.equal(settingName(shape.names, "config"), "waitMs");
+});
+
+test("parseIntegerSetting reads all-digit text from a flag or env value", () => {
+  assert.equal(parseIntegerSetting("500", "flag", shape), 500);
+  assert.equal(parseIntegerSetting("0", "env", shape), 0);
+  assert.equal(parseIntegerSetting("007", "flag", shape), 7);
+});
+
+test("parseIntegerSetting does not range-check, so a huge text value comes back as the number it is", () => {
+  assert.equal(parseIntegerSetting("99999999999999999999", "flag", shape), 1e20);
+});
+
+test("parseIntegerSetting rejects text that is not all digits, naming the flag and the text shape", () => {
+  for (const bad of ["", "1.5", "-1", "+1", " 1", "1 ", "1e3", "0x10", "abc"]) {
+    assert.throws(
+      () => parseIntegerSetting(bad, "flag", shape),
+      usageError(/^--wait-ms must be an integer number of milliseconds, got string /),
+      JSON.stringify(bad),
+    );
+  }
+});
+
+test("parseIntegerSetting names the env var, not the flag, when the bad value came from env", () => {
+  assert.throws(
+    () => parseIntegerSetting("abc", "env", shape),
+    usageError(/^SERP_AXI_WAIT_MS must be an integer number of milliseconds, got string "abc"$/),
+  );
+});
+
+test("parseIntegerSetting rejects a non-string flag or env value", () => {
+  assert.throws(() => parseIntegerSetting(500, "env", shape), usageError(/^SERP_AXI_WAIT_MS must be an integer number of milliseconds, got number 500$/));
+  assert.throws(() => parseIntegerSetting(undefined, "flag", shape), usageError(/^--wait-ms must be an integer number of milliseconds, got /));
+});
+
+test("parseIntegerSetting takes a config value only if it is a JSON integer", () => {
+  assert.equal(parseIntegerSetting(500, "config", shape), 500);
+  assert.equal(parseIntegerSetting(0, "config", shape), 0);
+  assert.equal(parseIntegerSetting(-3, "config", shape), -3);
+});
+
+test("parseIntegerSetting rejects a config string, float, null, array and boolean, naming the config key", () => {
+  for (const bad of ["500", 1.5, null, [500], true]) {
+    assert.throws(
+      () => parseIntegerSetting(bad, "config", shape),
+      usageError(/^waitMs must be a JSON number of milliseconds, got /),
+      JSON.stringify(bad),
+    );
+  }
+});
+
+test("parseIntegerSetting puts the example for the source the value came from in the help line", () => {
+  const helpFor = (raw: unknown, source: "flag" | "env" | "config"): string => {
+    try {
+      parseIntegerSetting(raw, source, shape);
+    } catch (error) {
+      assert.ok(error instanceof SerpAxiError);
+      return error.help;
+    }
+    throw new Error("expected parseIntegerSetting to throw");
+  };
+  assert.equal(helpFor("abc", "flag"), "example: --wait-ms 500");
+  assert.equal(helpFor("abc", "env"), "example: SERP_AXI_WAIT_MS=500");
+  assert.equal(helpFor("abc", "config"), 'example: "waitMs": 500');
+});

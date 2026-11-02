@@ -1,4 +1,12 @@
 import { SerpAxiError, describeValue } from "./errors.ts";
+import {
+  parseIntegerSetting,
+  pickOption,
+  settingName,
+  type IntegerSettingShape,
+  type OptionSource,
+  type SettingNames,
+} from "./option-sources.ts";
 import { truncate, type AxiOutput } from "./output.ts";
 import type { StoredConfig } from "./config.ts";
 
@@ -176,53 +184,34 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
   return out;
 }
 
-interface CharLimitNames {
-  flag: string;
-  env: string;
-  config: string;
+function charLimitShape(names: SettingNames): IntegerSettingShape {
+  return {
+    names,
+    examples: { flag: `${names.flag} 5000`, env: `${names.env}=5000`, config: `"${names.config}": 5000` },
+    textShape: "a whole number of characters",
+    configShape: "a JSON integer number of characters",
+  };
 }
 
-const MAX_CHARS_NAMES: CharLimitNames = { flag: "--max-chars", env: MAX_CHARS_ENV, config: "maxChars" };
-const FULL_MAX_CHARS_NAMES: CharLimitNames = {
+const MAX_CHARS_SHAPE = charLimitShape({ flag: "--max-chars", env: MAX_CHARS_ENV, config: "maxChars" });
+const FULL_MAX_CHARS_SHAPE = charLimitShape({
   flag: "--full-max-chars",
   env: FULL_MAX_CHARS_ENV,
   config: "fullMaxChars",
-};
+});
 
 /**
- * One cap, from one source. Flag and env values arrive as strings and must be
- * all digits; a config value must already be a JSON integer. Either way the
- * error names the setting the bad value came from, so the reader fixes the right
- * place. The only upper bound is the largest integer a number holds exactly.
+ * One cap, from one source. The shared parser checks the type and names the
+ * setting the bad value came from; the range is this cap's own. The only upper
+ * bound is the largest integer a number holds exactly.
  */
-function validateCharLimit(raw: unknown, source: "flag" | "env" | "config", names: CharLimitNames): number {
-  const field = names[source];
-  const example = source === "flag" ? `${field} 5000` : source === "env" ? `${field}=5000` : `"${field}": 5000`;
-  let value: number;
-  if (source === "config") {
-    if (typeof raw !== "number" || !Number.isInteger(raw)) {
-      throw new SerpAxiError(
-        `${field} must be a JSON integer number of characters, got ${describeValue(raw)}`,
-        "usage",
-        `example: ${example}`,
-      );
-    }
-    value = raw;
-  } else {
-    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
-      throw new SerpAxiError(
-        `${field} must be a whole number of characters, got ${describeValue(raw)}`,
-        "usage",
-        `example: ${example}`,
-      );
-    }
-    value = Number(raw);
-  }
+function validateCharLimit(raw: unknown, source: OptionSource, shape: IntegerSettingShape): number {
+  const value = parseIntegerSetting(raw, source, shape);
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new SerpAxiError(
-      `${field} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
+      `${settingName(shape.names, source)} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
       "usage",
-      `example: ${example}`,
+      `example: ${shape.examples[source]}`,
     );
   }
   return value;
@@ -279,28 +268,28 @@ export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
       "add --full, or use --max-chars <n> to change the default cap",
     );
   }
-  const pick = (flag: string | undefined, env: string | undefined, names: CharLimitNames): number | undefined => {
-    if (flag !== undefined) return validateCharLimit(flag, "flag", names);
-    if (env !== undefined) return validateCharLimit(env, "env", names);
-    return undefined;
+  // The config is not open yet, so this picks between the flag and the env var only.
+  const pick = (flag: string | undefined, env: string | undefined, shape: IntegerSettingShape): number | undefined => {
+    const picked = pickOption(flag, env, undefined);
+    return picked === undefined ? undefined : validateCharLimit(picked.value, picked.source, shape);
   };
-  const maxChars = sources.full ? undefined : pick(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_NAMES);
-  const fullMaxChars = pick(sources.flagFullMaxChars, sources.envFullMaxChars, FULL_MAX_CHARS_NAMES);
+  const maxChars = sources.full ? undefined : pick(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_SHAPE);
+  const fullMaxChars = pick(sources.flagFullMaxChars, sources.envFullMaxChars, FULL_MAX_CHARS_SHAPE);
   // Built after the picks, so a flag value that reaches the rerun text has passed
   // validation and is all digits: nothing in it needs shell quoting.
   let capFlags = "";
   if (sources.full) {
-    capFlags = sources.flagFullMaxChars === undefined ? " --full" : ` --full ${FULL_MAX_CHARS_NAMES.flag} ${sources.flagFullMaxChars}`;
+    capFlags = sources.flagFullMaxChars === undefined ? " --full" : ` --full ${FULL_MAX_CHARS_SHAPE.names.flag} ${sources.flagFullMaxChars}`;
   } else if (sources.flagMaxChars !== undefined) {
-    capFlags = ` ${MAX_CHARS_NAMES.flag} ${sources.flagMaxChars}`;
+    capFlags = ` ${MAX_CHARS_SHAPE.names.flag} ${sources.flagMaxChars}`;
   }
   return { full: sources.full, maxChars, fullMaxChars, capFlags };
 }
 
-function charLimitFromConfig(raw: unknown, names: CharLimitNames): number | undefined {
+function charLimitFromConfig(raw: unknown, shape: IntegerSettingShape): number | undefined {
   // Null and absent both mean "not set", as they do for the other config keys.
   if (raw === undefined || raw === null) return undefined;
-  return validateCharLimit(raw, "config", names);
+  return validateCharLimit(raw, "config", shape);
 }
 
 /**
@@ -311,11 +300,11 @@ function charLimitFromConfig(raw: unknown, names: CharLimitNames): number | unde
 export function resolveCharLimits(request: CharLimitRequest, config: StoredConfig): CharLimits {
   const maxChars = request.full
     ? DEFAULT_MAX_CHARS
-    : (request.maxChars ?? charLimitFromConfig(config.maxChars, MAX_CHARS_NAMES) ?? DEFAULT_MAX_CHARS);
+    : (request.maxChars ?? charLimitFromConfig(config.maxChars, MAX_CHARS_SHAPE) ?? DEFAULT_MAX_CHARS);
   return {
     maxChars,
     fullMaxChars:
-      request.fullMaxChars ?? charLimitFromConfig(config.fullMaxChars, FULL_MAX_CHARS_NAMES) ?? DEFAULT_FULL_MAX_CHARS,
+      request.fullMaxChars ?? charLimitFromConfig(config.fullMaxChars, FULL_MAX_CHARS_SHAPE) ?? DEFAULT_FULL_MAX_CHARS,
   };
 }
 

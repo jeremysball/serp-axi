@@ -1,4 +1,12 @@
 import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
+import {
+  parseIntegerSetting,
+  pickOption,
+  settingName,
+  type IntegerSettingShape,
+  type OptionSource,
+  type SettingNames,
+} from "./option-sources.ts";
 import type { OrganicResult, SearchParams } from "./serper.ts";
 
 export const SEARXNG_DEFAULT_URL = "http://127.0.0.1:8888";
@@ -27,14 +35,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-function sourceField(source: string, flagName: string, envName: string, configName: string): string {
-  if (source === "flag") return flagName;
-  if (source === "env") return envName;
-  return configName;
-}
+const URL_NAMES: SettingNames = { flag: "--searxng-url", env: "SERP_AXI_SEARXNG_URL", config: "searxngUrl" };
+const ENGINES_NAMES: SettingNames = { flag: "--engines", env: "SERP_AXI_SEARXNG_ENGINES", config: "searxngEngines" };
+const TIMEOUT_SHAPE: IntegerSettingShape = {
+  names: { flag: "--search-timeout-ms", env: "SERP_AXI_SEARCH_TIMEOUT_MS", config: "searchTimeoutMs" },
+  examples: { flag: "--search-timeout-ms 30000", env: "--search-timeout-ms 30000", config: '"searchTimeoutMs": 30000' },
+  textShape: "an integer number of milliseconds",
+  configShape: "a JSON number of milliseconds",
+};
 
-function validateEndpoint(raw: unknown, source: string): string {
-  const field = sourceField(source, "--searxng-url", "SERP_AXI_SEARXNG_URL", "searxngUrl");
+function validateEndpoint(raw: unknown, source: OptionSource): string {
+  const field = settingName(URL_NAMES, source);
   if (typeof raw !== "string" || raw.length === 0) {
     throw new SerpAxiError(`${field} must be a non-empty URL string, got ${describeValue(raw)}`, "usage", "example: --searxng-url http://127.0.0.1:8888");
   }
@@ -56,8 +67,8 @@ function validateEndpoint(raw: unknown, source: string): string {
   return url.toString();
 }
 
-function validateEngines(raw: unknown, source: string): string[] {
-  const field = sourceField(source, "--engines", "SERP_AXI_SEARXNG_ENGINES", "searxngEngines");
+function validateEngines(raw: unknown, source: OptionSource): string[] {
+  const field = settingName(ENGINES_NAMES, source);
   let items: string[];
   if (source === "config") {
     if (!Array.isArray(raw)) {
@@ -84,22 +95,14 @@ function validateEngines(raw: unknown, source: string): string[] {
   return [...new Set(items)];
 }
 
-function validateTimeout(raw: unknown, source: string): number {
-  const field = sourceField(source, "--search-timeout-ms", "SERP_AXI_SEARCH_TIMEOUT_MS", "searchTimeoutMs");
-  let value: number;
-  if (source === "config") {
-    if (typeof raw !== "number" || !Number.isInteger(raw)) {
-      throw new SerpAxiError(`${field} must be a JSON number of milliseconds, got ${describeValue(raw)}`, "usage", 'example: "searchTimeoutMs": 30000');
-    }
-    value = raw;
-  } else {
-    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
-      throw new SerpAxiError(`${field} must be an integer number of milliseconds, got ${describeValue(raw)}`, "usage", "example: --search-timeout-ms 30000");
-    }
-    value = Number(raw);
-  }
+function validateTimeout(raw: unknown, source: OptionSource): number {
+  const value = parseIntegerSetting(raw, source, TIMEOUT_SHAPE);
   if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
-    throw new SerpAxiError(`${field} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds, got "${String(raw)}"`, "usage", "example: --search-timeout-ms 30000");
+    throw new SerpAxiError(
+      `${settingName(TIMEOUT_SHAPE.names, source)} must be between 1 and ${MAX_TIMEOUT_MS} milliseconds, got "${String(raw)}"`,
+      "usage",
+      "example: --search-timeout-ms 30000",
+    );
   }
   return value;
 }
@@ -115,17 +118,14 @@ export interface SearxngOptionSources {
 }
 
 export function resolveSearxngOptions(sources: SearxngOptionSources): SearxngOptions {
-  const urlRaw = sources.flagUrl !== undefined ? sources.flagUrl : sources.envUrl !== undefined ? sources.envUrl : sources.config.searxngUrl;
-  const url = urlRaw === undefined ? SEARXNG_DEFAULT_URL : validateEndpoint(urlRaw, sources.flagUrl !== undefined ? "flag" : sources.envUrl !== undefined ? "env" : "config");
+  const urlPick = pickOption<unknown>(sources.flagUrl, sources.envUrl, sources.config.searxngUrl);
+  const url = urlPick === undefined ? SEARXNG_DEFAULT_URL : validateEndpoint(urlPick.value, urlPick.source);
 
-  const enginesRaw = sources.flagEngines !== undefined ? sources.flagEngines : sources.envEngines !== undefined ? sources.envEngines : sources.config.searxngEngines;
-  let engines: string[] | undefined;
-  if (enginesRaw !== undefined) {
-    engines = validateEngines(enginesRaw, sources.flagEngines !== undefined ? "flag" : sources.envEngines !== undefined ? "env" : "config");
-  }
+  const enginesPick = pickOption<unknown>(sources.flagEngines, sources.envEngines, sources.config.searxngEngines);
+  const engines = enginesPick === undefined ? undefined : validateEngines(enginesPick.value, enginesPick.source);
 
-  const timeoutRaw = sources.flagTimeoutMs !== undefined ? sources.flagTimeoutMs : sources.envTimeoutMs !== undefined ? sources.envTimeoutMs : sources.config.searchTimeoutMs;
-  const timeoutMs = timeoutRaw === undefined ? SEARXNG_DEFAULT_TIMEOUT_MS : validateTimeout(timeoutRaw, sources.flagTimeoutMs !== undefined ? "flag" : sources.envTimeoutMs !== undefined ? "env" : "config");
+  const timeoutPick = pickOption<unknown>(sources.flagTimeoutMs, sources.envTimeoutMs, sources.config.searchTimeoutMs);
+  const timeoutMs = timeoutPick === undefined ? SEARXNG_DEFAULT_TIMEOUT_MS : validateTimeout(timeoutPick.value, timeoutPick.source);
 
   return { url, engines, timeoutMs };
 }
