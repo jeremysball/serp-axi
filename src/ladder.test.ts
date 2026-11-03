@@ -596,3 +596,73 @@ test("every ladder axis flag is a flag the scrape command accepts", async () => 
     assert.ok(name in SCRAPE_FLAGS, `${name} is an axis flag the CLI does not accept`);
   }
 });
+
+test("a reply that splits a multibyte character across two reads keeps the character", async () => {
+  const ladder = client("split-multibyte");
+  try {
+    const response = await ladder.fetch("https://a.example/x");
+    assert.equal(response.text, "price €5");
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a reply line at the cap resolves and one byte over fails", async () => {
+  // The stub's reply is one line of 200000 "y" plus JSON around it; find its size
+  // by letting an uncapped client read it, then cap exactly there and one under.
+  const probe = client("big-page");
+  let size: number;
+  try {
+    const page = await probe.fetch("https://a.example/x");
+    assert.equal(page.text.length, 200000);
+    size = Buffer.byteLength(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: page.text, engines: [], elapsedMs: 1, links: [], warning: null }),
+    );
+  } finally {
+    await probe.close();
+  }
+
+  const exact = client("big-page", { maxLineBytes: size });
+  try {
+    assert.equal((await exact.fetch("https://a.example/x")).text.length, 200000);
+  } finally {
+    await exact.close();
+  }
+
+  const under = client("big-page", { maxLineBytes: size - 1 });
+  try {
+    await assert.rejects(() => under.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, new RegExp(`longer than ${size - 1} bytes`));
+      return true;
+    });
+  } finally {
+    await under.close();
+  }
+});
+
+test("a child that never ends its reply line is stopped at the cap, not buffered forever", { timeout: 15000 }, async () => {
+  const ladder = client("endless-line", { maxLineBytes: 1024 * 1024 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1048576 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a child that prints an endless line instead of its ready line is stopped at the cap", { timeout: 15000 }, async () => {
+  const ladder = client("endless-banner", { maxLineBytes: 1024 * 1024 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1048576 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});

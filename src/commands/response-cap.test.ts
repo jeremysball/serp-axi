@@ -223,56 +223,6 @@ test("scrape checks the byte cap before it opens the config file", async () => {
   }
 });
 
-test("scrape refuses --max-response-bytes with --ladder, which never uses serp-axi's own requests", async () => {
-  const served = serving(SERPER_SCRAPE);
-  await assert.rejects(
-    () => runScrape([SCRAPE_URL, "--ladder", "--max-response-bytes", SMALL_CAP], served.fetchImpl, KEYS, {}),
-    usageError(/--max-response-bytes does not apply with --ladder/),
-  );
-  assert.equal(served.calls.count, 0);
-});
-
-test("scrape lets the env var and config key stand when --ladder is used", async () => {
-  // The env var and config key are standing settings for every run, as the other
-  // caps' are, so only the flag is a conflict. This run fails later, on the missing
-  // ladder binary, which is the proof it got past the cap check.
-  const served = serving(SERPER_SCRAPE);
-  await assert.rejects(
-    () =>
-      runScrape(
-        [SCRAPE_URL, "--ladder"],
-        served.fetchImpl,
-        { ...KEYS, [MAX_RESPONSE_BYTES_ENV]: SMALL_CAP, SERP_AXI_LADDER_BIN: "/nonexistent/ladder-cli" },
-        { maxResponseBytes: Number(SMALL_CAP) },
-      ),
-    (error: unknown) => {
-      assert.ok(error instanceof SerpAxiError);
-      assert.doesNotMatch(error.message, /max-response-bytes|maxResponseBytes|SERP_AXI_MAX_RESPONSE_BYTES/);
-      return true;
-    },
-  );
-});
-
-test("scrape does not validate a byte cap it will not use under --ladder", async () => {
-  // A malformed standing setting would stop a ladder run for nothing: the ladder makes
-  // its own requests. The run fails on the missing binary instead, and says so.
-  const served = serving(SERPER_SCRAPE);
-  await assert.rejects(
-    () =>
-      runScrape(
-        [SCRAPE_URL, "--ladder"],
-        served.fetchImpl,
-        { ...KEYS, [MAX_RESPONSE_BYTES_ENV]: "lots", SERP_AXI_LADDER_BIN: "/nonexistent/ladder-cli" },
-        { maxResponseBytes: "also lots" },
-      ),
-    (error: unknown) => {
-      assert.ok(error instanceof SerpAxiError);
-      assert.doesNotMatch(error.message, /max-response-bytes|maxResponseBytes|SERP_AXI_MAX_RESPONSE_BYTES/);
-      return true;
-    },
-  );
-});
-
 test("a Serper, Bright Data or Kagi search with the cap flag still never opens the config file", async () => {
   // The config key is read for scrape and SearXNG search only (docs/things-that-look-like-bugs.md),
   // so setting the flag must not be what makes these searches open a file they never needed.

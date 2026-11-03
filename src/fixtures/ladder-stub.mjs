@@ -1,5 +1,5 @@
 // Test double for ladder-cli: speaks the NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title|split-multibyte|big-page|endless-line|endless-banner
 import readline from "node:readline";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -21,10 +21,22 @@ if (mode === "die-before-ready") {
   process.exit(1);
 }
 
+// A runaway child writes without ever ending the line. The self-exit is a safety
+// net so a failing test cannot leave it printing.
+function writeForever() {
+  const block = "x".repeat(64 * 1024);
+  const timer = setInterval(() => process.stdout.write(block), 1);
+  process.stdout.on("error", () => process.exit(0));
+  setTimeout(() => process.exit(0), 15000).unref();
+  return timer;
+}
+
 // A child that spawns and never says hello. Nothing is printed at all, so the
 // only thing standing between it and a permanent hang is the handshake budget.
 if (mode === "silent") {
   setTimeout(() => {}, 1 << 30);
+} else if (mode === "endless-banner") {
+  writeForever();
 } else {
   // §1.1: anything before the handshake completes is startup output and is
   // skipped rather than fatal. This mode prints exactly that before the ready
@@ -69,6 +81,29 @@ input.on("line", async (line) => {
   }
   if (mode === "malformed") {
     process.stdout.write("not json at all\n");
+    return;
+  }
+  if (mode === "endless-line") {
+    writeForever();
+    return;
+  }
+  // One reply whose "€" (three bytes in UTF-8) is cut after its first byte and
+  // finished in a second write 80 ms later, so the parent sees the character
+  // split across two reads every time rather than when the pipe happens to.
+  if (mode === "split-multibyte") {
+    const reply = Buffer.from(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "price €5", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
+    const cut = reply.indexOf(Buffer.from("€")) + 1;
+    process.stdout.write(reply.subarray(0, cut));
+    setTimeout(() => process.stdout.write(reply.subarray(cut)), 80);
+    return;
+  }
+  // A page of a known size, so a test can set the line cap either side of it.
+  if (mode === "big-page") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "y".repeat(200000), engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
     return;
   }
   if (mode === "blocked") {

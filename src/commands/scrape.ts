@@ -1,12 +1,12 @@
 import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
-import { MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG } from "../body.ts";
+import { MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG } from "../body.ts";
 import { SerpAxiError } from "../errors.ts";
 import type { AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
 import { scrapeSerper } from "../serper.ts";
-import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
+import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, LadderLineTooLongError, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
 import { requestMaxResponseBytes, resolveMaxResponseBytes } from "../response-limit.ts";
@@ -113,7 +113,8 @@ Flags:
   ${MAX_RESPONSE_BYTES_FLAG} <n>
                          Most bytes one provider response may carry, before any character cap.
                          A longer body stops the run with an error, because a cut-off body
-                         cannot be parsed. Default: 67108864 (64 MiB). Not valid with --ladder.
+                         cannot be parsed. Default: 67108864 (64 MiB). With --ladder it bounds
+                         the one line the ladder CLI prints back, the page as JSON.
                          Also: ${MAX_RESPONSE_BYTES_ENV}=<n>, or "maxResponseBytes": <n> in the
                          config file. Precedence: flag > env > config > built-in default.
   --provider <name>      serper (default) or brightdata. Not valid with --ladder.
@@ -399,8 +400,15 @@ export async function runScrape(
   const requestedMarkup = markupFromFlagOrEnv(flags, env);
   const charRequest = charLimitRequest(flags, env);
 
+  // Checked before the paths split, so a bad flag or env value fails the same way on
+  // every one of them, and before any config file is opened.
+  const requestedMaxBytes = requestMaxResponseBytes(
+    flags["max-response-bytes"] as string | undefined,
+    env[MAX_RESPONSE_BYTES_ENV],
+  );
+
   if (flags.ladder) {
-    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false, charRequest);
+    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false, charRequest, requestedMaxBytes);
   }
 
   for (const axis of LADDER_AXIS_FLAGS) {
@@ -412,13 +420,6 @@ export async function runScrape(
       );
     }
   }
-
-  // Checked here, after the ladder branch has returned, because the ladder makes its
-  // own requests and so never uses the cap. Before any config file is opened.
-  const requestedMaxBytes = requestMaxResponseBytes(
-    flags["max-response-bytes"] as string | undefined,
-    env[MAX_RESPONSE_BYTES_ENV],
-  );
 
   const provider = parseProvider(flags.provider);
 
@@ -484,19 +485,13 @@ async function runLadderScrape(
   config: StoredConfig | undefined,
   includeMarkup: boolean,
   charRequest: CharLimitRequest,
+  requestedMaxBytes: number | undefined,
 ): Promise<AxiOutput> {
   if (flags.provider !== undefined) {
     throw new SerpAxiError(
       "--provider does not apply with --ladder",
       "usage",
       "drop --provider, or drop --ladder",
-    );
-  }
-  if (flags["max-response-bytes"] !== undefined) {
-    throw new SerpAxiError(
-      `${MAX_RESPONSE_BYTES_FLAG} does not apply with --ladder`,
-      "usage",
-      "the ladder CLI makes its own requests, so serp-axi has no response of its own to bound; drop the flag, or drop --ladder",
     );
   }
   if (flags["dataset-id"] !== undefined) {
@@ -522,12 +517,21 @@ async function runLadderScrape(
   const stored = config ?? loadStoredConfig(os.homedir(), env);
   const axes = resolveLadderAxes({ flag: flags, env, config: stored });
   const limits = resolveCharLimits(charRequest, stored);
+  // Outside the try below: a malformed config key is a usage error, and the catch
+  // would rewrap it as a failed ladder with advice about the binary.
+  const maxLineBytes = resolveMaxResponseBytes(requestedMaxBytes, stored);
   let response;
   try {
-    response = await fetchViaLadder(url.toString(), { bin }, axes);
+    response = await fetchViaLadder(url.toString(), { bin, maxLineBytes }, axes);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new SerpAxiError(`ladder scrape failed: ${message}`, "runtime", "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)");
+    throw new SerpAxiError(
+      `ladder scrape failed: ${message}`,
+      "runtime",
+      error instanceof LadderLineTooLongError
+        ? `raise the cap with ${MAX_RESPONSE_BYTES_FLAG} <n>, ${MAX_RESPONSE_BYTES_ENV}=<n>, or "${MAX_RESPONSE_BYTES_CONFIG_KEY}": <n> in the config file`
+        : "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)",
+    );
   }
   if (response.verdict !== "ok") {
     // `error` is not `blocked`: one says the page defended itself, the other

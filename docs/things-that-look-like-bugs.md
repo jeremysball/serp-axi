@@ -424,10 +424,27 @@ records. The documented fields are `input`, `limit_per_input` and
 `https://docs.brightdata.com/api-reference/web-scraper-api/synchronous-requests`,
 read 2026-11-02. The cap is applied locally in `shapeScrapeRecord`.
 
+**What the download is bounded by instead:** the byte cap in `src/body.ts`
+(`DEFAULT_MAX_RESPONSE_BYTES`, 64 MiB; `--max-response-bytes`,
+`SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` to change it). The old
+`limit_per_input` carried the character cap (1200 by default, 50000 with
+`--full`; `DEFAULT_MAX_CHARS` and `DEFAULT_FULL_MAX_CHARS` in
+`src/scrape-output.ts`), so by default it also told a discovery dataset to
+return at most 1200 records per input. That was an accident of reading a record
+count as a length, not a bound anyone chose. The request `scrapeBrightData`
+builds has only `dataset_id`, `notify` and `include_errors` in its query string
+(asserted in `src/brightdata.scrape.test.ts`), so it is not a discovery request
+and the field had no records to limit. That is read from the reference, not
+tested against the live endpoint. The byte cap is what keeps a large reply out of memory, and it stops
+the read, not just the output.
+
 **When this becomes a real bug:** if Bright Data adds a field-length limit to
 this endpoint, the download could shrink and this entry should go. Or if a live
 request shows the endpoint rejecting a body that holds only `input`; the opt-in
-live test (`SERP_AXI_LIVE_BRIGHTDATA`) sends exactly that.
+live test (`SERP_AXI_LIVE_BRIGHTDATA`) sends exactly that. Or if a normal scrape
+starts hitting the byte cap because a dataset returns many records per URL, in
+which case a record limit that is chosen on purpose, not borrowed from the
+character cap, belongs in the request.
 
 ## The Bright Data cap covers top-level strings, not nested ones
 
@@ -498,10 +515,10 @@ all pass. That is a deliberate limit. The risk being guarded is a developer or a
 agent copying `response.text()` into a new provider, and a rule written to stop a
 deliberate evasion would flag ordinary code to do it.
 
-The guard covers HTTP responses only. `src/ladder.ts` appends each chunk of the
-ladder child's stdout to `this.buffer` until a newline arrives; that is a read
-from a local process serp-axi starts, it has no byte bound, and nothing here
-checks it.
+The guard covers HTTP responses only. `src/ladder.ts` reads a local child's
+stdout, not a `Response`, and bounds it by its own check: the pending line may not
+pass the same cap (see "The ladder cap bounds one line of the child's output"
+below). No ast-grep rule watches that read; `src/ladder.test.ts` does.
 
 `src/guards.test.ts` runs each rule against code it must catch, code it must
 leave alone, and the bypass forms, and it fails if a rule file has no case that
@@ -575,24 +592,36 @@ as the `includeMarkup` key.
 file for another reason, since the key should then apply to it too, or if a path
 that does read the key lets a bad value through.
 
-## `--max-response-bytes` is refused with `--ladder`, but its env var and config key are ignored there
+## The ladder cap bounds one line of the child's output, not the page text
 
-**What you see:** `serp-axi scrape <url> --ladder --max-response-bytes 5` fails
-with a usage error before any work starts, while `SERP_AXI_MAX_RESPONSE_BYTES=5
-serp-axi scrape <url> --ladder` runs normally, and so does a `--ladder` run with
-a malformed `SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` in the config file.
+**What you see:** `serp-axi scrape <url> --ladder --max-response-bytes 100000`
+fails with `ladder scrape failed: ladder-cli printed a line longer than 100000
+bytes, which serp-axi will not read` on a page whose text is shorter than
+100000 characters. The same run with a larger cap succeeds. A malformed
+`SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` now stops a `--ladder` run
+too, as it stops every other scrape.
 
-**Why:** the ladder CLI makes its own requests, so serp-axi has no response of
-its own to bound. A flag typed on the command line was typed for this run, and
-accepting it silently would pretend a limit exists. An env var or a config key is
-a standing setting that also serves the runs that need it, and refusing it would
-break every ladder scrape for someone who set it for Serper. The check runs after
-the ladder branch has returned, so a bad standing value is never read on this
-path.
+**Why:** the ladder CLI prints each reply as one JSON line, so the length of that
+line is the size of the page as it crosses the pipe: the text after JSON
+escaping, plus the title, the links and the rung metadata. A quote or a newline
+in the page costs two bytes; a non-ASCII character costs its UTF-8 width, because
+the ladder CLI writes with `ensure_ascii=False` (`ladder-cli/ladder_cli/cli.py:232`).
+The cap is the
+shared `--max-response-bytes` / `SERP_AXI_MAX_RESPONSE_BYTES` / `maxResponseBytes`
+setting, so one number bounds every provider and a user who needs a larger page
+has one knob. The check runs on each chunk before it is appended, against the
+bytes of the line that chunk ends or extends, and a child over the cap is killed
+and respawned by the next fetch, because a cut-off line cannot be parsed. Another
+line in the same chunk can be at most one pipe read (64 KiB) long. The same cap
+bounds the startup output before the ready line, so a child that prints without
+ever ending a line is stopped too. This is a different thing from `--max-chars`,
+which trims text after it has been read.
 
-**When this becomes a real bug:** if the ladder path starts bounding its own
-reads with this cap, since the flag should then be accepted, or if a bad
-`SERP_AXI_MAX_RESPONSE_BYTES` fails a run that never uses a provider response.
+**When this becomes a real bug:** if a page that fits under the cap as plain text
+fails here and the line is not over the cap by this count (the byte count lives in
+`onStdout` in `src/ladder.ts`, and `src/ladder.test.ts` pins it at the cap and one
+byte under), or if a malformed cap fails a run before the URL, the binary or the
+other flags have been checked.
 
 ## Test-only modules are left out of the package by name
 

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
 import { brightDataScrapeRecord } from "../fixtures.ts";
+import { MAX_RESPONSE_BYTES_ENV } from "../body.ts";
 import { FULL_MAX_CHARS_ENV, INCLUDE_MARKUP_ENV, MAX_CHARS_ENV } from "../scrape-output.ts";
 
 // Every test below hands runScrape an env object that names only the keys it
@@ -397,6 +398,80 @@ test("runScrape --ladder returns rung text with no API key", async () => {
   assert.equal(output.rungReached, 1);
   assert.deepEqual(output.links, [{ url: "https://example.com/linked", text: "Linked" }]);
   assert.match(output.text as string, /example\.com\/article/);
+});
+
+// The stub's `big-page` reply is one line of about 200 KB. UNDER_PAGE is above the
+// ready line and below the page; OVER_PAGE is above both.
+const UNDER_PAGE = "100000";
+const OVER_PAGE = "300000";
+const LADDER_URL = "https://example.com/article";
+
+function ladderCapError(error: unknown): boolean {
+  assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
+  assert.equal(error.kind, "runtime");
+  assert.match(error.message, new RegExp(`longer than ${UNDER_PAGE} bytes`));
+  // The help line names all three ways to raise the cap, so a user who hit it can fix it.
+  assert.match(error.help ?? "", /--max-response-bytes/);
+  assert.match(error.help ?? "", /SERP_AXI_MAX_RESPONSE_BYTES/);
+  assert.match(error.help ?? "", /maxResponseBytes/);
+  return true;
+}
+
+test("runScrape --ladder stops a page over the cap from the flag, the env var and the config key", async () => {
+  const env = ladderStubEnv("big-page");
+  const noFetch = (async () => new Response("{}")) as typeof fetch;
+  await assert.rejects(() => runScrape([LADDER_URL, "--ladder", "--max-response-bytes", UNDER_PAGE], noFetch, env, {}), ladderCapError);
+  await assert.rejects(
+    () => runScrape([LADDER_URL, "--ladder"], noFetch, { ...env, [MAX_RESPONSE_BYTES_ENV]: UNDER_PAGE }, {}),
+    ladderCapError,
+  );
+  await assert.rejects(() => runScrape([LADDER_URL, "--ladder"], noFetch, env, { maxResponseBytes: Number(UNDER_PAGE) }), ladderCapError);
+});
+
+test("runScrape --ladder reads the same page when the cap is above it, which is what makes the stop above the cap's doing", async () => {
+  const env = ladderStubEnv("big-page");
+  const noFetch = (async () => new Response("{}")) as typeof fetch;
+  // Nothing set: the 64 MiB default stands and the page fits.
+  assert.equal((await runScrape([LADDER_URL, "--ladder"], noFetch, env, {})).verdict, "ok");
+  // Flag above env above config, each set to a cap the page fits under only when it wins.
+  const flagWins = await runScrape(
+    [LADDER_URL, "--ladder", "--max-response-bytes", OVER_PAGE],
+    noFetch,
+    { ...env, [MAX_RESPONSE_BYTES_ENV]: UNDER_PAGE },
+    { maxResponseBytes: Number(UNDER_PAGE) },
+  );
+  assert.equal(flagWins.verdict, "ok");
+  const envWins = await runScrape(
+    [LADDER_URL, "--ladder"],
+    noFetch,
+    { ...env, [MAX_RESPONSE_BYTES_ENV]: OVER_PAGE },
+    { maxResponseBytes: Number(UNDER_PAGE) },
+  );
+  assert.equal(envWins.verdict, "ok");
+});
+
+test("runScrape --ladder rejects a malformed cap before it starts the ladder", async () => {
+  // The binary does not exist, so a run that got as far as spawning it would fail
+  // with a different message than the one asserted here.
+  const env = { SERP_AXI_LADDER_BIN: "/nonexistent/ladder-cli" };
+  const noFetch = (async () => new Response("{}")) as typeof fetch;
+  const usage = (pattern: RegExp) => (error: unknown) => {
+    assert.ok(error instanceof SerpAxiError);
+    assert.equal(error.kind, "usage");
+    assert.match(error.message, pattern);
+    return true;
+  };
+  await assert.rejects(() => runScrape([LADDER_URL, "--ladder", "--max-response-bytes", "lots"], noFetch, env, {}), usage(/--max-response-bytes/));
+  await assert.rejects(
+    () => runScrape([LADDER_URL, "--ladder"], noFetch, { ...env, [MAX_RESPONSE_BYTES_ENV]: "lots" }, {}),
+    usage(/SERP_AXI_MAX_RESPONSE_BYTES/),
+  );
+  // The config key is read later, once the binary is resolved, so it is checked against a
+  // real stub; it must still be a usage error and not a "ladder scrape failed" one.
+  await assert.rejects(
+    () => runScrape([LADDER_URL, "--ladder"], noFetch, ladderStubEnv("ok"), { maxResponseBytes: "lots" }),
+    usage(/maxResponseBytes/),
+  );
 });
 
 test("runScrape --ladder maps a blocked verdict to a typed runtime error", async () => {

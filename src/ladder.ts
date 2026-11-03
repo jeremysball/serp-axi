@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_MAX_RESPONSE_BYTES } from "./body.ts";
 import type { StoredConfig } from "./config.ts";
 import { boundedDetail, SerpAxiError } from "./errors.ts";
 import { firstDefined } from "./option-sources.ts";
@@ -67,12 +69,34 @@ export interface LadderClientOptions {
    * rather than holding every later fetch open.
    */
   handshakeMs?: number;
+  /**
+   * The longest line the child may print, in bytes. Every reply is one line, so
+   * this is the cap on a page. A child that passes it is killed and the fetch
+   * fails, because a cut-off line cannot be parsed. Defaults to the transport
+   * cap (64 MiB); `scrape --ladder` passes the same flag, env var or config key
+   * every other provider's cap comes from.
+   */
+  maxLineBytes?: number;
 }
 
 export class SerpAxiLadderError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SerpAxiLadderError";
+  }
+}
+
+/**
+ * The child printed a line longer than `maxLineBytes`. A subclass so the command
+ * can tell the user how to raise the cap, which a hung or crashed child has no use for.
+ */
+export class LadderLineTooLongError extends SerpAxiLadderError {
+  readonly maxBytes: number;
+
+  constructor(maxBytes: number) {
+    super(`ladder-cli printed a line longer than ${maxBytes} bytes, which serp-axi will not read`);
+    this.name = "LadderLineTooLongError";
+    this.maxBytes = maxBytes;
   }
 }
 
@@ -415,6 +439,11 @@ export class LadderClient {
   private readySettled = false;
   private handshakeTimer: NodeJS.Timeout | null = null;
   private buffer = "";
+  // Decodes the child's stdout across chunk boundaries. `chunk.toString()` per
+  // chunk turns a multibyte character that straddles two pipe reads into U+FFFD.
+  private stdoutDecoder = new StringDecoder("utf8");
+  // Bytes of the line the child is partway through printing; see onStdout.
+  private lineBytes = 0;
   private stderrTail = "";
   private queue: Pending[] = [];
   private inFlight: Pending | null = null;
@@ -516,6 +545,8 @@ export class LadderClient {
     this.detachStreams(child);
     this.clearHandshakeTimer();
     this.buffer = "";
+    this.stdoutDecoder = new StringDecoder("utf8");
+    this.lineBytes = 0;
     this.stderrTail = "";
     this.ready = null;
     this.readySettled = false;
@@ -658,7 +689,24 @@ export class LadderClient {
 
     const onStdout = (chunk: Buffer) => {
       if (child !== this.child) return;
-      this.buffer += chunk.toString();
+      // Every reply is one line, and a line with no newline yet sits in
+      // `this.buffer` until it ends. Count its bytes before appending, so a
+      // child that never prints a newline cannot grow the buffer without end.
+      // Only the line this chunk finishes (or extends) is checked: other lines
+      // inside one chunk are at most one pipe read (64 KiB) long.
+      const maxLineBytes = this.options.maxLineBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const firstNewline = chunk.indexOf(0x0a);
+      const lastNewline = chunk.lastIndexOf(0x0a);
+      if (this.lineBytes + (firstNewline < 0 ? chunk.length : firstNewline) > maxLineBytes) {
+        const error = new LadderLineTooLongError(maxLineBytes);
+        this.settleReady(error);
+        this.failAll(error);
+        this.resetChild();
+        this.armIdleTimer();
+        return;
+      }
+      this.lineBytes = firstNewline < 0 ? this.lineBytes + chunk.length : chunk.length - lastNewline - 1;
+      this.buffer += this.stdoutDecoder.write(chunk);
       this.drainLines();
     };
     child.stdout?.on("data", onStdout);

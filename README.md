@@ -200,8 +200,9 @@ The value goes flag, then env var, then the config file, then the default, and
 must be a whole number of bytes from 1 up. An empty env var counts as unset; an
 empty flag value is an error. The config key is read for `scrape` and for
 `search --provider searxng`, the two paths that open the config file; the other
-search providers take the flag, the env var or the default. `--max-response-bytes`
-is refused with `--ladder`, which makes its own requests. When Serper, Kagi or
+search providers take the flag, the env var or the default. With `--ladder` the
+cap bounds the one JSON line the ladder CLI prints back, which is the page plus
+its title and links after escaping, so it is a little larger than the text. When Serper, Kagi or
 Bright Data fails a request, the first 64 KiB of the error response is kept to
 explain it, and a longer one is cut, not refused. SearXNG errors are reported
 from the status code alone and read no error body.
