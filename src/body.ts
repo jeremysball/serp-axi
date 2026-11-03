@@ -1,4 +1,4 @@
-import { SerpAxiError } from "./errors.ts";
+import { SerpAxiError, boundedDetail } from "./errors.ts";
 
 /**
  * The only module in `src/` that reads a response body. Everything else goes
@@ -43,6 +43,32 @@ function overflow(limit: BodyLimit, how: string): SerpAxiError {
 }
 
 /**
+ * The body stream failed partway: a reset connection, an abort, a timeout that
+ * fired while the body was still arriving. It is a `SerpAxiError`, so a provider
+ * that does not look at it still reports a one-line runtime error instead of a
+ * raw `TypeError: terminated`. `timedOut` is true when the stream raised a
+ * `TimeoutError` or `AbortError`, so a caller that owns a timeout budget can say
+ * "timed out after N ms" in its own words; `cause` keeps the stream's own error.
+ */
+export class BodyReadError extends SerpAxiError {
+  readonly timedOut: boolean;
+  override readonly cause: unknown;
+
+  constructor(limit: BodyLimit, cause: unknown) {
+    const name = cause instanceof Error ? cause.name : "";
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `network error reading ${limit.source} response: ${boundedDetail(message)}`,
+      "runtime",
+      "the server interrupted the transfer; retry",
+    );
+    this.name = "BodyReadError";
+    this.timedOut = name === "TimeoutError" || name === "AbortError";
+    this.cause = cause;
+  }
+}
+
+/**
  * Reads a whole response body as UTF-8, or throws a `SerpAxiError` naming the cap
  * when the body is bigger than `limit.maxBytes`. There is no partial result: a
  * cut-off JSON document does not parse, and a cut-off page would look complete.
@@ -51,8 +77,9 @@ function overflow(limit: BodyLimit, how: string): SerpAxiError {
  * header is only a hint, so the read counts bytes either way and hangs up the
  * moment the count passes the cap.
  *
- * A stream failure (a reset connection, an abort) comes through as the error the
- * stream raised, so the caller can tell a timeout from a dropped transfer.
+ * A stream failure (a reset connection, an abort) throws a `BodyReadError`, which
+ * carries the stream's own error as `cause` and says whether it was a timeout.
+ * What was read before the failure is dropped: half a document is not a result.
  */
 export async function readBodyText(response: Response, limit: BodyLimit): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
@@ -68,7 +95,13 @@ export async function readBodyText(response: Response, limit: BodyLimit): Promis
   const parts: string[] = [];
   let total = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    let chunk: Awaited<ReturnType<typeof reader.read>>;
+    try {
+      chunk = await reader.read();
+    } catch (cause) {
+      throw new BodyReadError(limit, cause);
+    }
+    const { done, value } = chunk;
     if (done) break;
     total += value.byteLength;
     if (total > limit.maxBytes) {

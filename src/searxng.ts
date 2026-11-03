@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_RESPONSE_BYTES, readBodyText } from "./body.ts";
+import { BodyReadError, DEFAULT_MAX_RESPONSE_BYTES, readBodyText } from "./body.ts";
 import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
 import {
   parseIntegerSetting,
@@ -365,13 +365,12 @@ export async function searchSearxng(
   try {
     text = await readBodyText(response, { maxBytes: maxResponseBytes, source: "SearXNG" });
   } catch (cause) {
-    // The cap error already says what happened and how to raise the cap.
-    if (cause instanceof SerpAxiError) throw cause;
-    const err = cause as Error;
-    if (err.name === "TimeoutError" || err.name === "AbortError") {
+    // The cap error and a dropped transfer already say what happened. Only a
+    // timeout is reworded, because only this call knows the budget it ran on.
+    if (cause instanceof BodyReadError && cause.timedOut) {
       throw new SerpAxiError(`SearXNG request timed out after ${options.timeoutMs} ms`, "runtime", "raise --search-timeout-ms, or retry");
     }
-    throw new SerpAxiError(`network error reading SearXNG response: ${boundedDetail(err.message)}`, "runtime", "the server interrupted the transfer; retry");
+    throw cause;
   }
   if (contentType.includes("text/html") || text.trimStart().startsWith("<")) {
     throw new SerpAxiError("SearXNG returned an HTML page instead of JSON (possible challenge or login page)", "runtime", "check the endpoint configuration; a formatting/challenge gate may be in front of it");

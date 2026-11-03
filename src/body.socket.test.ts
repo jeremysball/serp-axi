@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { gzipSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
-import { readBodyText } from "./body.ts";
+import { BodyReadError, readBodyText } from "./body.ts";
 import { SerpAxiError } from "./errors.ts";
 import { searchSerper, scrapeSerper, type SearchParams } from "./serper.ts";
 import { searchKagi } from "./kagi.ts";
@@ -106,6 +106,25 @@ const ERROR_READS: Array<[string, Call]> = [
   ["Bright Data scrape", (f, cap) => scrapeBrightData("key", "gd_dataset", ["https://example.com"], f, cap)],
 ];
 
+// A server that sends a status line, a few body bytes, and then drops the socket
+// without finishing the response: the transfer a flaky network or a crashed
+// upstream produces. The status is 200 and the header promises more than arrives,
+// so the client has accepted the response before the stream dies.
+async function droppingServer(contentType: string): Promise<{ url: string; stop: () => Promise<void> }> {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": contentType, "content-length": 1_000_000 });
+    res.write("partial");
+    setTimeout(() => res.destroy(), 20);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/`,
+    stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
 for (const [name, contentType, call] of SUCCESS_READS) {
   test(`${name} stops reading a body that never ends, and says which cap it hit`, { timeout: 30_000 }, async () => {
     const server = await endlessServer(200, contentType);
@@ -128,6 +147,46 @@ for (const [name, contentType, call] of SUCCESS_READS) {
     }
   });
 }
+
+for (const [name, contentType, call] of SUCCESS_READS) {
+  test(`${name} reports a transfer that dies mid-body as a network error, not a raw stream error`, { timeout: 30_000 }, async () => {
+    const server = await droppingServer(contentType);
+    try {
+      await assert.rejects(
+        () => call(fetchTo(server.url), CAP * 1024),
+        (error: unknown) => {
+          assert.ok(error instanceof BodyReadError, `expected a BodyReadError, got ${String(error)}`);
+          assert.ok(error instanceof SerpAxiError);
+          assert.equal(error.kind, "runtime");
+          assert.match(error.message, /^network error reading .+ response: /);
+          assert.equal(error.timedOut, false);
+          assert.ok(error.cause instanceof Error, "the stream's own error is kept as the cause");
+          return true;
+        },
+      );
+    } finally {
+      await server.stop();
+    }
+  });
+}
+
+test("a body that arrives whole is not reported as a network error", { timeout: 30_000 }, async () => {
+  // The control for the loop above: the same server shape, finished properly,
+  // so the errors there come from the dropped socket and not from the harness.
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ organic: [{ position: 1, title: "t", link: "https://x", snippet: "s" }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  try {
+    const result = (await searchSerper("key", PARAMS, fetchTo(url))) as { organic: unknown[] };
+    assert.equal(result.organic.length, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 for (const [name, call] of ERROR_READS) {
   test(`${name} reports an unmapped status without draining the error body`, { timeout: 30_000 }, async () => {

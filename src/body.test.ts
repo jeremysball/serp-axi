@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ERROR_BODY_MAX_BYTES, readBodyText, readErrorBody } from "./body.ts";
+import { BodyReadError, ERROR_BODY_MAX_BYTES, readBodyText, readErrorBody } from "./body.ts";
 import { SerpAxiError } from "./errors.ts";
 
 const LIMIT = { maxBytes: 10, source: "Example" };
@@ -98,10 +98,55 @@ test("readBodyText still bounds a body that outgrows its declared content-length
   assert.ok(tracked.pulls() < 10);
 });
 
-test("readBodyText lets a stream failure through instead of returning what it had", async () => {
+test("readBodyText turns a stream failure into a typed error instead of returning what it had", async () => {
   const boom = new Error("socket hung up");
   const tracked = trackedResponse([bytes("abc")], {}, boom);
-  await assert.rejects(() => readBodyText(tracked.response, LIMIT), (error: unknown) => error === boom);
+  await assert.rejects(
+    () => readBodyText(tracked.response, LIMIT),
+    (error: unknown) => {
+      assert.ok(error instanceof BodyReadError);
+      // A SerpAxiError, so a provider that never looks at it still exits with a
+      // one-line runtime error and not a stack trace.
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "runtime");
+      assert.equal(error.message, "network error reading Example response: socket hung up");
+      assert.equal(error.cause, boom);
+      assert.equal(error.timedOut, false);
+      return true;
+    },
+  );
+});
+
+test("readBodyText flags a stream that died of a timeout or an abort", async () => {
+  for (const name of ["TimeoutError", "AbortError"]) {
+    const timeout = new Error("The operation was aborted due to timeout");
+    timeout.name = name;
+    const tracked = trackedResponse([bytes("abc")], {}, timeout);
+    await assert.rejects(
+      () => readBodyText(tracked.response, LIMIT),
+      (error: unknown) => error instanceof BodyReadError && error.timedOut && error.cause === timeout,
+      name,
+    );
+  }
+});
+
+test("readBodyText gives a cap overflow and a stream failure different errors", async () => {
+  // The positive half of the pair above: an overflow is a plain SerpAxiError, so a
+  // caller that treats every BodyReadError as a dropped transfer is not told that
+  // an oversized body was one.
+  const over = trackedResponse([bytes("0123456789A")]);
+  await assert.rejects(
+    () => readBodyText(over.response, LIMIT),
+    (error: unknown) => error instanceof SerpAxiError && !(error instanceof BodyReadError),
+  );
+});
+
+test("readBodyText keeps a long stream-failure message to one bounded line", async () => {
+  const tracked = trackedResponse([bytes("abc")], {}, new Error("x".repeat(5000)));
+  await assert.rejects(
+    () => readBodyText(tracked.response, LIMIT),
+    (error: unknown) => error instanceof BodyReadError && error.message.length < 300,
+  );
 });
 
 test("readBodyText returns an empty string for a response with no body", async () => {
