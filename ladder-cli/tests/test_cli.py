@@ -290,13 +290,14 @@ def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_t
         "from pathlib import Path\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-        "time.sleep(60)\n"
+        "time.sleep(15)\n"
     )
 
     def second_sigterm(seconds: float) -> None:
         raise SystemExit(128 + 15)
 
     group = None
+    started = time.monotonic()
     try:
         monkeypatch.setattr(cli.time, "sleep", second_sigterm)
         with pytest.raises(SystemExit):
@@ -307,6 +308,10 @@ def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_t
                 argv=[sys.executable, "-c", child, str(ready)],
             )
         monkeypatch.undo()
+        # The stop ends in `communicate()`, which waits for the child to exit. With
+        # no kill sent, the child would simply sleep out its 15 seconds and the
+        # check below would pass anyway, 15 seconds late; the bound is what fails.
+        assert time.monotonic() - started < 10, "the child was not killed, it ran out its own sleep"
         assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
         group = int(ready.read_text())
         with pytest.raises(ProcessLookupError):
@@ -336,7 +341,7 @@ def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(
         "from pathlib import Path\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-        "time.sleep(60)\n"
+        "time.sleep(15)\n"
     )
     real_killpg = os.killpg
 
@@ -346,6 +351,7 @@ def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(
         real_killpg(group, sig)
 
     group = None
+    started = time.monotonic()
     try:
         monkeypatch.setattr(cli.os, "killpg", interrupted)
         with pytest.raises(SystemExit):
@@ -356,6 +362,8 @@ def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(
                 argv=[sys.executable, "-c", child, str(ready)],
             )
         monkeypatch.undo()
+        # same reason as the test above: `communicate()` would wait out the child's sleep
+        assert time.monotonic() - started < 10, "the child was not killed, it ran out its own sleep"
         assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
         group = int(ready.read_text())
         with pytest.raises(ProcessLookupError):
@@ -368,6 +376,79 @@ def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(
                 os.waitpid(group, 0)
             except (ProcessLookupError, ChildProcessError):
                 pass
+
+
+def test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped(tmp_path, monkeypatch) -> None:
+    """Review finding H2: two scans that find nothing running can still be wrong.
+
+    A child forked and gone again between them is in neither listing. Here the
+    scans are blind on purpose (stood in for by `_has_live_member` saying nothing
+    runs) while a real rung ignores SIGTERM, which is exactly what a missed member
+    looks like to the wait. Only the last SIGKILL, sent while the leader is still
+    unreaped, ends it. The stop ends in `communicate()`, which waits for the child
+    to exit, so without that signal the child sleeps out its 15 seconds and every
+    other assertion here would pass late; the bound is what fails.
+    """
+    monkeypatch.setattr(cli, "_has_live_member", lambda group: False)
+    ready = tmp_path / "ready"
+    child = (
+        "import os, signal, sys, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(15)\n"
+    )
+    started = time.monotonic()
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=1.5,
+        argv=[sys.executable, "-c", child, str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert time.monotonic() - started < 10, "the missed member was not killed, it ran out its own sleep"
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(ready.read_text()), 0)
+
+
+@pytest.mark.parametrize(("returncode", "kills"), [(None, 1), (0, 0)])
+def test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped(monkeypatch, returncode, kills) -> None:
+    """A group id is only safe to signal while something still holds the number.
+
+    An unreaped leader holds it. Once the leader has been reaped and the group is
+    empty the number can be handed to an unrelated process, which a SIGKILL sent
+    then would hit. The pair: the same stop, the same group gone, differing only in
+    whether the leader was reaped.
+    """
+    sent: list[int] = []
+
+    def killpg(group: int, sig: int) -> None:
+        if sig == 0:
+            raise ProcessLookupError  # nothing is in the group
+        sent.append(sig)
+
+    class Leader:
+        pid = 4_000_000
+        communicated = False
+
+        def __init__(self) -> None:
+            self.returncode = returncode
+
+        def communicate(self) -> tuple[str, str]:
+            self.communicated = True
+            return "", ""
+
+    monkeypatch.setattr(cli.os, "killpg", killpg)
+    leader = Leader()
+
+    cli._stop_group(leader)  # type: ignore[arg-type]
+
+    assert sent.count(signal.SIGTERM) == 1, "precondition: the group was asked to stop"
+    assert sent.count(signal.SIGKILL) == kills
+    assert leader.communicated
 
 
 def _fake_proc(root, entries: dict[int, tuple[str, int] | None]) -> None:

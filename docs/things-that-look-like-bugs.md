@@ -120,41 +120,54 @@ not atomic: a child forked after the listing is in neither the listing nor the
 answer, and a stop that called the group empty would skip the SIGKILL. The
 second scan starts after the first ended, so one missed fork is caught. That
 narrows the window and does not close it: a child that forks again and exits
-inside the first scan can still be in neither. SIGKILL is not sent
-unconditionally to cover that, because by the time it ran the group id could
-belong to something else. A `/proc` that cannot be listed, or a scan that
-classified no process at all, counts as running, so the grace period decides
-and not a crash or an early "stopped".
+inside the first scan can still be in neither. The last step closes the rest:
+when the scans say the group is empty, `_stop_group` sends it one SIGKILL
+anyway, but only while the group leader has not been reaped. The leader is not
+reaped inside the wait (`communicate()` does that afterwards) so that its pid
+stays allocated, and a pid number is not handed to another process while any
+task still uses it as a pid or a group id. That last line is reasoned from how
+the kernel allocates pids, not tested here; what is tested is that the signal
+is sent in the missed-member case and is not sent once the leader is reaped
+(`test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped`,
+`test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped`). A `/proc`
+that cannot be listed, or a scan that classified no process at all, counts as
+running, so the grace period decides and not a crash or an early "stopped".
 
 **When this becomes a real bug:** if a group that ignores SIGTERM survives the
 grace period (including when a second SIGTERM lands during the wait, or lands
 in the first `killpg` itself), if the wait runs the full 5 seconds when nothing
 is left running, if a group is called stopped while a member that cannot be
-read is still in it, or if a timed-out rung 4 leaves a lock behind for a pid
-that is dead.
+read is still in it, if the last SIGKILL is sent after the leader has been
+reaped, or if a timed-out rung 4 leaves a lock behind for a pid that is dead.
 
-## The display stop and the rung-group stop are two loops, not one
+## The display stop and the rung-group stop share a routine and differ in how they wait
 
-**What you see:** `headed._stop_display` and `cli._stop_group` both send
-SIGTERM, wait up to `STOP_GRACE_S`, then send SIGKILL, in loops that look
-copyable from one into the other.
+**What you see:** `headed._stop_display` and `cli._stop_group` both end in a
+call to `stopping.stop_with_grace`, yet each passes its own `wait_gone`, and the
+group's polls every 20 ms while the display's is one `Popen.wait(timeout)`.
 
-**Why:** they wait on different things. The display has a `Popen`, so
-`Popen.wait(timeout)` returns the instant the server exits. A process group has
-no wait: the only question the kernel answers is whether something in it is
-still there, so `_stop_group` polls every 20 ms, has to tell a zombie from a
-running process, and has to survive a SIGTERM landing mid-wait. Giving the
-display that loop would add a poll where a wait suffices, and giving the group
-the display's wait would watch only the group leader and miss a grandchild
-removing its own lock. What the two share is the grace period, one constant.
+**Why:** the order (SIGTERM, wait up to `STOP_GRACE_S`, SIGKILL in a `finally`)
+is the part that has to be the same, so it lives once in `ladder_cli/stopping.py`.
+A display stop used to carry its own copy without the `finally`, and a SIGTERM
+that `main` turned into `SystemExit` during its wait left Xvfb running; sharing
+the routine is what removed that. What cannot be shared is how "gone" is
+known. The display has a `Popen`, so `Popen.wait(timeout)` returns the instant
+it exits. A process group has no wait: the only question the kernel answers is
+whether something in it is still there, so `_stop_group` polls, has to tell a
+zombie from a running process, and has to survive a SIGTERM landing mid-wait.
+Giving the display that poll would add a loop where a wait suffices, and giving
+the group the display's wait would watch only the group leader and miss a
+grandchild removing its own lock. The grace period is one constant,
+`rungs.STOP_GRACE_S`, read at call time by both callers.
 `test_the_display_and_the_rung_group_are_given_one_grace_period` pins that
-`headed`, `cli` and `rungs` hold the same value and that the display stop waits
-for it; the group stop's own use of it is covered by the test that makes a
-group ignore SIGTERM until the grace period ends.
+`headed`, `cli` and `rungs` hold the same value (with distinct stand-ins so a
+copied literal cannot pass), and that each stop waits for it.
 
-**When this becomes a real bug:** if the two disagree on the order (SIGTERM
-before SIGKILL), on the grace period, or on killing what is left after it, or
-if a third stop appears that copies one of them instead of reusing it.
+**When this becomes a real bug:** if either stop stops going through
+`stop_with_grace`, if a third stop appears that copies the routine instead of
+calling it, or if a SIGTERM landing during either wait leaves the server or the
+group running (`test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it`
+and the two real-process SIGTERM tests in `tests/test_cli.py`).
 
 ## A display slot with a lock we cannot prove dead is skipped, never reclaimed
 
@@ -177,28 +190,42 @@ another process also reads as held, and so does a pid that is a zombie: a real
 Xvfb refuses to start over a lock naming one ("Server is already active",
 checked 2026-11-02). A lock for a dead pid that we own is reclaimed, because
 Xvfb starts over it (checked against a real server, over both a leftover lock
-and its socket).
+and its socket), unless something is listening on the slot's socket. A dead
+lock beside a live listener is another server's slot: a real Xvfb started
+there exits 1 with "server already running" (checked 2026-11-03, with a
+stand-in listener on the abstract address), so `display_is_free` connects to
+the socket before it calls the slot free, and `display()` treats that message
+like the lock-side "Server is already active" and moves to the next slot
+instead of failing the rung.
 
 **When this becomes a real bug:** if a lock we own that names a dead pid is
-skipped, since that is the leak this exists to close, or if the headed rung
-reports no free display while fewer than 500 slots hold a live, foreign, or
-unreadable lock.
+skipped while nothing listens on its socket, since that is the leak this exists
+to close, if the headed rung reports no free display while fewer than 500 slots
+hold a live, foreign, or unreadable lock or a live listener, or if a slot
+taken by another server fails the rung instead of moving on.
 
-## Rung 4 treats a display as ready once its lock names the server
+## Rung 4 treats a display as ready when its lock names the server and a connect succeeds
 
-**What you see:** `_await_display` returns when `/tmp/.X<n>-lock` holds the pid
-of the Xvfb we started. It never looks at the display's socket in
-`/tmp/.X11-unix`.
+**What you see:** `_await_display` waits 1.5 seconds before its first look, then
+returns only once `/tmp/.X<n>-lock` holds the pid of the Xvfb we started and a
+connect to the display's socket succeeds. A lock that names our pid but a
+socket that refuses keeps it waiting, up to 10 seconds.
 
-**Why:** the lock is what a second server on the slot would fail on, and it is
-the file the server itself writes. On one real Xvfb (`:761`, 2026-11-02) the
-lock and the socket were first seen in the same 1 ms poll, 25 ms after start,
-and a settle of 1.5 seconds comes before the first poll. That is one run, so it
-shows no gap, not that none can exist.
+**Why:** Xvfb writes its lock before it binds its socket. Of 200 real starts on
+2026-11-03, 39 showed the lock first, by 0.012 to 0.071 ms on an idle machine,
+so the lock alone says "claimed", not "ready". The 1.5-second settle makes that
+gap unlikely to matter and does not make it impossible. Both addresses are
+tried because Xvfb listens on the socket file and on the Linux abstract socket
+of the same name, and where it cannot create the file (an unwritable
+`/tmp/.X11-unix`, which it tolerates; checked 2026-11-03) only the abstract
+one exists. The probe connects and closes without sending anything; the server
+drops a client that never sends its setup request. The lock still has to name
+our pid: a slot reclaimed from a dead server holds the old pid until the new
+one rewrites it.
 
 **When this becomes a real bug:** if a headed fetch fails to connect to its
-display right after `_await_display` returned, on a machine where the lock is
-there and the socket is not yet.
+display right after `_await_display` returned, or if the probe leaves a client
+connected that makes a server hold a slot after the rung is over.
 
 ## The real-Xvfb tests clean up with a read and then an unlink
 
@@ -207,12 +234,19 @@ a slot's lock, finds its own test server's pid, and then unlinks the lock and
 the socket as two further steps. If another process replaces the lock between
 the read and the unlink, the replacement loses it.
 
-**Why:** a file system has no "remove this if it still says X". Closing the gap
-means renaming a file that may not be ours out of the way first, which is a
-worse thing to do to a stranger's lock than the gap is. The slot came from
-`free_display` a moment earlier, so the gap needs another process to take that
-exact slot between two system calls. This is test cleanup and not library code,
-which is why the pattern lives in the test file.
+**Why:** a file system has no "remove this if it still says X". The two ways
+to narrow the gap each leave one of their own. Comparing the inode before the
+unlink still has a window between the compare and the unlink. Renaming the lock
+aside first, then checking it, then deleting the renamed file, moves a lock that
+may belong to someone else for as long as the check takes, and a server that
+looks for its lock in that time finds none. `/tmp` is mode 1777 (sticky), so
+another user cannot replace or remove a file this user owns, and only a process
+of the same user can race the unlink; that, and the fact that the slot came
+from `free_display` a moment earlier, is why the gap needs a same-user process
+to take that exact slot between two system calls. That reasoning is from
+reading the code and the directory mode, not from a test that races it. This
+is test cleanup and not library code, which is why the pattern lives in the
+test file.
 
 **When this becomes a real bug:** if the same read-then-unlink appears in
 `ladder_cli`, where it would delete a lock that is not ours, or if a run of the

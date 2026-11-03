@@ -21,6 +21,7 @@ from typing import IO, Iterable, Sequence
 from . import procfs
 from .protocol import PROTOCOL, LadderRequest, LadderResponse, ProtocolError
 from .rungs import RUNGS, STOP_GRACE_S, RungContext, RungResult, RungVerdict, fetch, judge, network_verdict
+from .stopping import stop_with_grace
 
 # One budget, owned by the code that enforces it: a rung is stopped at 90s.
 # It used to be overridable from the environment, which made two owners of one
@@ -108,8 +109,8 @@ def _has_live_member(group: int) -> bool:
     ended, has a child forked during the first in its listing, so one missed fork
     is not enough to call a running group stopped. This narrows the window and
     does not close it: a child that forks again and exits inside the first scan
-    can still be in neither. SIGKILL is not sent unconditionally to cover that,
-    because by the time it ran the group id could belong to something else.
+    can still be in neither. `_stop_group` closes it with a last SIGKILL to the
+    group while the leader is still unreaped (review finding H2).
     """
     return _scan_for_live_member(group) or _scan_for_live_member(group)
 
@@ -138,32 +139,48 @@ def _stop_group(process: subprocess.Popen) -> None:
     waited on, not just the child: the child dying closes the pipes, which says
     nothing about a display server that is still removing its lock.
 
-    The kill is in a `finally` because `main` turns SIGTERM into SystemExit, which
-    can arrive during the wait, or in the first `killpg` itself. Without it, a
-    SIGTERM landing there would leave with the SIGKILL unsent and a rung that
-    ignored the first one still running. The first `killpg` is inside the `try`
-    for that reason: a SystemExit out of it is a stop that has sent nothing.
+    The order, the grace period and the kill that survives a SIGTERM landing
+    mid-stop are `stopping.stop_with_grace`, shared with the display stop. What is
+    particular to a group is here: it has no wait, so "gone" is a poll of /proc.
+    The reaping `communicate()` is in a `finally` of its own for the same reason
+    the kill is in one: `main` turns SIGTERM into SystemExit, and the child must
+    not be left unreaped by it.
     """
     group = process.pid
-    stopped = False
-    try:
+
+    def term() -> None:
         try:
             os.killpg(group, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        deadline = time.monotonic() + STOP_GRACE_S
+
+    def kill() -> None:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def wait_gone(seconds: float) -> bool:
+        # The leader is not reaped in here, on purpose. A pid stays allocated while
+        # its process is an unreaped zombie, so the group id cannot be handed to
+        # anything else until `communicate()` below reaps it, and a SIGKILL to the
+        # group can only reach this group. A zombie is not "running" to the scans,
+        # so leaving it unreaped does not hold the wait up.
+        deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            process.poll()  # reaps the child, which a zombie keeps in the group until then
             if not _group_exists(group):
-                stopped = True
-                break
+                # Two scans that found nothing running can still have missed a
+                # child forked and gone again between them. One more signal
+                # settles it, and costs nothing when the group is only a zombie.
+                if process.returncode is None:
+                    kill()
+                return True
             time.sleep(0.02)
+        return False
+
+    try:
+        stop_with_grace(term=term, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)
     finally:
-        if not stopped:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         process.communicate()
 
 

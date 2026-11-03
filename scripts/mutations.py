@@ -299,8 +299,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display is asked to stop before it is killed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    process.terminate()\n    try:",
-        new="    process.kill()\n    try:",
+        old="    stop_with_grace(term=process.terminate,",
+        new="    stop_with_grace(term=process.kill,",
         # A fake process, not the real-Xvfb test: this gate runs under a read-only
         # bwrap root where Xvfb cannot write /tmp/.X<n>-lock, so a real server
         # never comes up. The real-server version runs in the ordinary suite.
@@ -310,8 +310,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display that ignores the request to stop is killed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except subprocess.TimeoutExpired:\n        process.kill()\n        process.wait()",
-        new="    except subprocess.TimeoutExpired:\n        pass",
+        old="    def kill() -> None:\n        process.kill()\n        process.wait()\n",
+        new="    def kill() -> None:\n        pass\n",
         test="tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",
         why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
     ),
@@ -342,8 +342,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display lock that vanishes mid-check falls back to the socket",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old='    except FileNotFoundError:\n        return not Path(f"/tmp/.X11-unix/X{number}").exists()\n',
-        new="    except FileNotFoundError:\n        return True\n",
+        old='    except FileNotFoundError:\n        if Path(f"/tmp/.X11-unix/X{number}").exists():\n            return False\n',
+        new="    except FileNotFoundError:\n        pass\n",
         test="tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",
         why="A lock removed between the check and the read says nothing about a socket that is still there.",
     ),
@@ -382,10 +382,100 @@ BELIEFS: list[Belief] = [
     Belief(
         name="both stops wait for the one shared grace period",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="        process.wait(timeout=STOP_GRACE_S)",
-        new="        process.wait(timeout=5.0)",
+        old="kill=kill, grace_s=STOP_GRACE_S)",
+        new="kill=kill, grace_s=5.0)",
         test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_given_one_grace_period",
         why="Two constants for one wait drift apart; the comment on rungs.STOP_GRACE_S says there is only one.",
+    ),
+    Belief(
+        name="the rung group's stop waits for the one shared grace period",
+        path=LADDER / "ladder_cli/cli.py",
+        old="kill=kill, grace_s=STOP_GRACE_S)",
+        new="kill=kill, grace_s=5.0)",
+        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
+        why="The group stop is the other reader of rungs.STOP_GRACE_S; a number of its own is the drift the shared constant exists to prevent.",
+    ),
+    Belief(
+        name="the display stop goes through the shared stop routine",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)\n",
+        new="    process.terminate()\n    if not wait_gone(STOP_GRACE_S):\n        kill()\n",
+        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
+        why="Review findings G8 and H9: a second copy of the TERM-then-KILL loop is how the display lost the group's kill-in-a-finally.",
+    ),
+    Belief(
+        name="the rung group stop goes through the shared stop routine",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        stop_with_grace(term=term, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)\n",
+        new="        term()\n        if not wait_gone(STOP_GRACE_S):\n            kill()\n",
+        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
+        why="Review findings G8 and H9, from the group's side.",
+    ),
+    Belief(
+        name="a SIGTERM landing while the display is stopping still kills it",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="    finally:\n        if not gone:\n            kill()\n",
+        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
+        test="tests/test_rungs_headed.py::test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it",
+        why="`main` turns SIGTERM into SystemExit, which can land in the wait; the display stop had no kill that survived it (review finding H9).",
+    ),
+    Belief(
+        name="the shared stop kills even when the wait is interrupted",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="    finally:\n        if not gone:\n            kill()\n",
+        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
+        test="tests/test_stopping.py::test_a_sigterm_that_lands_in_the_wait_still_kills_and_still_surfaces",
+        why="The routine's own guarantee, checked without a real process: a SystemExit out of the wait must not skip the kill.",
+    ),
+    Belief(
+        name="the shared stop kills even when the request to stop is interrupted",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="    try:\n        term()\n        gone = wait_gone(grace_s)\n",
+        new="    term()\n    try:\n        gone = wait_gone(grace_s)\n",
+        test="tests/test_stopping.py::test_a_sigterm_that_lands_in_the_request_to_stop_still_kills_and_still_surfaces",
+        why="The routine's own guarantee for the other call: the request is inside the try that owes the kill.",
+    ),
+    Belief(
+        name="the shared stop asks before it waits",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="        term()\n        gone = wait_gone(grace_s)\n",
+        new="        gone = wait_gone(grace_s)\n        term()\n",
+        test="tests/test_stopping.py::test_a_target_that_stops_when_asked_is_never_killed",
+        why="Waiting out the grace period before asking stops nothing and kills everything that would have stopped on request.",
+    ),
+    # ---- a slot is free when nothing answers on it, whatever its lock says ----
+    Belief(
+        name="a dead lock beside a live listener does not free the slot",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    return not _accepts_connections(number)\n",
+        new="    return True\n",
+        test="tests/test_rungs_headed.py::test_a_dead_lock_beside_a_live_listener_does_not_free_the_slot",
+        why="A stale lock says its own server is gone, not that nobody else is listening; a real Xvfb on such a slot exits 'server already running' (review finding G6).",
+    ),
+    Belief(
+        name="xvfb saying a server is already running is a collision not a failure",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old='XVFB_COLLISION_MESSAGES = ("Server is already active for display", "server already running")',
+        new='XVFB_COLLISION_MESSAGES = ("Server is already active for display",)',
+        test="tests/test_rungs_headed.py::test_xvfb_saying_a_server_is_already_running_is_a_collision_not_a_failure",
+        why="The socket-side collision message means the slot is taken; treating it as a broken Xvfb fails the rung instead of trying the next slot.",
+    ),
+    # ---- a display is ready when it answers, not when its lock appears ----
+    Belief(
+        name="a display is not ready until a connect to its socket succeeds",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="            if _accepts_connections(number):\n                return\n",
+        new="            if True:\n                return\n",
+        test="tests/test_rungs_headed.py::test_readiness_waits_for_a_socket_that_answers_not_just_the_lock",
+        why="Xvfb writes its lock before it binds its socket (39 of 200 real starts); a browser pointed at it in that gap cannot connect (review finding G4).",
+    ),
+    Belief(
+        name="a display that only listens on the abstract socket is ready",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old='    for address in (path, "\\0" + path):\n',
+        new="    for address in (path,):\n",
+        test="tests/test_rungs_headed.py::test_readiness_accepts_a_display_that_only_listens_on_the_abstract_socket",
+        why="Xvfb tolerates a /tmp/.X11-unix it cannot write and serves on the abstract socket alone; requiring the file would break that working setup.",
     ),
     # ---- a rung that blows its budget is stopped, not just removed ----
     Belief(
@@ -398,43 +488,51 @@ BELIEFS: list[Belief] = [
     ),
     Belief(
         name="the first request to stop is inside the try that holds the kill",
-        path=LADDER / "ladder_cli/cli.py",
-        old=(
-            "    try:\n        try:\n            os.killpg(group, signal.SIGTERM)\n"
-            "        except ProcessLookupError:\n            pass\n"
-            "        deadline = time.monotonic() + STOP_GRACE_S\n"
-        ),
-        new=(
-            "    try:\n        os.killpg(group, signal.SIGTERM)\n"
-            "    except ProcessLookupError:\n        pass\n"
-            "    try:\n        deadline = time.monotonic() + STOP_GRACE_S\n"
-        ),
+        path=LADDER / "ladder_cli/stopping.py",
+        old="    try:\n        term()\n        gone = wait_gone(grace_s)\n",
+        new="    term()\n    try:\n        gone = wait_gone(grace_s)\n",
         test="tests/test_cli.py::test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it",
         why="`main` turns SIGTERM into SystemExit, which can surface in the first killpg; outside the try, nothing is left to send the SIGKILL.",
     ),
     Belief(
         name="a rung is not done until everything it started has stopped",
         path=LADDER / "ladder_cli/cli.py",
-        old="            if not _group_exists(group):\n                stopped = True\n                break\n",
-        new="            if process.poll() is not None:\n                stopped = True\n                break\n",
+        old="            if not _group_exists(group):\n",
+        new="            if process.poll() is not None:\n",
         test="tests/test_cli.py::test_a_rung_is_not_done_until_what_it_started_has_finished_stopping",
         why="The rung's own process dying says nothing about a display server still removing its lock.",
     ),
     Belief(
         name="a rung group that ignores the request to stop is killed",
         path=LADDER / "ladder_cli/cli.py",
-        old="        if not stopped:\n            try:\n                os.killpg(group, signal.SIGKILL)\n",
-        new="        if not stopped:\n            try:\n                os.killpg(group, signal.SIGTERM)\n",
+        old="    def kill() -> None:\n        try:\n            os.killpg(group, signal.SIGKILL)\n",
+        new="    def kill() -> None:\n        try:\n            os.killpg(group, signal.SIGTERM)\n",
         test="tests/test_cli.py::test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period",
         why="Asking first must not let a rung that will not stop hold the budget open indefinitely.",
     ),
     Belief(
         name="a second SIGTERM during the stop still kills what ignored the first",
-        path=LADDER / "ladder_cli/cli.py",
-        old="    finally:\n        if not stopped:\n",
-        new="    except ProcessLookupError:\n        pass\n    else:\n        if not stopped:\n",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="    finally:\n        if not gone:\n            kill()\n",
+        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
         test="tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",
         why="`main` turns SIGTERM into SystemExit, which can land in the wait; the kill must not depend on the wait finishing.",
+    ),
+    Belief(
+        name="a member the scans missed is killed before the group is called stopped",
+        path=LADDER / "ladder_cli/cli.py",
+        old="                if process.returncode is None:\n                    kill()\n                return True\n",
+        new="                return True\n",
+        test="tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",
+        why="A fork that lands between two /proc scans is in neither, and calling the group stopped then leaves it running (review finding H2); the last SIGKILL is the only thing that does not depend on the listing.",
+    ),
+    Belief(
+        name="the last SIGKILL is not sent once the leader has been reaped",
+        path=LADDER / "ladder_cli/cli.py",
+        old="                if process.returncode is None:\n",
+        new="                if True:\n",
+        test="tests/test_cli.py::test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped[0-0]",
+        why="An unreaped leader holds the group id; after it is reaped the number can belong to an unrelated process, which a SIGKILL would hit.",
     ),
     Belief(
         name="a zombie left in a stopped group is not waited on",

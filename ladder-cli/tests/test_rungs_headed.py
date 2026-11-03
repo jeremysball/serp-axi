@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -332,6 +333,20 @@ def _x11_files_under(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
 
 
+@contextlib.contextmanager
+def _listening(address: str | bytes):
+    """A unix socket listening at `address`, a path or an abstract name starting with NUL."""
+    import socket as socket_module
+
+    server = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        server.bind(address)
+        server.listen(4)
+        yield
+    finally:
+        server.close()
+
+
 def test_a_slot_is_free_once_the_server_that_locked_it_is_gone(monkeypatch, tmp_path) -> None:
     """A SIGKILL, a crash or a reboot leaves the lock behind; Xvfb reclaims such a slot itself.
 
@@ -344,6 +359,50 @@ def test_a_slot_is_free_once_the_server_that_locked_it_is_gone(monkeypatch, tmp_
 
     assert headed.display_is_free(300) is False, "a lock held by a live process is respected"
     assert headed.display_is_free(301) is True, "a lock left by a dead process is not"
+
+
+def test_a_dead_lock_beside_a_live_listener_does_not_free_the_slot(monkeypatch, tmp_path) -> None:
+    """Review finding G6: the lock was trusted over the socket.
+
+    A stale lock of ours says the server that wrote it is gone, which says nothing
+    about a different server now listening on the same slot. A real Xvfb on such a
+    slot exits "server already running", so the search must not offer it.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    (tmp_path / ".X310-lock").write_text(f"{_dead_pid():>10}\n")
+    (tmp_path / ".X311-lock").write_text(f"{_dead_pid():>10}\n")
+
+    assert headed.display_is_free(311) is True, "a dead lock with nothing listening is still free"
+    with _listening("\0" + os.fspath(tmp_path / "X310")):
+        assert headed.display_is_free(310) is False, "a dead lock beside a listener is not"
+    with _listening(os.fspath(tmp_path / "X310")):
+        assert headed.display_is_free(310) is False, "nor is one beside a listener on the socket file"
+
+
+def test_a_listener_with_no_lock_at_all_holds_its_slot(monkeypatch, tmp_path) -> None:
+    """The abstract address leaves no file, so the old `exists()` check could not see it."""
+    _x11_files_under(monkeypatch, tmp_path)
+    assert headed.display_is_free(312) is True, "precondition: nothing at the slot"
+
+    with _listening("\0" + os.fspath(tmp_path / "X312")):
+        assert headed.display_is_free(312) is False
+
+
+def test_xvfb_saying_a_server_is_already_running_is_a_collision_not_a_failure(monkeypatch, tmp_path) -> None:
+    """The socket-side collision message (a dead lock, a live listener) must retry the next slot.
+
+    The message is what a real Xvfb printed on 2026-11-03:
+    `_XSERVTransMakeAllCOTSServerListeners: server already running`.
+    """
+    monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
+    stderr = b"_XSERVTransMakeAllCOTSServerListeners: server already running\n(EE) Cannot establish any listening sockets\n"
+
+    with pytest.raises(headed._DisplayCollision):
+        headed._await_display(316, FakeProcess(exit_code=1, stderr=stderr))
+
+    with pytest.raises(RuntimeError, match="exited immediately") as raised:
+        headed._await_display(316, FakeProcess(exit_code=1, stderr=b"(EE) no screens found\n"))
+    assert not isinstance(raised.value, headed._DisplayCollision), "any other early exit is still a failure"
 
 
 def test_a_lock_that_does_not_name_a_pid_is_treated_as_held(monkeypatch, tmp_path) -> None:
@@ -557,6 +616,8 @@ def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monke
     monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
     monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.2)
+    # this test is about which lock counts; whether the socket answers is the next one's
+    monkeypatch.setattr(headed, "_accepts_connections", lambda number: True)
     (tmp_path / ".X313-lock").write_text(f"{_dead_pid():>10}\n")
 
     with pytest.raises(RuntimeError, match="never wrote its lock"):
@@ -564,6 +625,44 @@ def test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one(monke
 
     (tmp_path / ".X313-lock").write_text(f"{process.pid:>10}\n")
     headed._await_display(313, process)
+
+
+def test_readiness_waits_for_a_socket_that_answers_not_just_the_lock(monkeypatch, tmp_path) -> None:
+    """Review finding G4: Xvfb writes its lock before it binds its socket.
+
+    Measured on a real Xvfb, 39 of 200 starts showed the lock first, by up to 71
+    microseconds. The lock naming our pid is the only thing the wait used to ask,
+    so a browser pointed at the display in that gap would fail to connect.
+    """
+    process = FakeProcess()
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
+    monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.2)
+    (tmp_path / ".X314-lock").write_text(f"{process.pid:>10}\n")
+
+    with pytest.raises(RuntimeError, match="wrote its lock but never accepted a connection"):
+        headed._await_display(314, process)
+
+    with _listening(os.fspath(tmp_path / "X314")):
+        headed._await_display(314, process)
+
+
+def test_readiness_accepts_a_display_that_only_listens_on_the_abstract_socket(monkeypatch, tmp_path) -> None:
+    """Xvfb tolerates a /tmp/.X11-unix it cannot write to and serves on the abstract socket alone.
+
+    Checked against a real Xvfb on 2026-11-03 with the directory bound read-only:
+    no file socket, a connect to the abstract one succeeded. Requiring the file
+    would have turned that working setup into "never accepted a connection".
+    """
+    process = FakeProcess()
+    monkeypatch.setattr(headed, "Path", lambda path: tmp_path / Path(path).name)
+    monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 0.2)
+    (tmp_path / ".X315-lock").write_text(f"{process.pid:>10}\n")
+    assert not (tmp_path / "X315").exists(), "precondition: there is no socket file"
+
+    with _listening("\0" + os.fspath(tmp_path / "X315")):
+        headed._await_display(315, process)
 
 
 def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp")) -> None:
@@ -811,6 +910,69 @@ def test_the_display_and_the_rung_group_are_given_one_grace_period(monkeypatch) 
     headed.fetch("https://example.com/")
 
     assert process.wait_timeouts == [7.25]
+
+
+def test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it() -> None:
+    """Review finding H9: only the group stop kept its SIGKILL when SIGTERM landed mid-stop.
+
+    `main` turns SIGTERM into SystemExit, which can surface in the display's wait.
+    The display stop used to send the kill after the wait, so that SystemExit left
+    an Xvfb that ignored the first request running, with its lock held. The stop is
+    now the routine the group stop uses, so the kill is in a `finally`.
+    """
+
+    class Interrupted(FakeProcess):
+        def wait(self, timeout: float | None = None) -> None:
+            if not self.killed and timeout is not None:
+                raise SystemExit(128 + 15)
+            super().wait(timeout)
+
+    process = Interrupted()
+
+    with pytest.raises(SystemExit):
+        headed._stop_display(process)
+
+    assert process.terminated, "it was asked to stop before the interruption"
+    assert process.killed, "and killed anyway, since the wait did not end with it gone"
+    assert process.waited, "and reaped, so it is not left as an unreaped child"
+
+
+def test_the_display_and_the_rung_group_are_stopped_by_the_one_routine(monkeypatch) -> None:
+    """Review findings G8 and H9: two TERM-then-KILL loops that could drift apart.
+
+    Both stops are checked from their own side: each hands the shared routine the
+    one grace period and callbacks, and the routine is the only thing that orders
+    the request and the kill. A stop that went back to carrying its own loop
+    would not reach the stand-in.
+    """
+    from ladder_cli import cli, rungs
+
+    calls: list[dict[str, Any]] = []
+
+    def standin(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(headed, "stop_with_grace", standin)
+    monkeypatch.setattr(cli, "stop_with_grace", standin)
+    # Distinct values, neither the real 5.0: a stop that passed a literal 5.0 would
+    # equal rungs.STOP_GRACE_S and look right, and these tell it from a read of its
+    # own module's constant at call time.
+    monkeypatch.setattr(headed, "STOP_GRACE_S", 7.25)
+    monkeypatch.setattr(cli, "STOP_GRACE_S", 8.5)
+
+    headed._stop_display(FakeProcess())
+    group_process = subprocess.Popen(
+        [sys.executable, "-c", "pass"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    )
+    cli._stop_group(group_process)
+
+    assert len(calls) == 2, "each stop went through the shared routine once"
+    for call in calls:
+        assert set(call) == {"term", "wait_gone", "kill", "grace_s"}
+    display_call, group_call = calls
+    assert display_call["grace_s"] == 7.25, "the display stop reads headed.STOP_GRACE_S"
+    assert group_call["grace_s"] == 8.5, "the group stop reads cli.STOP_GRACE_S"
+    assert rungs.STOP_GRACE_S == 5.0, "precondition: the real value is not one of the stand-ins"
 
 
 def test_the_turnstile_click_is_not_restated() -> None:
