@@ -1,6 +1,7 @@
 import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
+import { MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG } from "../body.ts";
 import { SerpAxiError } from "../errors.ts";
 import type { AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
@@ -8,6 +9,7 @@ import { scrapeSerper } from "../serper.ts";
 import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
+import { requestMaxResponseBytes, resolveMaxResponseBytes } from "../response-limit.ts";
 import {
   FULL_MAX_CHARS_ENV,
   INCLUDE_MARKUP_ENV,
@@ -24,6 +26,7 @@ export const SCRAPE_FLAGS: FlagSpec = {
   full: "boolean",
   "max-chars": "string",
   "full-max-chars": "string",
+  "max-response-bytes": "string",
   "include-markup": "boolean",
   provider: "string",
   "dataset-id": "string",
@@ -68,8 +71,8 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-const SCRAPE_HELP = `serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>]
+const SCRAPE_HELP = `serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--max-response-bytes <n>]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>] [--max-response-bytes <n>]
 serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] --ladder
 
 Fetch and extract readable text from one or more web pages.
@@ -107,6 +110,12 @@ Flags:
                          Also: ${INCLUDE_MARKUP_ENV}=1|0, or "includeMarkup": true in the
                          config file (read for Bright Data only).
                          Precedence: flag > env > config > off.
+  ${MAX_RESPONSE_BYTES_FLAG} <n>
+                         Most bytes one provider response may carry, before any character cap.
+                         A longer body stops the run with an error, because a cut-off body
+                         cannot be parsed. Default: 67108864 (64 MiB). Not valid with --ladder.
+                         Also: ${MAX_RESPONSE_BYTES_ENV}=<n>, or "maxResponseBytes": <n> in the
+                         config file. Precedence: flag > env > config > built-in default.
   --provider <name>      serper (default) or brightdata. Not valid with --ladder.
   --ladder               Scrape through the resident ladder CLI instead of a paid provider.
   --dataset-id <id>     Bright Data dataset to scrape against.
@@ -241,6 +250,19 @@ function withMarkupFlag(rerun: string, includeMarkup: boolean): string {
   return includeMarkup ? `${rerun} --include-markup` : rerun;
 }
 
+// The url a rerun command should name: the record's own, else the one this scrape
+// asked for, which Bright Data echoes back as `input.url`. A record can carry
+// neither, and then there is no honest command to print.
+function recordUrl(record: BrightDataRecord): string | undefined {
+  if (typeof record.url === "string" && record.url.length > 0) return record.url;
+  const { input } = record;
+  if (typeof input === "object" && input !== null && !Array.isArray(input)) {
+    const asked = (input as Record<string, unknown>).url;
+    if (typeof asked === "string" && asked.length > 0) return asked;
+  }
+  return undefined;
+}
+
 function shapeBrightDataRecord(
   record: BrightDataRecord,
   full: boolean,
@@ -249,13 +271,16 @@ function shapeBrightDataRecord(
   includeMarkup: boolean,
   datasetFlag: string,
 ): AxiOutput {
-  const url = shellQuote(typeof record.url === "string" ? record.url : "<url>");
+  const url = recordUrl(record);
   return shapeScrapeRecord(record, {
     full,
     limits,
     capFlags,
     includeMarkup,
-    rerun: withMarkupFlag(`serp-axi scrape ${url} --provider brightdata${datasetFlag}`, includeMarkup),
+    rerun:
+      url === undefined
+        ? undefined
+        : withMarkupFlag(`serp-axi scrape ${shellQuote(url)} --provider brightdata${datasetFlag}`, includeMarkup),
     scope: { kind: "every-string", except: NON_TRUNCATED_RECORD_FIELDS },
   });
 }
@@ -288,6 +313,7 @@ async function runBrightDataScrape(
   config: StoredConfig | undefined,
   requestedMarkup: boolean | undefined,
   charRequest: CharLimitRequest,
+  requestedMaxBytes: number | undefined,
 ): Promise<AxiOutput> {
   if (positionals.length === 0) {
     throw new SerpAxiError(
@@ -320,7 +346,13 @@ async function runBrightDataScrape(
   const datasetFlag = datasetFlagValue === undefined ? "" : ` --dataset-id ${shellQuote(datasetFlagValue)}`;
 
   const full = Boolean(flags.full);
-  const records = await scrapeBrightData(apiKey, datasetId, urls, fetchImpl);
+  const records = await scrapeBrightData(
+    apiKey,
+    datasetId,
+    urls,
+    fetchImpl,
+    resolveMaxResponseBytes(requestedMaxBytes, stored),
+  );
 
   return {
     provider: "brightdata",
@@ -381,10 +413,17 @@ export async function runScrape(
     }
   }
 
+  // Checked here, after the ladder branch has returned, because the ladder makes its
+  // own requests and so never uses the cap. Before any config file is opened.
+  const requestedMaxBytes = requestMaxResponseBytes(
+    flags["max-response-bytes"] as string | undefined,
+    env[MAX_RESPONSE_BYTES_ENV],
+  );
+
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
-    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup, charRequest);
+    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup, charRequest, requestedMaxBytes);
   }
 
   if (flags["dataset-id"] !== undefined) {
@@ -415,9 +454,10 @@ export async function runScrape(
   }
 
   // After the URL and key checks, for the reason given in runBrightDataScrape.
-  const limits = resolveCharLimits(charRequest, config ?? loadStoredConfig(os.homedir(), env));
+  const stored = config ?? loadStoredConfig(os.homedir(), env);
+  const limits = resolveCharLimits(charRequest, stored);
 
-  const response = await scrapeSerper(apiKey, url.toString(), fetchImpl);
+  const response = await scrapeSerper(apiKey, url.toString(), fetchImpl, resolveMaxResponseBytes(requestedMaxBytes, stored));
 
   const record: AxiOutput = { url: url.toString() };
   if (response.metadata.title) {
@@ -450,6 +490,13 @@ async function runLadderScrape(
       "--provider does not apply with --ladder",
       "usage",
       "drop --provider, or drop --ladder",
+    );
+  }
+  if (flags["max-response-bytes"] !== undefined) {
+    throw new SerpAxiError(
+      `${MAX_RESPONSE_BYTES_FLAG} does not apply with --ladder`,
+      "usage",
+      "the ladder CLI makes its own requests, so serp-axi has no response of its own to bound; drop the flag, or drop --ladder",
     );
   }
   if (flags["dataset-id"] !== undefined) {

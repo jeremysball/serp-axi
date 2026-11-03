@@ -9,6 +9,7 @@ export interface StoredConfig {
   includeMarkup?: unknown;
   maxChars?: unknown;
   fullMaxChars?: unknown;
+  maxResponseBytes?: unknown;
   ladderTabState?: unknown;
   ladderCookieState?: unknown;
   ladderCacheState?: unknown;

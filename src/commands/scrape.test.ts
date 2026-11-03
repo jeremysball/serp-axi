@@ -1,218 +1,182 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runScrape } from "./scrape.ts";
 import { SerpAxiError } from "../errors.ts";
+import { brightDataScrapeRecord } from "../fixtures.ts";
 import { FULL_MAX_CHARS_ENV, INCLUDE_MARKUP_ENV, MAX_CHARS_ENV } from "../scrape-output.ts";
 
-async function withApiKey<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
-  const original = process.env.SERPER_API_KEY;
-  if (value === undefined) delete process.env.SERPER_API_KEY;
-  else process.env.SERPER_API_KEY = value;
-  try {
-    return await fn();
-  } finally {
-    if (original === undefined) delete process.env.SERPER_API_KEY;
-    else process.env.SERPER_API_KEY = original;
-  }
+// Every test below hands runScrape an env object that names only the keys it
+// needs, never a copy of the developer's shell, and an empty config so nothing
+// reads the machine's real config file. Nothing here writes to process.env.
+//
+// The ladder stub is the one place the shell's env would otherwise leak in: it
+// reads its mode from the environment of the process it is spawned as, and a
+// spawned ladder inherits process.env, not the env runScrape was given. So the
+// mode goes in the one place the injected env does reach: the binary path. Each
+// mode gets a tiny script that execs the stub with `--mode <mode>`.
+const LADDER_STUB = fileURLToPath(new URL("../fixtures/ladder-stub.mjs", import.meta.url));
+const ladderStubDir = mkdtempSync(path.join(os.tmpdir(), "scrape-ladder-stub-"));
+after(() => rmSync(ladderStubDir, { recursive: true, force: true }));
+
+function ladderStubEnv(mode: string): NodeJS.ProcessEnv {
+  const script = path.join(ladderStubDir, `ladder-${mode}.sh`);
+  const stub = `'${LADDER_STUB.replaceAll("'", "'\\''")}'`;
+  writeFileSync(script, `#!/bin/sh\nexec node ${stub} --mode ${mode} "$@"\n`, { mode: 0o755 });
+  return { SERP_AXI_LADDER_BIN: script };
 }
 
 test("runScrape rejects a missing URL before any network call", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(() => runScrape([], (async () => new Response("{}")) as typeof fetch), SerpAxiError);
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(() => runScrape([], (async () => new Response("{}")) as typeof fetch, env, {}), SerpAxiError);
 });
 
 test("runScrape rejects a non-http(s) scheme", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["file:///etc/passwd"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["file:///etc/passwd"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects a loopback host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://127.0.0.1/secret"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://127.0.0.1/secret"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects a private-range host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://192.168.1.5/"], (async () => new Response("{}")) as typeof fetch),
-      SerpAxiError,
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://192.168.1.5/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    SerpAxiError,
+  );
 });
 
 test("runScrape rejects any loopback /8 host, not just 127.0.0.1", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://127.0.0.2/"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://127.0.0.2/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects an IPv4-mapped IPv6 loopback host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://[::ffff:127.0.0.1]/"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://[::ffff:127.0.0.1]/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects an IPv4-mapped IPv6 private-range host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://[::ffff:192.168.1.5]/"], (async () => new Response("{}")) as typeof fetch),
-      SerpAxiError,
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://[::ffff:192.168.1.5]/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    SerpAxiError,
+  );
 });
 
 test("runScrape rejects a link-local host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://169.254.1.1/"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://169.254.1.1/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects a unique-local IPv6 host", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["http://[fc00::1]/"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["http://[fc00::1]/"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape rejects extra positional arguments before any network call", async () => {
-  await withApiKey("test-key", async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-    await assert.rejects(
-      () => runScrape(["https://example.com", "garbage"], fetchImpl),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        assert.match(error.message, /garbage/);
-        return true;
-      },
-    );
-    assert.equal(called, false);
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  await assert.rejects(
+    () => runScrape(["https://example.com", "garbage"], fetchImpl, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      assert.match(error.message, /garbage/);
+      return true;
+    },
+  );
+  assert.equal(called, false);
 });
 
 test("runScrape requires SERPER_API_KEY before any network call", async () => {
-  await withApiKey(undefined, async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-    await assert.rejects(() => runScrape(["https://example.com"], fetchImpl), SerpAxiError);
-    assert.equal(called, false);
-  });
+  const env = {};
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  await assert.rejects(() => runScrape(["https://example.com"], fetchImpl, env, {}), SerpAxiError);
+  assert.equal(called, false);
 });
 
 test("runScrape truncates to the default 1200-character limit", async () => {
-  await withApiKey("test-key", async () => {
-    const longText = "y".repeat(2000);
-    const fetchImpl = (async () =>
-      new Response(JSON.stringify({ text: longText, metadata: { title: "Big Page" } }), { status: 200 })) as typeof fetch;
-    const output = await runScrape(["https://example.com/big"], fetchImpl, hermeticEnv(), {});
-    assert.equal((output.text as string).length, 1200);
-    assert.equal(output.title, "Big Page");
-    assert.equal(output.truncatedFrom, 2000);
-    assert.match(output.help as string, /--full/);
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  const longText = "y".repeat(2000);
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ text: longText, metadata: { title: "Big Page" } }), { status: 200 })) as typeof fetch;
+  const output = await runScrape(["https://example.com/big"], fetchImpl, env, {});
+  assert.equal((output.text as string).length, 1200);
+  assert.equal(output.title, "Big Page");
+  assert.equal(output.truncatedFrom, 2000);
+  assert.match(output.help as string, /--full/);
 });
 
 test("runScrape --full raises the limit to 50000 characters", async () => {
-  await withApiKey("test-key", async () => {
-    const longText = "z".repeat(2000);
-    const fetchImpl = (async () => new Response(JSON.stringify({ text: longText, metadata: {} }), { status: 200 })) as typeof fetch;
-    const output = await runScrape(["https://example.com/big", "--full"], fetchImpl, hermeticEnv(), {});
-    assert.equal((output.text as string).length, 2000);
-    assert.equal(output.truncatedFrom, undefined);
-    assert.equal(output.title, undefined);
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  const longText = "z".repeat(2000);
+  const fetchImpl = (async () => new Response(JSON.stringify({ text: longText, metadata: {} }), { status: 200 })) as typeof fetch;
+  const output = await runScrape(["https://example.com/big", "--full"], fetchImpl, env, {});
+  assert.equal((output.text as string).length, 2000);
+  assert.equal(output.truncatedFrom, undefined);
+  assert.equal(output.title, undefined);
 });
-
-async function withBrightData<T>(
-  apiKey: string | undefined,
-  datasetId: string | undefined,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const originalKey = process.env.BRIGHTDATA_API_KEY;
-  const originalDataset = process.env.BRIGHTDATA_DATASET_ID;
-  if (apiKey === undefined) delete process.env.BRIGHTDATA_API_KEY;
-  else process.env.BRIGHTDATA_API_KEY = apiKey;
-  if (datasetId === undefined) delete process.env.BRIGHTDATA_DATASET_ID;
-  else process.env.BRIGHTDATA_DATASET_ID = datasetId;
-  try {
-    return await fn();
-  } finally {
-    if (originalKey === undefined) delete process.env.BRIGHTDATA_API_KEY;
-    else process.env.BRIGHTDATA_API_KEY = originalKey;
-    if (originalDataset === undefined) delete process.env.BRIGHTDATA_DATASET_ID;
-    else process.env.BRIGHTDATA_DATASET_ID = originalDataset;
-  }
-}
-
-// The env these process.env-driven tests hand to runScrape: what withBrightData
-// set, minus the settings a developer's shell might export. Paired with an
-// empty config so no test reads the machine's real config file.
-function hermeticEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env[INCLUDE_MARKUP_ENV];
-  delete env[MAX_CHARS_ENV];
-  delete env[FULL_MAX_CHARS_ENV];
-  return env;
-}
 
 test("runScrape rejects an unknown provider", async () => {
   await assert.rejects(
-    () => runScrape(["https://example.com", "--provider", "yahoo"], (async () => new Response("[]")) as typeof fetch),
+    () => runScrape(["https://example.com", "--provider", "yahoo"], (async () => new Response("[]")) as typeof fetch, {}, {}),
     (error: unknown) => {
       assert.ok(error instanceof SerpAxiError);
       assert.equal(error.kind, "usage");
@@ -222,238 +186,252 @@ test("runScrape rejects an unknown provider", async () => {
 });
 
 test("runScrape rejects --dataset-id with the default Serper provider", async () => {
-  await withApiKey("test-key", async () => {
-    await assert.rejects(
-      () => runScrape(["https://example.com", "--dataset-id", "gd_x"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "usage");
-        return true;
-      },
-    );
-  });
+  const env = { SERPER_API_KEY: "test-key" };
+  await assert.rejects(
+    () => runScrape(["https://example.com", "--dataset-id", "gd_x"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "usage");
+      return true;
+    },
+  );
 });
 
 test("runScrape requires a URL for Bright Data before any network call", async () => {
-  await withBrightData("test-key", undefined, async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return new Response("[]");
-    }) as typeof fetch;
-    await assert.rejects(() => runScrape(["--provider", "brightdata"], fetchImpl), SerpAxiError);
-    assert.equal(called, false);
-  });
+  const env = { BRIGHTDATA_API_KEY: "test-key" };
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("[]");
+  }) as typeof fetch;
+  await assert.rejects(() => runScrape(["--provider", "brightdata"], fetchImpl, env, {}), SerpAxiError);
+  assert.equal(called, false);
 });
 
 test("runScrape requires BRIGHTDATA_API_KEY before any network call", async () => {
-  await withBrightData(undefined, undefined, async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return new Response("[]");
-    }) as typeof fetch;
-    await assert.rejects(
-      () => runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl),
-      SerpAxiError,
-    );
-    assert.equal(called, false);
-  });
+  const env = {};
+  let called = false;
+  const fetchImpl = (async () => {
+    called = true;
+    return new Response("[]");
+  }) as typeof fetch;
+  await assert.rejects(
+    () => runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, env, {}),
+    SerpAxiError,
+  );
+  assert.equal(called, false);
 });
 
 test("runScrape Bright Data batches URLs, applies the default dataset, and truncates fields", async () => {
-  await withBrightData("test-key", undefined, async () => {
-    let capturedUrl: string | undefined;
-    let capturedBody: unknown;
-    const longText = "m".repeat(2000);
-    const fetchImpl = (async (url: string, init?: RequestInit) => {
-      capturedUrl = url;
-      capturedBody = JSON.parse(init?.body as string);
-      return new Response(
-        [
-          JSON.stringify({ url: "https://example.com", markdown: longText }),
-          JSON.stringify({ url: "https://example.com/1", markdown: "short" }),
-        ].join("\n"),
-        { status: 200 },
-      );
-    }) as typeof fetch;
-
-    const output = await runScrape(
-      ["https://example.com", "https://example.com/1", "--provider", "brightdata"],
-      fetchImpl,
-      hermeticEnv(),
-      {},
+  const env = { BRIGHTDATA_API_KEY: "test-key" };
+  let capturedUrl: string | undefined;
+  let capturedBody: unknown;
+  const longText = "m".repeat(2000);
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    capturedUrl = url;
+    capturedBody = JSON.parse(init?.body as string);
+    return new Response(
+      [
+        JSON.stringify({ url: "https://example.com", markdown: longText }),
+        JSON.stringify({ url: "https://example.com/1", markdown: "short" }),
+      ].join("\n"),
+      { status: 200 },
     );
+  }) as typeof fetch;
 
-    assert.match(capturedUrl as string, /dataset_id=gd_m6gjtfmeh43we6cqc/);
-    assert.deepEqual((capturedBody as { input: unknown }).input, [
-      { url: "https://example.com" },
-      { url: "https://example.com/1" },
-    ]);
-    assert.equal(output.provider, "brightdata");
-    assert.equal(output.datasetId, "gd_m6gjtfmeh43we6cqc");
-    const results = output.results as Array<Record<string, unknown>>;
-    assert.equal(results.length, 2);
-    assert.equal((results[0].markdown as string).length, 1200);
-    assert.equal(results[0].markdownTruncatedFrom, 2000);
-    assert.match(results[0].help as string, /--provider brightdata --full/);
-    assert.equal(results[1].markdown, "short");
-    assert.equal(results[1].markdownTruncatedFrom, undefined);
-  });
+  const output = await runScrape(
+    ["https://example.com", "https://example.com/1", "--provider", "brightdata"],
+    fetchImpl,
+    env,
+    {},
+  );
+
+  assert.match(capturedUrl as string, /dataset_id=gd_m6gjtfmeh43we6cqc/);
+  assert.deepEqual((capturedBody as { input: unknown }).input, [
+    { url: "https://example.com" },
+    { url: "https://example.com/1" },
+  ]);
+  assert.equal(output.provider, "brightdata");
+  assert.equal(output.datasetId, "gd_m6gjtfmeh43we6cqc");
+  const results = output.results as Array<Record<string, unknown>>;
+  assert.equal(results.length, 2);
+  assert.equal((results[0].markdown as string).length, 1200);
+  assert.equal(results[0].markdownTruncatedFrom, 2000);
+  assert.match(results[0].help as string, /--provider brightdata --full/);
+  assert.equal(results[1].markdown, "short");
+  assert.equal(results[1].markdownTruncatedFrom, undefined);
 });
 
 test("runScrape Bright Data preserves upstream truncation markers and quotes help URLs", async () => {
-  await withBrightData("test-key", undefined, async () => {
-    const fetchImpl = (async () =>
-      new Response(
-        JSON.stringify({
-          url: "https://example.com/$HOME/test",
-          markdown: "m".repeat(2000),
-          markdownTruncatedFrom: 9999,
-          content: "c".repeat(2000),
-        }),
-      )) as typeof fetch;
-    const output = await runScrape(
-      ["https://example.com/$HOME/test", "--provider", "brightdata"],
-      fetchImpl,
-      hermeticEnv(),
-      {},
-    );
-    const result = (output.results as Array<Record<string, unknown>>)[0];
+  const env = { BRIGHTDATA_API_KEY: "test-key" };
+  const fetchImpl = (async () =>
+    new Response(
+      JSON.stringify({
+        url: "https://example.com/$HOME/test",
+        markdown: "m".repeat(2000),
+        markdownTruncatedFrom: 9999,
+        content: "c".repeat(2000),
+      }),
+    )) as typeof fetch;
+  const output = await runScrape(
+    ["https://example.com/$HOME/test", "--provider", "brightdata"],
+    fetchImpl,
+    env,
+    {},
+  );
+  const result = (output.results as Array<Record<string, unknown>>)[0];
 
-    assert.equal(result.markdownTruncatedFrom, 9999);
-    assert.equal(result.contentTruncatedFrom, 2000);
-    assert.match(result.help as string, /scrape 'https:\/\/example\.com\/\$HOME\/test' --provider brightdata --full/);
+  assert.equal(result.markdownTruncatedFrom, 9999);
+  assert.equal(result.contentTruncatedFrom, 2000);
+  assert.match(result.help as string, /scrape 'https:\/\/example\.com\/\$HOME\/test' --provider brightdata --full/);
+});
+
+// A record is not guaranteed to carry `url`. A hint that names a command the
+// reader cannot run is worse than one that says what to change, so the rerun is
+// built from the record's own url, then from the url this scrape asked for
+// (`input.url`, which Bright Data echoes back), and is left out when neither exists.
+async function brightDataHelp(record: Record<string, unknown>, ...extra: string[]): Promise<string> {
+  const output = await runScrape(
+    ["https://example.com/page", "--provider", "brightdata", ...extra],
+    (async () => new Response(JSON.stringify(record))) as typeof fetch,
+    { BRIGHTDATA_API_KEY: "test-key" },
+    {},
+  );
+  return (output.results as Array<Record<string, unknown>>)[0].help as string;
+}
+
+test("runScrape Bright Data names the requested url in a hint when the record has no url of its own", async () => {
+  const help = await brightDataHelp({ markdown: "m".repeat(2000), input: { url: "https://example.com/asked-for" } });
+  assert.match(help, /`serp-axi scrape 'https:\/\/example\.com\/asked-for' --provider brightdata --full`/);
+});
+
+test("runScrape Bright Data prefers the record's own url over the url it was asked for", async () => {
+  const help = await brightDataHelp({
+    markdown: "m".repeat(2000),
+    url: "https://example.com/final",
+    input: { url: "https://example.com/asked-for" },
   });
+  assert.match(help, /scrape 'https:\/\/example\.com\/final' --provider brightdata --full/);
+});
+
+test("runScrape Bright Data offers no command, and no placeholder, when the record names no url at all", async () => {
+  for (const record of [
+    { markdown: "m".repeat(2000) },
+    { markdown: "m".repeat(2000), url: "", input: {} },
+    { markdown: "m".repeat(2000), url: 7, input: { url: ["https://example.com"] } },
+    { markdown: "m".repeat(2000), input: "https://example.com" },
+  ]) {
+    const help = await brightDataHelp(record);
+    assert.doesNotMatch(help, /<url>|serp-axi scrape|`/, JSON.stringify(record));
+    assert.match(help, /Rerun .*--full.* up to 50000 characters \(2000 total\)/, JSON.stringify(record));
+  }
+  const markup = await brightDataHelp({ markdown: "short", page_html: "<!doctype html><html></html>" });
+  assert.doesNotMatch(markup, /<url>|serp-axi scrape|`/);
+  assert.match(markup, /Rerun .*--include-markup.* to keep the omitted markup/);
 });
 
 test("runScrape Bright Data prefers --dataset-id over BRIGHTDATA_DATASET_ID", async () => {
-  await withBrightData("test-key", "gd_from_env", async () => {
-    let capturedUrl: string | undefined;
-    const fetchImpl = (async (url: string) => {
-      capturedUrl = url;
-      return new Response("");
-    }) as typeof fetch;
-    const output = await runScrape(
-      ["https://example.com", "--provider", "brightdata", "--dataset-id", "gd_from_flag"],
-      fetchImpl,
-      hermeticEnv(),
-      {},
-    );
-    assert.match(capturedUrl as string, /dataset_id=gd_from_flag/);
-    assert.equal(output.datasetId, "gd_from_flag");
-  });
+  const env = { BRIGHTDATA_API_KEY: "test-key", BRIGHTDATA_DATASET_ID: "gd_from_env" };
+  let capturedUrl: string | undefined;
+  const fetchImpl = (async (url: string) => {
+    capturedUrl = url;
+    return new Response("");
+  }) as typeof fetch;
+  const output = await runScrape(
+    ["https://example.com", "--provider", "brightdata", "--dataset-id", "gd_from_flag"],
+    fetchImpl,
+    env,
+    {},
+  );
+  assert.match(capturedUrl as string, /dataset_id=gd_from_flag/);
+  assert.equal(output.datasetId, "gd_from_flag");
 });
 
 test("runScrape Bright Data uses BRIGHTDATA_DATASET_ID when no flag is given", async () => {
-  await withBrightData("test-key", "gd_from_env", async () => {
-    let capturedUrl: string | undefined;
-    const fetchImpl = (async (url: string) => {
-      capturedUrl = url;
-      return new Response("");
-    }) as typeof fetch;
-    const output = await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, hermeticEnv(), {});
-    assert.match(capturedUrl as string, /dataset_id=gd_from_env/);
-    assert.equal(output.datasetId, "gd_from_env");
-  });
+  const env = { BRIGHTDATA_API_KEY: "test-key", BRIGHTDATA_DATASET_ID: "gd_from_env" };
+  let capturedUrl: string | undefined;
+  const fetchImpl = (async (url: string) => {
+    capturedUrl = url;
+    return new Response("");
+  }) as typeof fetch;
+  const output = await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, env, {});
+  assert.match(capturedUrl as string, /dataset_id=gd_from_env/);
+  assert.equal(output.datasetId, "gd_from_env");
 });
 
 test("runScrape Bright Data sends no character cap upstream, however the cap is set", async () => {
-  await withBrightData("test-key", undefined, async () => {
-    for (const args of [[], ["--full"], ["--max-chars", "5"], ["--full", "--full-max-chars", "7777"]]) {
-      let capturedBody: Record<string, unknown> | undefined;
-      const fetchImpl = (async (_url: string, init?: RequestInit) => {
-        capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
-        return new Response("");
-      }) as typeof fetch;
-      await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, hermeticEnv(), {});
-      assert.ok(capturedBody, `Bright Data was never called with ${JSON.stringify(args)}`);
-      // `limit_per_input` is a record count upstream; the cap is applied locally.
-      assert.deepEqual(Object.keys(capturedBody), ["input"], JSON.stringify(args));
-    }
-  });
+  const env = { BRIGHTDATA_API_KEY: "test-key" };
+  for (const args of [[], ["--full"], ["--max-chars", "5"], ["--full", "--full-max-chars", "7777"]]) {
+    let capturedBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+      return new Response("");
+    }) as typeof fetch;
+    await runScrape(["https://example.com", "--provider", "brightdata", ...args], fetchImpl, env, {});
+    assert.ok(capturedBody, `Bright Data was never called with ${JSON.stringify(args)}`);
+    // `limit_per_input` is a record count upstream; the cap is applied locally.
+    assert.deepEqual(Object.keys(capturedBody), ["input"], JSON.stringify(args));
+  }
 });
 
 test("runScrape Bright Data preserves a bare-origin URL without adding a slash", async () => {
-  await withBrightData("test-key", undefined, async () => {
-    let capturedBody: unknown;
-    const fetchImpl = (async (_url: string, init?: RequestInit) => {
-      capturedBody = JSON.parse(init?.body as string);
-      return new Response(JSON.stringify({ url: "https://example.com", markdown: "x" }));
-    }) as typeof fetch;
-    await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, hermeticEnv(), {});
-    assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
-  });
+  const env = { BRIGHTDATA_API_KEY: "test-key" };
+  let capturedBody: unknown;
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(init?.body as string);
+    return new Response(JSON.stringify({ url: "https://example.com", markdown: "x" }));
+  }) as typeof fetch;
+  await runScrape(["https://example.com", "--provider", "brightdata"], fetchImpl, env, {});
+  assert.deepEqual((capturedBody as { input: unknown }).input, [{ url: "https://example.com" }]);
 });
 
-async function withLadderStub<T>(mode: string, fn: () => Promise<T>): Promise<T> {
-  const binKey = "SERP_AXI_LADDER_BIN";
-  const modeKey = "LADDER_STUB_MODE";
-  const originalBin = process.env[binKey];
-  const originalMode = process.env[modeKey];
-  process.env[binKey] = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "fixtures",
-    "ladder-stub-bin.sh",
-  );
-  process.env[modeKey] = mode;
-  try {
-    return await fn();
-  } finally {
-    if (originalBin === undefined) delete process.env[binKey];
-    else process.env[binKey] = originalBin;
-    if (originalMode === undefined) delete process.env[modeKey];
-    else process.env[modeKey] = originalMode;
-  }
-}
-
 test("runScrape --ladder returns rung text with no API key", async () => {
-  await withLadderStub("ok", async () => {
-    const output = await runScrape(
-      ["https://example.com/article", "--ladder"],
-      (async () => new Response("{}")) as typeof fetch,
-      hermeticEnv(),
-      {},
-    );
-    assert.equal(output.verdict, "ok");
-    assert.equal(output.rungReached, 1);
-    assert.deepEqual(output.links, [{ url: "https://example.com/linked", text: "Linked" }]);
-    assert.match(output.text as string, /example\.com\/article/);
-  });
+  const env = ladderStubEnv("ok");
+  const output = await runScrape(
+    ["https://example.com/article", "--ladder"],
+    (async () => new Response("{}")) as typeof fetch,
+    env,
+    {},
+  );
+  assert.equal(output.verdict, "ok");
+  assert.equal(output.rungReached, 1);
+  assert.deepEqual(output.links, [{ url: "https://example.com/linked", text: "Linked" }]);
+  assert.match(output.text as string, /example\.com\/article/);
 });
 
 test("runScrape --ladder maps a blocked verdict to a typed runtime error", async () => {
-  await withLadderStub("blocked", async () => {
-    await assert.rejects(
-      runScrape(["https://example.com/article", "--ladder"], (async () => new Response("{}")) as typeof fetch),
-      (error: unknown) => {
-        assert.ok(error instanceof SerpAxiError);
-        assert.equal(error.kind, "runtime");
-        assert.match(error.message, /verdict: blocked/);
-        return true;
-      },
-    );
-  });
+  const env = ladderStubEnv("blocked");
+  await assert.rejects(
+    runScrape(["https://example.com/article", "--ladder"], (async () => new Response("{}")) as typeof fetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "runtime");
+      assert.match(error.message, /verdict: blocked/);
+      return true;
+    },
+  );
 });
 
 test("runScrape --ladder rejects --provider and multiple URLs", async () => {
-  await withLadderStub("ok", async () => {
-    await assert.rejects(
-      runScrape(
-        ["https://example.com/a", "--ladder", "--provider", "serper"],
-        (async () => new Response("{}")) as typeof fetch,
-      ),
-      /--provider does not apply with --ladder/,
-    );
-    await assert.rejects(
-      runScrape(
-        ["https://example.com/a", "https://example.com/b", "--ladder"],
-        (async () => new Response("{}")) as typeof fetch,
-      ),
-      /exactly one URL/,
-    );
-  });
+  const env = ladderStubEnv("ok");
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/a", "--ladder", "--provider", "serper"],
+      (async () => new Response("{}")) as typeof fetch,
+      env,
+      {},
+    ),
+    /--provider does not apply with --ladder/,
+  );
+  await assert.rejects(
+    runScrape(
+      ["https://example.com/a", "https://example.com/b", "--ladder"],
+      (async () => new Response("{}")) as typeof fetch,
+      env,
+      {},
+    ),
+    /exactly one URL/,
+  );
 });
 
 test("runScrape rejects a ladder axis flag without --ladder instead of ignoring it", async () => {
@@ -461,6 +439,8 @@ test("runScrape rejects a ladder axis flag without --ladder instead of ignoring 
     runScrape(
       ["https://example.com/article", "--tab-state", "same"],
       (async () => new Response("{}")) as typeof fetch,
+      {},
+      {},
     ),
     (error: unknown) => {
       assert.ok(error instanceof SerpAxiError);
@@ -472,22 +452,23 @@ test("runScrape rejects a ladder axis flag without --ladder instead of ignoring 
 });
 
 test("runScrape --ladder forwards the resolved axes onto the wire", async () => {
-  await withLadderStub("echo-request", async () => {
-    const output = await runScrape(
-      ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2",
-        "--jar-in", "browser.json", "--http-jar-in", "session.in", "--http-jar-out", "session.out"],
-      (async () => new Response("{}")) as typeof fetch,
-    );
-    const sent = JSON.parse(output.text as string) as Record<string, unknown>;
-    assert.equal(sent.url, "https://example.com/article");
-    assert.equal(sent.protocol, 3);
-    assert.equal(sent.tabState, "same");
-    assert.equal(sent.rungCeiling, 2);
-    assert.equal(sent.jarIn, "browser.json");
-    assert.equal(sent.jarOut, null);
-    assert.equal(sent.httpJarIn, "session.in");
-    assert.equal(sent.httpJarOut, "session.out");
-  });
+  const env = ladderStubEnv("echo-request");
+  const output = await runScrape(
+    ["https://example.com/article", "--ladder", "--tab-state", "same", "--rung-ceiling", "2",
+      "--jar-in", "browser.json", "--http-jar-in", "session.in", "--http-jar-out", "session.out"],
+    (async () => new Response("{}")) as typeof fetch,
+    env,
+    {},
+  );
+  const sent = JSON.parse(output.text as string) as Record<string, unknown>;
+  assert.equal(sent.url, "https://example.com/article");
+  assert.equal(sent.protocol, 3);
+  assert.equal(sent.tabState, "same");
+  assert.equal(sent.rungCeiling, 2);
+  assert.equal(sent.jarIn, "browser.json");
+  assert.equal(sent.jarOut, null);
+  assert.equal(sent.httpJarIn, "session.in");
+  assert.equal(sent.httpJarOut, "session.out");
 });
 
 test("runScrape --ladder rejects an invalid axis value as a usage error", async () => {
@@ -495,6 +476,8 @@ test("runScrape --ladder rejects an invalid axis value as a usage error", async 
     runScrape(
       ["https://example.com/article", "--ladder", "--rung-ceiling", "9"],
       (async () => new Response("{}")) as typeof fetch,
+      {},
+      {},
     ),
     (error: unknown) => {
       assert.ok(error instanceof SerpAxiError);
@@ -509,13 +492,9 @@ test("runScrape --ladder rejects an invalid axis value as a usage error", async 
 // Settings are injected (env, config) so none of these touch process.env or
 // the machine's real config file.
 
-const FIXTURE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 const BRIGHT_DATA_ENV = { BRIGHTDATA_API_KEY: "test-key" };
 
-function fixtureRecord(): Record<string, unknown> {
-  const firstLine = readFileSync(path.join(FIXTURE_DIR, "brightdata-scrape.ndjson"), "utf8").split("\n")[0];
-  return JSON.parse(firstLine) as Record<string, unknown>;
-}
+const fixtureRecord = brightDataScrapeRecord;
 
 function brightDataResults(output: Record<string, unknown>): Array<Record<string, unknown>> {
   return output.results as Array<Record<string, unknown>>;
@@ -613,25 +592,23 @@ test("runScrape Serper help gives a quoted, runnable rerun command with the tota
 });
 
 test("runScrape --ladder accepts --include-markup and returns the same record", async () => {
-  await withLadderStub("ok", async () => {
-    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
-    const plain = await runScrape(["https://example.com/article", "--ladder"], fetchImpl, process.env, {});
-    const flagged = await runScrape(["https://example.com/article", "--ladder", "--include-markup"], fetchImpl, process.env, {});
+  const env = ladderStubEnv("ok");
+  const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+  const plain = await runScrape(["https://example.com/article", "--ladder"], fetchImpl, env, {});
+  const flagged = await runScrape(["https://example.com/article", "--ladder", "--include-markup"], fetchImpl, env, {});
 
-    assert.equal(plain.verdict, "ok");
-    assert.deepEqual(flagged, plain);
-  });
+  assert.equal(plain.verdict, "ok");
+  assert.deepEqual(flagged, plain);
 });
 
 test("runScrape --ladder truncates through the shared path with a quoted, runnable rerun command", async () => {
-  await withLadderStub("ok", async () => {
-    const url = `https://example.com/${"a".repeat(2000)}`;
-    const output = await runScrape([url, "--ladder"], (async () => new Response("{}")) as typeof fetch, process.env, {});
+  const env = ladderStubEnv("ok");
+  const url = `https://example.com/${"a".repeat(2000)}`;
+  const output = await runScrape([url, "--ladder"], (async () => new Response("{}")) as typeof fetch, env, {});
 
-    assert.equal((output.text as string).length, 1200);
-    assert.equal(output.truncatedFrom, `body for ${url}`.length);
-    assert.match(output.help as string, new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --full\``));
-  });
+  assert.equal((output.text as string).length, 1200);
+  assert.equal(output.truncatedFrom, `body for ${url}`.length);
+  assert.match(output.help as string, new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --full\``));
 });
 
 // One behavioural assertion per provider that the shared path is the one in force:
@@ -655,24 +632,23 @@ test("runScrape Serper omits a title that is a whole HTML document unless the fl
 });
 
 test("runScrape --ladder omits a title that is a whole HTML document unless the flag or env keeps it", async () => {
-  await withLadderStub("html-title", async () => {
-    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+  const env = ladderStubEnv("html-title");
+  const fetchImpl = (async () => new Response("{}")) as typeof fetch;
 
-    const stripped = await runScrape(["https://example.com/a", "--ladder"], fetchImpl, hermeticEnv(), {});
-    assert.equal(Object.hasOwn(stripped, "title"), false);
-    assert.deepEqual(stripped.markupOmitted, ["title"]);
-    assert.equal(stripped.text, "plain body");
+  const stripped = await runScrape(["https://example.com/a", "--ladder"], fetchImpl, env, {});
+  assert.equal(Object.hasOwn(stripped, "title"), false);
+  assert.deepEqual(stripped.markupOmitted, ["title"]);
+  assert.equal(stripped.text, "plain body");
 
-    const viaFlag = await runScrape(["https://example.com/a", "--ladder", "--include-markup"], fetchImpl, hermeticEnv(), {});
-    assert.equal(viaFlag.title, HTML_DOCUMENT);
-    const viaEnv = await runScrape(
-      ["https://example.com/a", "--ladder"],
-      fetchImpl,
-      { ...hermeticEnv(), SERP_AXI_INCLUDE_MARKUP: "1" },
-      {},
-    );
-    assert.equal(viaEnv.title, HTML_DOCUMENT);
-  });
+  const viaFlag = await runScrape(["https://example.com/a", "--ladder", "--include-markup"], fetchImpl, env, {});
+  assert.equal(viaFlag.title, HTML_DOCUMENT);
+  const viaEnv = await runScrape(
+    ["https://example.com/a", "--ladder"],
+    fetchImpl,
+    { ...env, [INCLUDE_MARKUP_ENV]: "1" },
+    {},
+  );
+  assert.equal(viaEnv.title, HTML_DOCUMENT);
 });
 
 test("runScrape Bright Data rerun hint repeats the flags that shaped the record", async () => {
@@ -693,22 +669,21 @@ test("runScrape Bright Data rerun hint repeats the flags that shaped the record"
 });
 
 test("runScrape --ladder rerun hint repeats the axis flags that were passed", async () => {
-  await withLadderStub("ok", async () => {
-    const url = `https://example.com/${"a".repeat(2000)}`;
-    const fetchImpl = (async () => new Response("{}")) as typeof fetch;
+  const env = ladderStubEnv("ok");
+  const url = `https://example.com/${"a".repeat(2000)}`;
+  const fetchImpl = (async () => new Response("{}")) as typeof fetch;
 
-    const output = await runScrape(
-      [url, "--ladder", "--rung-ceiling", "2", "--tab-state", "same", "--include-markup"],
-      fetchImpl,
-      hermeticEnv(),
-      {},
-    );
+  const output = await runScrape(
+    [url, "--ladder", "--rung-ceiling", "2", "--tab-state", "same", "--include-markup"],
+    fetchImpl,
+    env,
+    {},
+  );
 
-    assert.match(
-      output.help as string,
-      new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --tab-state 'same' --rung-ceiling '2' --include-markup --full\``),
-    );
-  });
+  assert.match(
+    output.help as string,
+    new RegExp(`^Run \`serp-axi scrape '${url}' --ladder --tab-state 'same' --rung-ceiling '2' --include-markup --full\``),
+  );
 });
 
 test("runScrape Bright Data leaves a long url whole and unmarked", async () => {
@@ -802,32 +777,29 @@ test("runScrape consults config includeMarkup for Bright Data and for no other p
   const serper = await runScrape(["https://example.com/a"], serperFetch, { SERPER_API_KEY: "k" }, invalid);
   assert.equal(serper.text, "plain page text");
 
-  await withLadderStub("ok", async () => {
-    const ladder = await runScrape(
-      ["https://example.com/a", "--ladder"],
-      (async () => new Response("{}")) as typeof fetch,
-      hermeticEnv(),
-      invalid,
-    );
-    assert.equal(ladder.verdict, "ok");
-  });
+  const env = ladderStubEnv("ok");
+  const ladder = await runScrape(
+    ["https://example.com/a", "--ladder"],
+    (async () => new Response("{}")) as typeof fetch,
+    env,
+    invalid);
+  assert.equal(ladder.verdict, "ok");
 
   await assert.rejects(() => scrapeFixture([], {}, invalid), /includeMarkup must be a JSON boolean/);
 });
 
 test("runScrape --ladder reads the config file once, from the injected env", async () => {
   await withBrokenConfig(async (xdg) => {
-    await withLadderStub("ok", async () => {
-      await assert.rejects(
-        () =>
-          runScrape(
-            ["https://example.com/a", "--ladder"],
-            (async () => new Response("{}")) as typeof fetch,
-            { ...hermeticEnv(), XDG_CONFIG_HOME: xdg },
-          ),
-        /config file .* is not valid JSON/,
-      );
-    });
+    const env = ladderStubEnv("ok");
+    await assert.rejects(
+      () =>
+        runScrape(
+          ["https://example.com/a", "--ladder"],
+          (async () => new Response("{}")) as typeof fetch,
+          { ...env, XDG_CONFIG_HOME: xdg },
+        ),
+      /config file .* is not valid JSON/,
+    );
   });
 });
 
@@ -921,23 +893,22 @@ test("runScrape applies the caps on the Bright Data path, to what it asks Bright
 });
 
 test("runScrape --ladder applies the caps", async () => {
-  await withLadderStub("ok", async () => {
-    const run = async (args: string[], env: NodeJS.ProcessEnv = {}, config: Record<string, unknown> = {}) => {
-      const output = await runScrape(
-        [LONG_URL, "--ladder", ...args],
-        (async () => new Response("{}")) as typeof fetch,
-        { ...hermeticEnv(), ...env },
-        config,
-      );
-      return (output.text as string).length;
-    };
+  const env = ladderStubEnv("ok");
+  const run = async (args: string[], overrides: NodeJS.ProcessEnv = {}, config: Record<string, unknown> = {}) => {
+    const output = await runScrape(
+      [LONG_URL, "--ladder", ...args],
+      (async () => new Response("{}")) as typeof fetch,
+      { ...env, ...overrides },
+      config,
+    );
+    return (output.text as string).length;
+  };
 
-    assert.equal(await run([]), 1200);
-    assert.equal(await run(["--max-chars", "50"]), 50);
-    assert.equal(await run([], { [MAX_CHARS_ENV]: "60" }), 60);
-    assert.equal(await run([], {}, { maxChars: 70 }), 70);
-    assert.equal(await run(["--full", "--full-max-chars", "80"]), 80);
-  });
+  assert.equal(await run([]), 1200);
+  assert.equal(await run(["--max-chars", "50"]), 50);
+  assert.equal(await run([], { [MAX_CHARS_ENV]: "60" }), 60);
+  assert.equal(await run([], {}, { maxChars: 70 }), 70);
+  assert.equal(await run(["--full", "--full-max-chars", "80"]), 80);
 });
 
 test("runScrape's hint names the --full cap in force and never offers --max-chars back", async () => {

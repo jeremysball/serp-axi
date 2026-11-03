@@ -5,8 +5,11 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// The mode comes from --mode and nowhere else. It once also read LADDER_STUB_MODE
+// and let it win, so a shell that exported the variable could override the mode a
+// test had asked for.
 const modeIndex = process.argv.indexOf("--mode");
-const mode = process.env.LADDER_STUB_MODE ?? (modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined) ?? "ok";
+const mode = (modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined) ?? "ok";
 
 // A kill switch that fires once per parent, so a test can watch the client die
 // once and then answer a later request on the respawned child. Keyed by the

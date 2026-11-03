@@ -43,8 +43,21 @@ jobs:
       - name: Run typecheck
         run: npm run typecheck
 
+      - name: Run guards
+        # ast-grep rules for beliefs a passing suite cannot see, such as "no
+        # response body is read without a byte bound". A rule that cannot fire is
+        # decoration, so src/guards.test.ts proves each one fires; this leg runs
+        # them over the real tree. The binary comes from the .mise.toml pin.
+        run: npm run guard
+
       - name: Run unit tests
         run: npm test
+
+      - name: Run unit tests with the shell's settings poisoned
+        # A clean runner has none of the variables serp-axi reads, so the leg above
+        # cannot tell a test that sets its own env from one that reads the
+        # shell's. This one sets every such variable to a bad value first.
+        run: npm run test:hostile-env
 
       - name: Install Bubblewrap for the mutation sandbox
         # GitHub's ubuntu-latest image does not ship bwrap, and Ubuntu 24.04+

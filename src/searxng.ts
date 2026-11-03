@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_RESPONSE_BYTES, readBodyText } from "./body.ts";
 import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
 import {
   parseIntegerSetting,
@@ -325,6 +326,7 @@ export async function searchSearxng(
   options: SearxngOptions,
   params: SearchParams,
   fetchImpl: typeof fetch = fetch,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<SearxngSearchResponse> {
   const language = `${params.hl}-${params.gl.toUpperCase()}`;
   const url = searchUrl(options.url, params, options.engines, language);
@@ -361,8 +363,10 @@ export async function searchSearxng(
   const contentType = response.headers.get("content-type") ?? "";
   let text: string;
   try {
-    text = await response.text();
+    text = await readBodyText(response, { maxBytes: maxResponseBytes, source: "SearXNG" });
   } catch (cause) {
+    // The cap error already says what happened and how to raise the cap.
+    if (cause instanceof SerpAxiError) throw cause;
     const err = cause as Error;
     if (err.name === "TimeoutError" || err.name === "AbortError") {
       throw new SerpAxiError(`SearXNG request timed out after ${options.timeoutMs} ms`, "runtime", "raise --search-timeout-ms, or retry");

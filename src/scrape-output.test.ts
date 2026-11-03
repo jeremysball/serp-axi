@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { SerpAxiError } from "./errors.ts";
+import { brightDataScrapeRecord } from "./fixtures.ts";
 import {
   DEFAULT_FULL_MAX_CHARS,
   DEFAULT_MAX_CHARS,
@@ -260,10 +260,7 @@ test("limitFor is the one place the character limit is chosen", () => {
 });
 
 test("shapeScrapeRecord strips the real Bright Data fixture records", () => {
-  const lines = readFileSync(new URL("./fixtures/brightdata-scrape.ndjson", import.meta.url), "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0);
-  const record = JSON.parse(lines[0]) as Record<string, unknown>;
+  const record = brightDataScrapeRecord();
 
   const out = shape(record);
 

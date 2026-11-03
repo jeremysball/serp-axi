@@ -22,7 +22,9 @@
   },
   "files": [
     "dist",
-    "!dist/**/*.test.js"
+    "!dist/**/*.test.js",
+    "!dist/fixtures.js",
+    "!dist/live.js"
   ],
   "engines": {
     "node": ">=26"
@@ -30,10 +32,12 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "guard": "ast-grep scan --error=unused-suppression src",
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:hostile-env": "node scripts/hostile-env.mjs",
     "test:python": "cd ladder-cli && uv run --frozen --inexact --extra test pytest -q",
     "test:mutations": "uv sync --project ladder-cli --frozen --inexact --extra test && python3 scripts/mutations.py",
-    "check": "npm run typecheck && npm test && npm run test:python && npm run test:mutations",
+    "check": "npm run typecheck && npm run guard && npm test && npm run test:hostile-env && npm run test:python && npm run test:mutations",
     "prepare": "git config core.hooksPath .githooks || true",
     "prepublishOnly": "npm run check && npm run build"
   },

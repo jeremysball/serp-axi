@@ -1,26 +1,33 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
-import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { runSearch } from "./commands/search.ts";
 import { runCli } from "./cli.ts";
 import { createAppOptions } from "./app.ts";
 import { SerpAxiError } from "./errors.ts";
+import { kagiSearchHtml } from "./fixtures.ts";
 import { resolveSearxngOptions, type SearxngOptionSources } from "./searxng.ts";
 import { decode } from "@toon-format/toon";
 
-const KAGI_FIXTURE = readFileSync(
-  fileURLToPath(new URL("./fixtures/kagi-html-search.html", import.meta.url)),
-  "utf8",
-);
+const KAGI_FIXTURE = kagiSearchHtml();
 
-const SEARXNG_ENVS = ["SERP_AXI_SEARXNG_URL", "SERP_AXI_SEARXNG_ENGINES", "SERP_AXI_SEARCH_TIMEOUT_MS"] as const;
-const PAID_ENVS = ["SERPER_API_KEY", "BRIGHTDATA_API_KEY", "KAGI_SESSION_TOKEN"] as const;
+// Every variable the CLI reads from the shell starts with one of these. `isolated`
+// clears whatever the shell has under them rather than a list of names, because a
+// list went stale the day SERP_AXI_MAX_RESPONSE_BYTES was added: a shell that
+// exported it failed 24 of these 48 tests. `npm run test:hostile-env` runs the
+// suite with every such variable set, so a stale prefix list fails there.
+const SHELL_SETTING_PREFIXES = ["SERP_AXI_", "SERPER_", "BRIGHTDATA_", "KAGI_"];
+
+function shellSettings(): Array<[string, string | undefined]> {
+  return Object.keys(process.env)
+    .filter((name) => SHELL_SETTING_PREFIXES.some((prefix) => name.startsWith(prefix)))
+    .map((name) => [name, undefined]);
+}
 
 async function withEnvs<T>(entries: Array<[string, string | undefined]>, fn: () => Promise<T>): Promise<T> {
   const originals = entries.map(([n]) => [n, process.env[n]] as const);
@@ -45,8 +52,7 @@ async function isolated(t: TestContext, fn: (home: string, configDir: string) =>
   t.after(() => rmSync(home, { recursive: true, force: true }));
   await withEnvs(
     [
-      ...SEARXNG_ENVS.map((n) => [n, undefined] as [string, string | undefined]),
-      ...PAID_ENVS.map((n) => [n, undefined] as [string, string | undefined]),
+      ...shellSettings(),
       ["XDG_CONFIG_HOME", home],
     ],
     () => fn(home, configDir),

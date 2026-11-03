@@ -253,6 +253,10 @@ field that stays. A regex tag-stripper would delete the `<div>` a page is
 legitimately talking about, and ladder rung 1 decodes entities after it removes
 tags, so a tag in its text is content. Dropping
 `html2text` to save space would also be a guess about which field a caller reads.
+The two are not copies. A live scrape of `https://example.com` on 2026-11-03
+returned the same sentence in both, with `html2text` hard-wrapped at a line width
+(a `\n` mid-sentence), and the recorded fixture in `src/fixtures/` differs in
+markup style as well (`# Example Domain` against `EXAMPLE DOMAIN`).
 
 **When this becomes a real bug:** if a field whose name ends in `html`, or whose
 value is a whole HTML document, appears in the output without
@@ -460,3 +464,186 @@ code units, so it can exceed the number of characters a reader counts.
 
 **When this becomes a real bug:** if a cut field ends in half of a surrogate pair,
 or if backing up removes more than one unit.
+
+## Every response read goes through body.ts
+
+**What you see:** `npm run guard` (and CI, and the pre-commit hook) fails on a
+bare `response.text()`, `.json()`, `.arrayBuffer()`, `.blob()`, `.formData()` or
+`.bytes()` anywhere in `src/`, on any `.body` property access, and on an import
+of `node:http`, `node:https`, `node:http2` or `undici`. `src/body.ts` and the
+`*.test.ts` files are exempt. One line in production code carries a bypass:
+`JSON.parse(envelope.body)` in `src/brightdata.ts`, where `body` is a string
+field of Bright Data's parsed reply and not a stream.
+
+**Why:** the belief is that no network response is read into memory without a
+byte bound. A scan of the tree before the fix (commit `4606e31`) found nine
+unbounded reads across Serper, Kagi, SearXNG and Bright Data, so the fix was a
+bounded reader (`readBodyText`) and a rule that makes the next unbounded read
+fail the build. Three rules cover three
+routes: the method names, the `.body` stream (a `for await` loop, `getReader()`,
+a stream handed to another function), and a second HTTP client that would never
+call `fetch` at all. A rule that reports a warning would be read once and then
+ignored, so all three are errors, and `--error=unused-suppression` makes a stale
+bypass an error as well.
+
+The rules match names, not types. ast-grep cannot tell a `Response` from another
+object with a `.text()` method or a `body` field, so a false positive takes a
+bypass with the reason written next to it (`// ast-grep-ignore: <rule-id>
+(<reason>)`, on the line above or at the end of the line). The reason sits in
+parentheses because the pre-commit dash gate rejects a double hyphen, the
+separator ast-grep's own examples use; ast-grep 0.44.1 reads the rule id and
+ignores the rest. They also miss shapes that never name the method at the call: `response["text"]()`,
+`const { text } = response`, and `const read = response.text; read.call(response)`
+all pass. That is a deliberate limit. The risk being guarded is a developer or an
+agent copying `response.text()` into a new provider, and a rule written to stop a
+deliberate evasion would flag ordinary code to do it.
+
+The guard covers HTTP responses only. `src/ladder.ts` appends each chunk of the
+ladder child's stdout to `this.buffer` until a newline arrives; that is a read
+from a local process serp-axi starts, it has no byte bound, and nothing here
+checks it.
+
+`src/guards.test.ts` runs each rule against code it must catch, code it must
+leave alone, and the bypass forms, and it fails if a rule file has no case that
+makes it fire.
+
+**When this becomes a real bug:** if `unbounded-response-read` or
+`response-body-stream-access` flags code that is not a response and the bypass
+count in `src/` grows past a handful, since the rule would then be teaching people
+to type the bypass. Or if a provider reads a body without a hit from any rule, or
+`npm run guard` can pass on a tree that has a bare `response.text()`.
+
+## A response over the byte cap is an error, never a partial result
+
+**What you see:** a response larger than `--max-response-bytes` (default 64 MiB)
+stops the run with `<provider> response is larger than the <n> bytes serp-axi
+will read`, naming the flag, the env var and the config key. No results are
+printed, even when the first megabyte of the body held a whole valid answer.
+
+**Why:** a JSON document cut off at a byte boundary does not parse, and a cut-off
+page of text looks complete and is wrong. The character caps (`--max-chars`)
+shorten text on purpose and mark each cut with a `<field>TruncatedFrom` count;
+the byte cap protects memory and has no such marker, so it refuses instead. A
+`content-length` over the cap is refused before a byte is read, and without one
+the read stops the moment the running count passes the cap.
+
+**When this becomes a real bug:** if an over-cap body ever produces output from
+part of it, or if the error does not say how to raise the cap.
+
+## The byte cap counts decoded bytes, and an error body is cut at 64 KiB, not refused
+
+**What you see:** a gzip reply of 1 MiB that expands to 100 MiB is refused at the
+default cap, though only 1 MiB crossed the network (`src/body.socket.test.ts`
+serves exactly that over a real socket). Separately, an error response longer
+than 64 KiB is not an error of its own: only its first 64 KiB is read. Kagi and
+Bright Data put the start of that text in the failure message, shortened again
+by `boundedDetail`. Serper parses the error body as JSON to find a `message`, and
+a body cut at 64 KiB no longer parses, so a Serper error with an unmapped status
+that long reports `no details`. If an error body cannot be read at all, the message says `(the
+response body could not be read: <reason>)` where the server's text would have
+gone, and Serper's JSON parse of that sentence fails the same way.
+
+**Why:** `fetch` undoes gzip and brotli before the stream hands over any bytes,
+so the count sees the expanded size, which is what costs memory and what a
+compression bomb attacks. An error body only explains a status code the run has
+already failed on, so cutting it loses little and refusing it would replace a
+useful failure with a less useful one. A 64 KiB Serper error page is not a
+realistic case, so its parse is left as it was. The marker keeps a failed read from
+looking like a server that said nothing. SearXNG reads no error body at all; its
+errors come from the status code.
+
+**When this becomes a real bug:** if the count uses compressed bytes, if an error
+body read can throw past the status-code failure it was explaining, or if the
+failed-read marker is empty.
+
+## The `maxResponseBytes` config key is read for scrape and searxng search only
+
+**What you see:** `"maxResponseBytes": 1000` in the config file caps every
+`scrape` run and every `search --provider searxng` run, but a `search --provider
+serper`, `kagi` or `brightdata` run ignores it, and a malformed value
+(`"maxResponseBytes": "big"`) fails the paths that read it and passes the rest.
+`--max-response-bytes` and `SERP_AXI_MAX_RESPONSE_BYTES` apply to all of them.
+
+**Why:** searxng is the one search path that opens the config file, for its URL,
+engines and timeout. The other search providers are configured by flag and env
+var alone, and making them open the file for one key would put a corrupt
+`config.json` in the way of a Serper search that never needed it (see "`runSearch`
+with no config argument reads the real config file" above). It is the same shape
+as the `includeMarkup` key.
+
+**When this becomes a real bug:** if a search provider starts opening the config
+file for another reason, since the key should then apply to it too, or if a path
+that does read the key lets a bad value through.
+
+## `--max-response-bytes` is refused with `--ladder`, but its env var and config key are ignored there
+
+**What you see:** `serp-axi scrape <url> --ladder --max-response-bytes 5` fails
+with a usage error before any work starts, while `SERP_AXI_MAX_RESPONSE_BYTES=5
+serp-axi scrape <url> --ladder` runs normally, and so does a `--ladder` run with
+a malformed `SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` in the config file.
+
+**Why:** the ladder CLI makes its own requests, so serp-axi has no response of
+its own to bound. A flag typed on the command line was typed for this run, and
+accepting it silently would pretend a limit exists. An env var or a config key is
+a standing setting that also serves the runs that need it, and refusing it would
+break every ladder scrape for someone who set it for Serper. The check runs after
+the ladder branch has returned, so a bad standing value is never read on this
+path.
+
+**When this becomes a real bug:** if the ladder path starts bounding its own
+reads with this cap, since the flag should then be accepted, or if a bad
+`SERP_AXI_MAX_RESPONSE_BYTES` fails a run that never uses a provider response.
+
+## Test-only modules are left out of the package by name
+
+**What you see:** `src/live.ts` and `src/fixtures.ts` are compiled into `dist/`,
+and `package.json` `files` lists `!dist/live.js` and `!dist/fixtures.js` so the
+published tarball has neither. A new test helper that is not added to that list
+ships.
+
+**Why:** `files` takes `dist` minus `*.test.js`, and a helper that tests import is
+not named `*.test.ts`. `live.js` was shipping before this was noticed. A test in
+`src/guards.test.ts` finds every non-test module that only test files import and
+fails unless `files` excludes it, so the list cannot fall behind unnoticed.
+
+**When this becomes a real bug:** if `npm pack --dry-run --json` lists a file
+that only tests use, or if the packaging test passes with a helper missing from
+`files`.
+
+## A Bright Data hint can say "Rerun this scrape with --full" and print no command
+
+**What you see:** most truncation hints read ``Run `serp-axi scrape '<url>'
+--provider brightdata --full` to see up to 50000 characters``. For some records
+the hint reads `Rerun this scrape with --full to see up to 50000 characters`
+and shows no command.
+
+**Why:** the command names the record's `url`, then the url this scrape asked for
+(`input.url`, which Bright Data echoes back). A record that carries neither has no
+honest url to print. The hint used to print `'<url>'` there, a command the reader
+could not paste and run, so it now names the flag and leaves the command out
+(`recordUrl` in `src/commands/scrape.ts`).
+
+**When this becomes a real bug:** if a record that does carry `url` or `input.url`
+gets the command-less wording, or if a `<url>` placeholder reaches any hint again.
+
+## The Node suite runs twice, the second time with poisoned settings
+
+**What you see:** `npm run check` and CI run the same tests twice, once as
+`npm test` and once as `npm run test:hostile-env`. The second run has
+`SERPER_API_KEY`, `SERP_AXI_MAX_RESPONSE_BYTES` and every other variable the source
+reads set to `/nonexistent/serp-axi-hostile-env`, and 10 live tests are skipped in
+both.
+
+**Why:** the first run cannot see a test that reads the developer's shell. A clean
+runner has none of those variables, so a test that forgot to hand `runScrape` or
+`runSearch` its own env passes there and fails on a machine that exports a key.
+That happened twice before the second run existed: `searxng.test.ts` failed 24 of
+48 tests under an exported `SERP_AXI_MAX_RESPONSE_BYTES`, and two `scrape.test.ts`
+tests read the shell and the real config file. The variable names are scanned from
+`src/` by `scripts/hostile-env.mjs`, so a new setting is poisoned without an edit.
+The run takes about five seconds.
+
+**When this becomes a real bug:** if the second run passes while a test still reads
+the shell (a variable under a prefix the script does not scan: add the prefix to
+`PREFIXES` there, and to `SHELL_SETTING_PREFIXES` in `src/searxng.test.ts`), or if
+the script reports a clean run after finding no names to poison (it exits 2 instead).

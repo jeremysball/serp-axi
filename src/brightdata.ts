@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_RESPONSE_BYTES, readBodyText, readErrorBody } from "./body.ts";
 import { SerpAxiError, boundedDetail } from "./errors.ts";
 import type { OrganicResult, SearchParams, SearchResponse } from "./serper.ts";
 
@@ -50,6 +51,7 @@ export async function searchBrightData(
   params: SearchParams,
   fetchImpl: typeof fetch = fetch,
   zone: string = BRIGHT_DATA_DEFAULT_ZONE,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<SearchResponse> {
   let response: Response;
   try {
@@ -77,7 +79,7 @@ export async function searchBrightData(
   if (!response.ok) {
     // Bright Data's own auth/validation errors are plain text, not JSON
     // (verified live: 401 "Invalid token", 400 'zone "..." not found').
-    const text = boundedDetail(await response.text().catch(() => ""));
+    const text = boundedDetail(await readErrorBody(response));
     if (response.status === 401) {
       throw new SerpAxiError(
         "Bright Data rejected the API key (401)",
@@ -112,9 +114,11 @@ export async function searchBrightData(
     );
   }
 
+  // Read outside the try below: a body over the cap is its own error, not "non-JSON".
+  const envelopeText = await readBodyText(response, { maxBytes: maxResponseBytes, source: "Bright Data" });
   let envelope: BrightDataEnvelope;
   try {
-    envelope = (await response.json()) as BrightDataEnvelope;
+    envelope = JSON.parse(envelopeText) as BrightDataEnvelope;
   } catch {
     throw new SerpAxiError(
       "Bright Data returned a non-JSON response (200)",
@@ -147,6 +151,9 @@ export async function searchBrightData(
 
   let parsedBody: BrightDataParsedBody;
   try {
+    // `envelope` is the parsed JSON reply and `body` is its string field (the SERP result as JSON text), not a
+    // Response stream. The read is already bounded: the envelope came from readBodyText.
+    // ast-grep-ignore: response-body-stream-access (a JSON string field called body, not a Response)
     parsedBody = JSON.parse(envelope.body) as BrightDataParsedBody;
   } catch {
     throw new SerpAxiError(
@@ -175,6 +182,7 @@ export async function scrapeBrightData(
   datasetId: string,
   urls: string[],
   fetchImpl: typeof fetch = fetch,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<BrightDataRecord[]> {
   const endpoint =
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${encodeURIComponent(datasetId)}` +
@@ -201,7 +209,7 @@ export async function scrapeBrightData(
   }
 
   if (!response.ok) {
-    const rawDetail = await response.text().catch(() => "");
+    const rawDetail = await readErrorBody(response);
     const detail = boundedDetail(parseBrightDataErrorDetail(rawDetail));
     if (response.status === 401 || response.status === 403) {
       throw new SerpAxiError(
@@ -230,7 +238,7 @@ export async function scrapeBrightData(
     );
   }
 
-  const text = await response.text();
+  const text = await readBodyText(response, { maxBytes: maxResponseBytes, source: "Bright Data" });
   const records: BrightDataRecord[] = [];
   for (const line of text.split("\n")) {
     if (line.trim().length === 0) continue;

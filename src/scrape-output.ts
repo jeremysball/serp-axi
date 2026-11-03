@@ -51,8 +51,12 @@ export interface ShapeOptions {
    * flags. It carries every flag that changes what the record holds
    * (`--include-markup` for a provider it matters to), so a hint reruns the same
    * thing rather than a neighbour of it.
+   *
+   * Left undefined when the record does not say which url it came from. The hints
+   * then name the flag to add and print no command, because a command with a
+   * placeholder in it is not one the reader can run.
    */
-  rerun: string;
+  rerun?: string;
   /**
    * The cap flags this run was given, as text to append to `rerun` (`" --max-chars
    * 500"`, `" --full --full-max-chars 7000"`, or `""`). The `--include-markup`
@@ -169,14 +173,19 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
     if (options.full) {
       hints.push(`content is capped at ${limit} characters even with --full`);
     } else if (options.limits.fullMaxChars > limit) {
-      hints.push(`Run \`${options.rerun} --full\` to see up to ${options.limits.fullMaxChars} characters${total}`);
+      const command = options.rerun === undefined ? "Rerun this scrape with --full" : `Run \`${options.rerun} --full\``;
+      hints.push(`${command} to see up to ${options.limits.fullMaxChars} characters${total}`);
     } else {
       hints.push(`content is capped at ${limit} characters${total}`);
     }
   }
   if (omitted.length > 0) {
     out.markupOmitted = omitted;
-    hints.push(`Run \`${options.rerun}${options.capFlags} --include-markup\` to keep the omitted markup`);
+    const command =
+      options.rerun === undefined
+        ? `Rerun this scrape with --include-markup${options.capFlags}`
+        : `Run \`${options.rerun}${options.capFlags} --include-markup\``;
+    hints.push(`${command} to keep the omitted markup`);
   }
   if (hints.length > 0) {
     out.help = hints.join(" ");

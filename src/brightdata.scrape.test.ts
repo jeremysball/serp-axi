@@ -1,15 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import { scrapeBrightData } from "./brightdata.ts";
 import { SerpAxiError } from "./errors.ts";
+import { brightDataScrapeNdjson } from "./fixtures.ts";
 
-const FIXTURE = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "fixtures", "brightdata-scrape.ndjson"),
-  "utf8",
-);
+const FIXTURE = brightDataScrapeNdjson();
 
 function fakeFetch(status: number, body: string): typeof fetch {
   return (async () => new Response(body, { status })) as typeof fetch;

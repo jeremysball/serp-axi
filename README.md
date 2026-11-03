@@ -64,7 +64,7 @@ engine breakdown, and 401/5xx/network/timeout errors surface a plain
 runtime error.
 
 ```
-serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>] [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>]
+serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>] [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>] [--max-response-bytes <n>]
 ```
 
 | Flag | Default | Notes |
@@ -78,6 +78,7 @@ serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields 
 | `--searxng-url <url>` | `http://127.0.0.1:8888` | SearXNG base URL; `--provider searxng` only |
 | `--engines <a,b>` | server's engines | SearXNG engine selection; `--provider searxng` only |
 | `--search-timeout-ms <ms>` | `30000` | SearXNG request timeout; `--provider searxng` only |
+| `--max-response-bytes <n>` | `67108864` | Most bytes one provider response may carry; a longer body is an error ([details](#response-size-limit)) |
 
 ### `scrape`
 
@@ -86,8 +87,8 @@ Serper is the default and accepts one URL. Bright Data accepts multiple URLs
 in one batched request and requires `BRIGHTDATA_API_KEY`.
 
 ```
-serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
-serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>]
+serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--max-response-bytes <n>]
+serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>] [--max-response-bytes <n>]
 serp-axi scrape <url> --ladder [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
 ```
 
@@ -176,6 +177,35 @@ configurable, Serper never read it, `--ladder` read it for its axes, and Bright
 Data read it only when neither `--include-markup` nor
 `SERP_AXI_INCLUDE_MARKUP` had already settled the markup choice.
 
+#### Response size limit
+
+The character caps above cut text after it has been parsed. Something has to
+bound the read before that, because a Bright Data record arrives with its raw
+`page_html` next to the text, and the HTML is dropped only after the whole reply
+is in memory. So every provider response, search and scrape alike, is read
+through one byte cap.
+
+| Cap | Flag | Env var | Config key | Default |
+| --- | --- | --- | --- | --- |
+| Response size | `--max-response-bytes <n>` | `SERP_AXI_MAX_RESPONSE_BYTES` | `maxResponseBytes` | 67108864 (64 MiB) |
+
+A response over the cap stops the run with a runtime error that names the cap and
+the three places to raise it. serp-axi never works from part of a body: a
+cut-off JSON document does not parse, and a cut-off page would look complete. The
+count is of decoded bytes, after gzip or brotli is undone, so a small compressed
+reply that expands past the cap is refused too. A `content-length` over the cap
+is refused before any byte is read.
+
+The value goes flag, then env var, then the config file, then the default, and
+must be a whole number of bytes from 1 up. An empty env var counts as unset; an
+empty flag value is an error. The config key is read for `scrape` and for
+`search --provider searxng`, the two paths that open the config file; the other
+search providers take the flag, the env var or the default. `--max-response-bytes`
+is refused with `--ladder`, which makes its own requests. When Serper, Kagi or
+Bright Data fails a request, the first 64 KiB of the error response is kept to
+explain it, and a longer one is cut, not refused. SearXNG errors are reported
+from the status code alone and read no error body.
+
 ### `update`
 
 Prints the command to pull the latest published version. It doesn't hit the
@@ -207,6 +237,7 @@ is completable with flags alone.
 | `SERP_AXI_INCLUDE_MARKUP` | optional `1`/`0` (or `true`/`false`); keeps raw-HTML fields in `scrape` output (`--include-markup` wins) |
 | `SERP_AXI_MAX_CHARS` | optional whole number; the character cap for page text on a normal `scrape` run, default 1200 (`--max-chars` wins; a `--full` run never reads it) |
 | `SERP_AXI_FULL_MAX_CHARS` | optional whole number; the cap for `scrape --full`, default 50000 (`--full-max-chars` wins) |
+| `SERP_AXI_MAX_RESPONSE_BYTES` | optional whole number; the most bytes one provider response may carry, default 67108864 (`--max-response-bytes` wins; an empty value is unset) |
 
 ## In progress: scraping escalation ladder
 
@@ -358,9 +389,18 @@ Worth knowing about it:
 
 ## Tests
 
-Run `npm run check` for typechecking, the Node/Python suites, and the named
-mutation gate. Prepublish checks run the same gate. To run only the mutation
-gate, use `npm run test:mutations`.
+Run `npm run check` for typechecking, the ast-grep guards, the Node suite, the
+Node suite again with the shell's settings poisoned, the Python suite, and the
+named mutation gate. Prepublish checks run the same gate. To run only the
+mutation gate, use `npm run test:mutations`.
+
+`npm run guard` runs the ast-grep rules in `.ast-grep/rules/`, which hold beliefs
+a passing suite cannot see, such as "no response body is read without a byte
+bound". It needs the `ast-grep` binary that `mise install` pins. `npm run
+test:hostile-env` runs the Node suite with every `SERP_AXI_*`, `SERPER_*`,
+`BRIGHTDATA_*` and `KAGI_*` variable the source mentions set to a bad value, so a
+test that reads your shell instead of setting its own env fails there. A clean
+CI runner has none of those variables set and cannot tell the two apart.
 
 The Python mutation-safety tests and the mutation gate require Linux, Bubblewrap
 (`bwrap` on `PATH`), and working unprivileged user namespaces. CI probes those
