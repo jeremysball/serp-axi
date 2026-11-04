@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_RESPONSE_BYTES, readBodyText, readErrorBody } from "./body.ts";
 import { SerpAxiError, boundedDetail } from "./errors.ts";
 import type { OrganicResult, SearchParams, SearchResponse } from "./serper.ts";
 
@@ -113,6 +114,7 @@ export async function searchKagi(
   token: string,
   params: SearchParams,
   fetchImpl: typeof fetch = fetch,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<SearchResponse> {
   const url = new URL(SEARCH_URL);
   url.searchParams.set("q", params.q);
@@ -148,7 +150,7 @@ export async function searchKagi(
     if (response.status >= 500) {
       throw new SerpAxiError(`Kagi had an upstream failure (${response.status})`, "runtime", "retry later");
     }
-    const text = boundedDetail(await response.text().catch(() => ""));
+    const text = boundedDetail(await readErrorBody(response));
     throw new SerpAxiError(
       `Kagi returned an unexpected status ${response.status}: ${text || "no details"}`,
       "runtime",
@@ -156,7 +158,7 @@ export async function searchKagi(
     );
   }
 
-  const html = await response.text();
+  const html = await readBodyText(response, { maxBytes: maxResponseBytes, source: "Kagi" });
   const organic = parseKagiHtml(html);
 
   // An expired token still returns 200, with a sign-in page instead of results.

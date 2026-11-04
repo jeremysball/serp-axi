@@ -4,6 +4,9 @@ node = "26.5.1"
 # same path .mise.toml already gives CI for Node.
 python = "3.14"
 uv = "0.12.23"
+# `npm run guard` runs the rules in .ast-grep/rules/. mise resolves this name to
+# aqua:ast-grep/ast-grep. The binary is `ast-grep`, not `sg`: shadow-utils owns `sg`.
+ast-grep = "0.44.1"
 
 [tasks.build]
 run = "npm run build"
@@ -11,8 +14,14 @@ run = "npm run build"
 [tasks.typecheck]
 run = "npm run typecheck"
 
+[tasks.guard]
+run = "npm run guard"
+
 [tasks.test]
 run = "npm test"
+
+[tasks.test-hostile-env]
+run = "npm run test:hostile-env"
 
 [tasks.check]
 run = "npm run check"

@@ -66,20 +66,26 @@ class RungResult:
 class RungContext:
     """The per-request state a rung needs beyond the URL.
 
-    The jar pair for the rung being invoked, and nothing else. The paths live
-    here rather than on a module global because a rung's fetch is per request
-    and the resident child answers many requests over its life: a global would
-    leak one caller's jar into the next caller's fetch.
+    The jar pair for the rung being invoked, plus the byte cap the parent
+    applies to one response. Both live here rather than on a module global
+    because a rung's fetch is per request and the resident child answers many
+    requests over its life: a global would leak one caller's state into the
+    next caller's fetch.
 
     Dispatch selects which pair arrives. The HTTP rung (rung 1) gets the
     caller's full-session Netscape jars, loaded before the request and saved
-    after it. Zendriver (rungs 3 and 4) gets the filtered browser JSON jars it
-    loads before fetching and writes before its browser stops. Camoufox gets
-    neither. The two formats are never converted into one another.
+    after it, and always gets the cap because it reads the page itself.
+    Zendriver (rungs 3 and 4) gets the filtered browser JSON jars it loads
+    before fetching and writes before its browser stops. Camoufox gets
+    neither. The two jar formats are never converted into one another.
     """
 
     jar_in: Path | None = None
     jar_out: Path | None = None
+    # The parent's byte cap on one provider response, carried to the rung that
+    # reads the network itself so it can stop before buffering a runaway page.
+    # ``None`` keeps the built-in default for callers that did not set one.
+    max_response_bytes: int | None = None
 
 
 class RungModule(TypingProtocol):

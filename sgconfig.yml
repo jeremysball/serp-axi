@@ -1,0 +1,4 @@
+# ast-grep project config. The rules live in .ast-grep/rules/; `npm run guard`
+# scans src/ with them and fails on any error-severity hit.
+ruleDirs:
+  - .ast-grep/rules

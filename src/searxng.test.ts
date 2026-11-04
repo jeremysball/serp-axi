@@ -1,25 +1,33 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
-import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { runSearch } from "./commands/search.ts";
 import { runCli } from "./cli.ts";
 import { createAppOptions } from "./app.ts";
 import { SerpAxiError } from "./errors.ts";
+import { kagiSearchHtml } from "./fixtures.ts";
+import { resolveSearxngOptions, searchSearxng, type SearxngOptionSources } from "./searxng.ts";
 import { decode } from "@toon-format/toon";
+import { PREFIXES as SHELL_SETTING_PREFIXES } from "../scripts/env-prefixes.mjs";
 
-const KAGI_FIXTURE = readFileSync(
-  fileURLToPath(new URL("./fixtures/kagi-html-search.html", import.meta.url)),
-  "utf8",
-);
+const KAGI_FIXTURE = kagiSearchHtml();
 
-const SEARXNG_ENVS = ["SERP_AXI_SEARXNG_URL", "SERP_AXI_SEARXNG_ENGINES", "SERP_AXI_SEARCH_TIMEOUT_MS"] as const;
-const PAID_ENVS = ["SERPER_API_KEY", "BRIGHTDATA_API_KEY", "KAGI_SESSION_TOKEN"] as const;
+// Every variable the CLI reads from the shell starts with one of these. `isolated`
+// clears whatever the shell has under them rather than a list of names, because a
+// list went stale the day SERP_AXI_MAX_RESPONSE_BYTES was added: a shell that
+// exported it failed 24 of these 48 tests. The hostile-env gate imports the same
+// list, so a stale prefix is poisoned and cleared together.
+
+function shellSettings(): Array<[string, string | undefined]> {
+  return Object.keys(process.env)
+    .filter((name) => SHELL_SETTING_PREFIXES.some((prefix) => name.startsWith(prefix)))
+    .map((name) => [name, undefined]);
+}
 
 async function withEnvs<T>(entries: Array<[string, string | undefined]>, fn: () => Promise<T>): Promise<T> {
   const originals = entries.map(([n]) => [n, process.env[n]] as const);
@@ -44,8 +52,7 @@ async function isolated(t: TestContext, fn: (home: string, configDir: string) =>
   t.after(() => rmSync(home, { recursive: true, force: true }));
   await withEnvs(
     [
-      ...SEARXNG_ENVS.map((n) => [n, undefined] as [string, string | undefined]),
-      ...PAID_ENVS.map((n) => [n, undefined] as [string, string | undefined]),
+      ...shellSettings(),
       ["XDG_CONFIG_HOME", home],
     ],
     () => fn(home, configDir),
@@ -376,6 +383,29 @@ test("runSearch maps searxng HTTP 403/429 to typed blocked output", async (t) =>
       assert.equal(details?.count, 0);
     }
   });
+});
+
+test("a non-OK SearXNG response body is cancelled before the status error is thrown", async () => {
+  for (const status of [403, 429, 401, 500, 418]) {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("challenge page"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = (async () => new Response(body, { status })) as typeof fetch;
+    await assert.rejects(() =>
+      searchSearxng(
+        { url: "http://searx.invalid", timeoutMs: 30_000 },
+        { q: "x", gl: "us", hl: "en", num: 1 },
+        fetchImpl,
+      ),
+    );
+    assert.equal(cancelled, true, `status ${status} left its body open`);
+  }
 });
 
 test("runSearch maps 401 without leaking details", async (t) => {
@@ -711,6 +741,22 @@ test("array-valued endpoint is rejected, not String-coerced", async (t) => {
   });
 });
 
+test("a null config value is rejected for each SearXNG key, unlike the ladder's config keys", () => {
+  // scrape-output.ts says the SearXNG keys "reject null" where the ladder's config keys read it as unset.
+  for (const key of ["searxngUrl", "searxngEngines", "searchTimeoutMs"] as const) {
+    assert.throws(
+      () => resolveSearxngOptions({ config: { [key]: null } }),
+      (error: unknown) => {
+        assert.ok(error instanceof SerpAxiError);
+        assert.equal(error.kind, "usage");
+        assert.match(error.message, new RegExp(`^${key} .*got null$`));
+        return true;
+      },
+      key,
+    );
+  }
+});
+
 test("higher-precedence valid values override lower invalid ones", async (t) => {
   await isolated(t, async (_home, configDir) => {
     writeConfig(configDir, { searxngUrl: 123, searchTimeoutMs: -3, searxngEngines: "bing" });
@@ -1004,6 +1050,70 @@ test("validation errors from env values name the env var", async (t) => {
       assert.match(error.message, /comma-separated/);
     });
   });
+});
+
+function helpFor(sources: SearxngOptionSources): string {
+  try {
+    resolveSearxngOptions(sources);
+  } catch (error) {
+    assert.ok(error instanceof SerpAxiError);
+    return error.help;
+  }
+  throw new Error("expected resolveSearxngOptions to throw");
+}
+
+test("a bad endpoint's help line shows the example for the source the value came from", () => {
+  const flagExample = "example: --searxng-url http://127.0.0.1:8888";
+  const envExample = "example: SERP_AXI_SEARXNG_URL=http://127.0.0.1:8888";
+  const configExample = 'example: "searxngUrl": "http://127.0.0.1:8888"';
+
+  // Wrong type or empty.
+  assert.equal(helpFor({ flagUrl: "", config: {} }), flagExample);
+  assert.equal(helpFor({ envUrl: "", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngUrl: "" } }), configExample);
+
+  // A string that is not a URL.
+  assert.equal(helpFor({ flagUrl: "not a url", config: {} }), flagExample);
+  assert.equal(helpFor({ envUrl: "not a url", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngUrl: "not a url" } }), configExample);
+
+  // Right shape, wrong protocol, query or fragment: the example must still be
+  // written the way the home that supplied the value writes it.
+  for (const bad of ["ftp://searx.lan", "http://searx.lan/?a=1", "http://searx.lan/#frag"]) {
+    assert.equal(helpFor({ flagUrl: bad, config: {} }), flagExample, bad);
+    assert.equal(helpFor({ envUrl: bad, config: {} }), envExample, bad);
+    assert.equal(helpFor({ config: { searxngUrl: bad } }), configExample, bad);
+  }
+});
+
+test("a bad engine list's help line shows the example for the source the value came from", () => {
+  const flagExample = "example: --engines bing,mojeek";
+  const envExample = "example: SERP_AXI_SEARXNG_ENGINES=bing,mojeek";
+  const configExample = 'example: "searxngEngines": ["bing", "mojeek"]';
+
+  // An empty name in the list.
+  assert.equal(helpFor({ flagEngines: "bing,,mojeek", config: {} }), flagExample);
+  assert.equal(helpFor({ envEngines: "bing,,mojeek", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searxngEngines: ["bing", ""] } }), configExample);
+
+  // Not a list at all.
+  assert.equal(helpFor({ config: { searxngEngines: "bing" } }), configExample);
+});
+
+test("a bad timeout's help line shows the example for the source the value came from", () => {
+  const flagExample = "example: --search-timeout-ms 30000";
+  const envExample = "example: SERP_AXI_SEARCH_TIMEOUT_MS=30000";
+  const configExample = 'example: "searchTimeoutMs": 30000';
+
+  // Wrong type: not all digits as text, not an integer in the config file.
+  assert.equal(helpFor({ flagTimeoutMs: "abc", config: {} }), flagExample);
+  assert.equal(helpFor({ envTimeoutMs: "abc", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searchTimeoutMs: "abc" } }), configExample);
+
+  // Right type, out of range.
+  assert.equal(helpFor({ flagTimeoutMs: "0", config: {} }), flagExample);
+  assert.equal(helpFor({ envTimeoutMs: "0", config: {} }), envExample);
+  assert.equal(helpFor({ config: { searchTimeoutMs: 0 } }), configExample);
 });
 
 test("long upstream engine reasons are clamped in output", async (t) => {

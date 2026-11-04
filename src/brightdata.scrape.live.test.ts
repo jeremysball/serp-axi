@@ -7,12 +7,10 @@ const apiKey = process.env.BRIGHTDATA_API_KEY;
 const skip = liveSkip("SERP_AXI_LIVE_BRIGHTDATA", apiKey);
 
 test("scrapeBrightData returns real records from the live API", { skip }, async () => {
-  const results = await scrapeBrightData(
-    apiKey as string,
-    "gd_m6gjtfmeh43we6cqc",
-    ["https://example.org", "https://example.com"],
-    1200,
-  );
+  const results = await scrapeBrightData(apiKey as string, "gd_m6gjtfmeh43we6cqc", [
+    "https://example.org",
+    "https://example.com",
+  ]);
   assert.equal(results.length, 2);
   const urls = results.map((r) => r.url).sort();
   assert.deepEqual(urls, ["https://example.com/", "https://example.org/"]);

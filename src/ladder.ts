@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_MAX_RESPONSE_BYTES } from "./body.ts";
 import type { StoredConfig } from "./config.ts";
 import { boundedDetail, SerpAxiError } from "./errors.ts";
+import { firstDefined, nonEmpty } from "./option-sources.ts";
 
 export type LadderVerdict = "ok" | "dead" | "blocked" | "error";
 
@@ -23,7 +26,7 @@ export interface LadderResponse {
   links: LadderLink[];
 }
 
-export const LADDER_PROTOCOL = 3;
+export const LADDER_PROTOCOL = 4;
 
 export type LadderTabState = "fresh" | "same";
 export type LadderCookieState = "cold" | "jar";
@@ -47,6 +50,12 @@ export interface LadderAxes {
 export interface LadderRequest extends LadderAxes {
   protocol: typeof LADDER_PROTOCOL;
   url: string;
+  /**
+   * The same cap the client applies to the reply line. The child streams its
+   * own network read no further than this, so an oversized page is refused
+   * before it can be buffered rather than after it is serialized.
+   */
+  maxResponseBytes: number;
 }
 
 export interface LadderAxisSources {
@@ -66,12 +75,33 @@ export interface LadderClientOptions {
    * rather than holding every later fetch open.
    */
   handshakeMs?: number;
+  /**
+   * The longest line the child may print, in bytes. Every reply is one line, so
+   * this is the cap on a page. The same number travels in the request as
+   * `maxResponseBytes`, so the child stops its own network read at it instead
+   * of buffering a page the parent would refuse. A child that passes it is
+   * killed and the fetch fails, because a cut-off line cannot be parsed.
+   * Defaults to the transport cap (64 MiB); `scrape --ladder` passes the same
+   * flag, env var or config key every other provider's cap comes from.
+   */
+  maxLineBytes?: number;
 }
 
 export class SerpAxiLadderError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SerpAxiLadderError";
+  }
+}
+
+/**
+ * The child printed a line longer than `maxLineBytes`. A subclass so the command
+ * can tell the user how to raise the cap, which a hung or crashed child has no use for.
+ */
+export class LadderLineTooLongError extends SerpAxiLadderError {
+  constructor(maxBytes: number) {
+    super(`ladder-cli printed a line longer than ${maxBytes} bytes, which serp-axi will not read`);
+    this.name = "LadderLineTooLongError";
   }
 }
 
@@ -163,8 +193,8 @@ function readRaw(sources: LadderAxisSources, key: AxisKey): { value: string | un
   if (flagValue !== undefined && flagValue !== true && flagValue !== false) {
     return { value: String(flagValue), source: { kind: "flag", field: entry.flag } };
   }
-  const envValue = sources.env?.[entry.env];
-  if (envValue !== undefined && envValue.length > 0) {
+  const envValue = nonEmpty(sources.env?.[entry.env]);
+  if (envValue !== undefined) {
     return { value: envValue, source: { kind: "env", field: entry.env } };
   }
   return { value: undefined, source: null };
@@ -261,11 +291,8 @@ export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   // names where it came from, so an error points at the spelling the caller
   // actually wrote rather than saying "from env" and covering three places.
   const axisLayer = (key: AxisKey): { raw: string | undefined; source: AxisSource | null } => {
-    const layers = [readRaw(sources, key), bundleMember(bundle, key, profile), readConfig(sources, key)];
-    for (const layer of layers) {
-      if (layer.value !== undefined) return { raw: layer.value, source: layer.source };
-    }
-    return { raw: undefined, source: null };
+    const picked = firstDefined([readRaw(sources, key), bundleMember(bundle, key, profile), readConfig(sources, key)]);
+    return { raw: picked?.value, source: picked?.source ?? null };
   };
 
   for (const key of VALUE_KEYS) {
@@ -299,8 +326,12 @@ export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   return axes;
 }
 
-export function buildLadderRequest(url: string, axes: LadderAxes): LadderRequest {
-  return { protocol: LADDER_PROTOCOL, url, ...axes };
+export function buildLadderRequest(
+  url: string,
+  axes: LadderAxes,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
+): LadderRequest {
+  return { protocol: LADDER_PROTOCOL, url, maxResponseBytes, ...axes };
 }
 
 /**
@@ -317,8 +348,8 @@ export function resolveLadderBin(
   env: NodeJS.ProcessEnv = process.env,
   candidates: string[] | null = defaultLadderBinCandidates(),
 ): string {
-  const explicit = env.SERP_AXI_LADDER_BIN;
-  if (explicit !== undefined && explicit.length > 0) return explicit;
+  const explicit = nonEmpty(env.SERP_AXI_LADDER_BIN);
+  if (explicit !== undefined) return explicit;
   for (const candidate of candidates ?? []) {
     if (isRegularFile(candidate)) return candidate;
   }
@@ -378,7 +409,7 @@ function parseResponse(line: string): LadderResponse {
       `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${boundedDetail(line)})`,
     );
   }
-  // A protocol-3 child always sends links. Defaulting a missing field to []
+  // A protocol-4 child always sends links. Defaulting a missing field to []
   // would turn a stale half of the pair into an empty result the caller cannot
   // tell from a page with no anchors, so this is a schema violation instead.
   if (!Array.isArray(body.links)) {
@@ -417,6 +448,11 @@ export class LadderClient {
   private readySettled = false;
   private handshakeTimer: NodeJS.Timeout | null = null;
   private buffer = "";
+  // Decodes the child's stdout across chunk boundaries. `chunk.toString()` per
+  // chunk turns a multibyte character that straddles two pipe reads into U+FFFD.
+  private stdoutDecoder = new StringDecoder("utf8");
+  // Bytes of the line the child is partway through printing; see onStdout.
+  private lineBytes = 0;
   private stderrTail = "";
   private queue: Pending[] = [];
   private inFlight: Pending | null = null;
@@ -451,7 +487,11 @@ export class LadderClient {
     if (this.closed) {
       throw new SerpAxiLadderError("ladder client is closed");
     }
-    const request = buildLadderRequest(url, axes ?? resolveLadderAxes({}));
+    const request = buildLadderRequest(
+      url,
+      axes ?? resolveLadderAxes({}),
+      this.options.maxLineBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+    );
     this.ensureSpawned();
     return new Promise<LadderResponse>((resolve, reject) => {
       // No timer here: the timeout covers the upstream call and arms at
@@ -518,6 +558,8 @@ export class LadderClient {
     this.detachStreams(child);
     this.clearHandshakeTimer();
     this.buffer = "";
+    this.stdoutDecoder = new StringDecoder("utf8");
+    this.lineBytes = 0;
     this.stderrTail = "";
     this.ready = null;
     this.readySettled = false;
@@ -660,8 +702,38 @@ export class LadderClient {
 
     const onStdout = (chunk: Buffer) => {
       if (child !== this.child) return;
-      this.buffer += chunk.toString();
-      this.drainLines();
+      // Every reply is one line, and a line with no newline yet sits in
+      // `this.buffer` until it ends. Count its bytes before appending, so a
+      // child that never prints a newline cannot grow the buffer without end.
+      // Every line in the chunk is measured, not only the first: a chunk that
+      // starts with a newline (a blank startup line, or the end of the previous
+      // reply) would otherwise count zero bytes and let the line after it through.
+      const maxLineBytes = this.options.maxLineBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+      const firstNewline = chunk.indexOf(0x0a);
+      const lastNewline = chunk.lastIndexOf(0x0a);
+      let longest = this.lineBytes + (firstNewline < 0 ? chunk.length : firstNewline);
+      for (let start = firstNewline + 1; start > 0 && start <= lastNewline; ) {
+        const next = chunk.indexOf(0x0a, start);
+        const length = next - start;
+        if (length > longest) longest = length;
+        start = next + 1;
+      }
+      const trailing = firstNewline < 0 ? 0 : chunk.length - lastNewline - 1;
+      if (trailing > longest) longest = trailing;
+      if (longest > maxLineBytes) {
+        const error = new LadderLineTooLongError(maxLineBytes);
+        this.settleReady(error);
+        this.failAll(error);
+        this.resetChild();
+        this.armIdleTimer();
+        return;
+      }
+      this.lineBytes = firstNewline < 0 ? this.lineBytes + chunk.length : trailing;
+      this.buffer += this.stdoutDecoder.write(chunk);
+      // A chunk with no newline cannot finish a line, and the buffer never holds
+      // one then: draining would rescan the whole accumulated reply per chunk,
+      // which makes a large single-line page quadratic to read.
+      if (firstNewline >= 0) this.drainLines();
     };
     child.stdout?.on("data", onStdout);
     this.stdoutListener = onStdout;

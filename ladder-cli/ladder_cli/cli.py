@@ -29,6 +29,13 @@ from .rungs import RUNGS, RungContext, RungResult, RungVerdict, fetch, judge, ne
 DEFAULT_RUNG_TIMEOUT_S = 90.0
 
 
+def _cap_args(ctx: RungContext | None) -> list[str]:
+    """The child's byte cap, omitted when the request did not set one."""
+    if ctx is None or ctx.max_response_bytes is None:
+        return []
+    return ["--max-bytes", str(ctx.max_response_bytes)]
+
+
 def _jar_args(ctx: RungContext | None) -> list[str]:
     """The child's jar flags, omitted when the request carries no jar."""
     if ctx is None:
@@ -42,12 +49,17 @@ def _jar_args(ctx: RungContext | None) -> list[str]:
 
 
 def _context_from(args: Sequence[str]) -> RungContext:
-    """Read the jar flags the parent appended to the child's argv."""
+    """Read the cap and jar flags the parent appended to the child's argv."""
     jar_in: Path | None = None
     jar_out: Path | None = None
+    max_response_bytes: int | None = None
     index = 0
     while index < len(args):
         flag = args[index]
+        if flag == "--max-bytes" and index + 1 < len(args):
+            max_response_bytes = int(args[index + 1])
+            index += 2
+            continue
         if flag in ("--jar-in", "--jar-out") and index + 1 < len(args):
             value = args[index + 1]
             if flag == "--jar-in":
@@ -57,7 +69,7 @@ def _context_from(args: Sequence[str]) -> RungContext:
             index += 2
             continue
         index += 1
-    return RungContext(jar_in=jar_in, jar_out=jar_out)
+    return RungContext(jar_in=jar_in, jar_out=jar_out, max_response_bytes=max_response_bytes)
 
 
 def _signal_group(group: int, sig: int) -> None:
@@ -197,16 +209,25 @@ def run_rung_isolated(
     be stopped (see ``_stop_group``). The child is started in its own session so
     the stop reaches whatever it spawned underneath it, matching ladder.py:180.
 
-    The jar flags are part of the child's argv because the jar is per request
-    and the child's own arguments are how one request's paths reach it. A
-    custom ``argv`` is a complete command (the tests use one to fake a child),
-    so it is passed through untouched.
+    The cap and jar flags are part of the child's argv because both are per
+    request and the child's own arguments are how one request's settings reach
+    it. A custom ``argv`` is a complete command (the tests use one to fake a
+    child), so it is passed through untouched.
     """
     budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s
     command = (
         list(argv)
         if argv is not None
-        else [sys.executable, "-m", "ladder_cli", "--rung", rung, url, *_jar_args(ctx)]
+        else [
+            sys.executable,
+            "-m",
+            "ladder_cli",
+            "--rung",
+            rung,
+            url,
+            *_cap_args(ctx),
+            *_jar_args(ctx),
+        ]
     )
     process = subprocess.Popen(
         command,
@@ -313,10 +334,13 @@ def dispatch(request: LadderRequest, *, runner=None) -> LadderResponse:
         # full-session Netscape jars, the zendriver rungs the filtered browser
         # JSON jars, Camoufox neither. The formats are never converted.
         ctx: RungContext | None = None
-        if rung == "http" and (request.httpJarIn is not None or request.httpJarOut is not None):
+        if rung == "http":
+            # Always a context: the byte cap matters even on a cold request with
+            # no jar, and rung 1 is the rung that reads the page itself.
             ctx = RungContext(
                 jar_in=Path(request.httpJarIn) if request.httpJarIn is not None else None,
                 jar_out=Path(request.httpJarOut) if request.httpJarOut is not None else None,
+                max_response_bytes=request.maxResponseBytes,
             )
         elif rung in ("zendriver_cf", "zendriver_headed_cf") and (request.jarIn is not None or request.jarOut is not None):
             ctx = RungContext(

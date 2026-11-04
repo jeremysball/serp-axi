@@ -37,6 +37,19 @@ def cookie_server():
                 if self.path == "/set":
                     self.send_header("Set-Cookie", "fresh=earned; Path=/private; Secure; HttpOnly; SameSite=Lax")
                     self.send_header("Set-Cookie", "session=earned; Path=/")
+            if self.path == "/huge":
+                body = b"x" * 200_000
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/huge-json":
+                body = b'{"title": "' + b"x" * 200_000 + b'"}'
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self.end_headers()
             self.wfile.write(article_html().encode())
 
@@ -85,7 +98,7 @@ def test_real_resident_and_rung_child_use_http_jar_without_touching_browser_jar(
     assert cli.main([], stdin=[json.dumps(dataclasses.asdict(request))], stdout=stdout) == 0
 
     ready, response = [json.loads(line) for line in stdout.getvalue().splitlines()]
-    assert ready == {"ready": True, "protocol": 3}
+    assert ready == {"ready": True, "protocol": 4}
     assert response["verdict"] == "ok"
     assert response["rungReached"] == 1
     assert response["title"] == "An article"
@@ -94,6 +107,35 @@ def test_real_resident_and_rung_child_use_http_jar_without_touching_browser_jar(
     saved.load(ignore_discard=True)
     assert {cookie.name for cookie in saved} == {"allowed", "fresh", "session"}
     assert browser.read_text() == original
+
+
+def test_a_page_over_the_cap_stops_the_http_read(cookie_server):
+    base, _ = cookie_server
+
+    with pytest.raises(http.ResponseTooLargeError, match="larger than the 128 bytes"):
+        http.fetch(base + "/huge", RungContext(max_response_bytes=128))
+
+
+def test_a_site_api_body_over_the_cap_stops_the_read_before_it_is_parsed(cookie_server, monkeypatch):
+    base, _ = cookie_server
+    monkeypatch.setattr(http, "api_url", lambda url: base + "/huge-json")
+
+    with pytest.raises(http.ResponseTooLargeError, match="larger than the 128 bytes"):
+        http.fetch("https://example.com/thread", RungContext(max_response_bytes=128))
+
+
+def test_the_resident_request_cap_bounds_the_rung_childs_read(cookie_server, make_request):
+    base, _ = cookie_server
+    request = make_request(url=base + "/huge", rungCeiling=1, maxResponseBytes=128)
+    stdout = io.StringIO()
+
+    assert cli.main([], stdin=[json.dumps(dataclasses.asdict(request))], stdout=stdout) == 0
+
+    ready, response = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert ready == {"ready": True, "protocol": 4}
+    assert response["verdict"] == "error"
+    assert response["rungReached"] == 1
+    assert "larger than the 128 bytes" in response["warning"]
 
 
 def test_real_redirect_does_not_forward_host_only_cookies(cookie_server, tmp_path):
@@ -133,6 +175,13 @@ class FakeResponse:
         self.text = text
         self.url = url
         self.headers = {}
+        self.encoding = "utf-8"
+
+    def iter_bytes(self, chunk_size: int | None = None):
+        yield self.text.encode("utf-8")
+
+    def close(self) -> None:
+        pass
 
 
 class FakeClient:
@@ -143,7 +192,14 @@ class FakeClient:
         self.request_calls = []
         self._cookies = dict(cookies or {})
 
-    def get(self, url: str, headers: dict[str, str] | None = None, *, follow_redirects=False) -> FakeResponse:
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        follow_redirects=False,
+        stream=False,
+    ) -> FakeResponse:
         self.request_calls.append((url, headers))
         response = self.responses.pop(0)
         if self._cookies:

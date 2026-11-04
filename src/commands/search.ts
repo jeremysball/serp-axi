@@ -8,6 +8,14 @@ import { searchStrategies, PROVIDERS, type Provider } from "../providers.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
 import { resolveSearxngOptions, type EngineStatus } from "../searxng.ts";
+import {
+  byteSizeLabel,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  MAX_RESPONSE_BYTES_CONFIG_KEY,
+  MAX_RESPONSE_BYTES_ENV,
+  MAX_RESPONSE_BYTES_FLAG,
+} from "../body.ts";
+import { requestMaxResponseBytes, resolveMaxResponseBytes } from "../response-limit.ts";
 
 const SEARCH_FLAGS: FlagSpec = {
   region: "string",
@@ -19,6 +27,7 @@ const SEARCH_FLAGS: FlagSpec = {
   "searxng-url": "string",
   engines: "string",
   "search-timeout-ms": "string",
+  "max-response-bytes": "string",
 };
 
 const ALLOWED_EXTRA_FIELDS = ["date", "sitelinks"];
@@ -26,6 +35,7 @@ const SNIPPET_LIMIT = 200;
 
 const SEARCH_HELP = `serp-axi search "<query>" [--region <cc>] [--lang <code>] [--num <n>] [--fields <a,b,c>] [--provider <name>] [--zone <name>]
                               [--searxng-url <url>] [--engines <a,b>] [--search-timeout-ms <ms>]
+                              [--max-response-bytes <n>]
 
 Run a free search query via SearXNG by default, or via Serper, Bright Data, or Kagi.
 
@@ -46,6 +56,11 @@ Flags:
                            config searxngEngines).
   --search-timeout-ms <ms>  Request timeout in milliseconds. Only applies with --provider searxng.
                            Default: 30000 (env SERP_AXI_SEARCH_TIMEOUT_MS, config searchTimeoutMs).
+  ${MAX_RESPONSE_BYTES_FLAG} <n>  Most bytes one provider response may carry. A longer body stops the
+                           run with an error; serp-axi never uses a cut-off body. Default: ${byteSizeLabel(DEFAULT_MAX_RESPONSE_BYTES)}.
+                           Also: ${MAX_RESPONSE_BYTES_ENV}=<n>. The "${MAX_RESPONSE_BYTES_CONFIG_KEY}"
+                           config key counts only with --provider searxng, the one search that
+                           reads the config file.
 
 Paid providers require SERPER_API_KEY (serper), BRIGHTDATA_API_KEY (brightdata), or
 KAGI_SESSION_TOKEN (kagi) in the environment for whichever provider is
@@ -184,18 +199,28 @@ export async function runSearch(
 
   const params: SearchParams = { q: query, gl: region, hl: lang, num };
 
-  let searxng;
-  if (provider === "searxng") {
-    searxng = resolveSearxngOptions({
-      flagUrl: flags["searxng-url"] as string | undefined,
-      flagEngines: flags.engines as string | undefined,
-      flagTimeoutMs: flags["search-timeout-ms"] as string | undefined,
-      envUrl: env.SERP_AXI_SEARXNG_URL,
-      envEngines: env.SERP_AXI_SEARXNG_ENGINES,
-      envTimeoutMs: env.SERP_AXI_SEARCH_TIMEOUT_MS,
-      config: config ?? loadStoredConfig(os.homedir(), env),
-    });
-  }
+  // Checked before the config file is opened and before any request goes out.
+  const requestedMaxBytes = requestMaxResponseBytes(
+    flags["max-response-bytes"] as string | undefined,
+    env[MAX_RESPONSE_BYTES_ENV],
+  );
+
+  // The config is read once, for the one search path that opens it. Both the
+  // cap and the searxng settings come from that same object.
+  const stored = provider === "searxng" ? (config ?? loadStoredConfig(os.homedir(), env)) : undefined;
+  const maxResponseBytes = resolveMaxResponseBytes(requestedMaxBytes, stored);
+  const searxng =
+    stored === undefined
+      ? undefined
+      : resolveSearxngOptions({
+          flagUrl: flags["searxng-url"] as string | undefined,
+          flagEngines: flags.engines as string | undefined,
+          flagTimeoutMs: flags["search-timeout-ms"] as string | undefined,
+          envUrl: env.SERP_AXI_SEARXNG_URL,
+          envEngines: env.SERP_AXI_SEARXNG_ENGINES,
+          envTimeoutMs: env.SERP_AXI_SEARCH_TIMEOUT_MS,
+          config: stored,
+        });
 
   const response = await searchStrategies[provider].run({
     params,
@@ -203,6 +228,7 @@ export async function runSearch(
     env,
     zone: flags.zone as string | undefined,
     searxng,
+    maxResponseBytes,
   });
 
   if ("provider" in response && response.provider === "searxng") {

@@ -1,0 +1,46 @@
+# Belief: every network read goes through `fetch`, so src/body.ts sees it.
+#
+# A provider that imported node:http, node:https, node:http2 or undici would read
+# its response without going through the byte bound at all, and the two rules
+# above could not see it. The rule matches a static import, a re-export, a dynamic
+# `import()` and `require()`. `node:net` is not banned: scrape.ts imports `isIP`
+# from it, and a bare socket is not how a provider call would be written.
+#
+# Bypass: // ast-grep-ignore: raw-transport-import (<how this read is bounded>)
+id: raw-transport-import
+language: TypeScript
+severity: error
+message: >-
+  This module opens its own HTTP connection, so its response never passes
+  through src/body.ts.
+note: >-
+  Belief: every network read goes through `fetch` and then readBodyText. Use the
+  injected fetchImpl; if there is a real reason not to, bypass with
+  `// ast-grep-ignore: raw-transport-import (<how this read is bounded>)`.
+files:
+  - src/**/*.ts
+ignores:
+  - src/**/*.test.ts
+utils:
+  http-module-name:
+    kind: string
+    regex: '^["''](node:)?(http|https|http2)["'']$|^["'']undici(/.*)?["'']$'
+rule:
+  any:
+    - kind: import_statement
+      has:
+        field: source
+        matches: http-module-name
+    - kind: export_statement
+      has:
+        field: source
+        matches: http-module-name
+    - kind: call_expression
+      all:
+        - has:
+            field: function
+            regex: '^(require|import)$'
+        - has:
+            field: arguments
+            has:
+              matches: http-module-name

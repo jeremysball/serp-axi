@@ -1,0 +1,44 @@
+# Belief: the only way to reach a Response's body stream is through src/body.ts.
+#
+# `response.body` is the one property that hands over the raw stream, so every
+# route that skips readBodyText (a `for await` loop, `getReader()`, `pipeTo`,
+# `Readable.fromWeb`, a stream passed to another function) has to go through it.
+# The rule catches the property however it is read: as a member, through a
+# subscript, or pulled out by destructuring. That covers the routes with no name
+# worth a rule of their own.
+#
+# It is noisier than unbounded-response-read for the same reason: any object with
+# a `body` field matches, and ast-grep cannot tell a Response from a parsed JSON
+# envelope. Bypass with the reason written next to it:
+#   // ast-grep-ignore: response-body-stream-access (<why this is not a Response>)
+id: response-body-stream-access
+language: TypeScript
+severity: error
+message: >-
+  `.body` is read here. If this is a Response, its stream is being consumed
+  outside src/body.ts.
+note: >-
+  Belief: a response body stream is only consumed through src/body.ts. If this
+  object is not a Response (a parsed JSON field called `body`), bypass with
+  `// ast-grep-ignore: response-body-stream-access (<reason>)` on the line above.
+files:
+  - src/**/*.ts
+ignores:
+  - src/body.ts
+  - src/**/*.test.ts
+rule:
+  any:
+    - pattern: $R.body
+    - pattern: $R?.body
+    - pattern: $R["body"]
+    - pattern: $R['body']
+    - kind: object_pattern
+      has:
+        kind: shorthand_property_identifier_pattern
+        regex: '^body$'
+    - kind: object_pattern
+      has:
+        kind: pair_pattern
+        has:
+          field: key
+          regex: '^body$'

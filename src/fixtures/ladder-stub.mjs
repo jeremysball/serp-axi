@@ -1,12 +1,15 @@
 // Test double for ladder-cli: speaks the NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|over-cap|tail-mid|html-title|split-multibyte|big-page|blank-then-long|endless-line|endless-banner
 import readline from "node:readline";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// The mode comes from --mode and nowhere else. It once also read LADDER_STUB_MODE
+// and let it win, so a shell that exported the variable could override the mode a
+// test had asked for.
 const modeIndex = process.argv.indexOf("--mode");
-const mode = process.env.LADDER_STUB_MODE ?? (modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined) ?? "ok";
+const mode = (modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined) ?? "ok";
 
 // A kill switch that fires once per parent, so a test can watch the client die
 // once and then answer a later request on the respawned child. Keyed by the
@@ -18,10 +21,22 @@ if (mode === "die-before-ready") {
   process.exit(1);
 }
 
+// A runaway child writes without ever ending the line. The self-exit is a safety
+// net so a failing test cannot leave it printing.
+function writeForever() {
+  const block = "x".repeat(64 * 1024);
+  const timer = setInterval(() => process.stdout.write(block), 1);
+  process.stdout.on("error", () => process.exit(0));
+  setTimeout(() => process.exit(0), 15000).unref();
+  return timer;
+}
+
 // A child that spawns and never says hello. Nothing is printed at all, so the
 // only thing standing between it and a permanent hang is the handshake budget.
 if (mode === "silent") {
   setTimeout(() => {}, 1 << 30);
+} else if (mode === "endless-banner") {
+  writeForever();
 } else {
   // §1.1: anything before the handshake completes is startup output and is
   // skipped rather than fatal. This mode prints exactly that before the ready
@@ -32,7 +47,7 @@ if (mode === "silent") {
 
   // A mismatched protocol must fail at the handshake, so this mode announces a
   // protocol the parent does not speak before any request is read.
-  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 3 }) + "\n");
+  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 4 }) + "\n");
 }
 
 // A silent child never reaches the read loop, so it cannot be woken by stdin
@@ -68,6 +83,40 @@ input.on("line", async (line) => {
     process.stdout.write("not json at all\n");
     return;
   }
+  if (mode === "endless-line") {
+    writeForever();
+    return;
+  }
+  // One reply whose "€" (three bytes in UTF-8) is cut after its first byte and
+  // finished in a second write 80 ms later, so the parent sees the character
+  // split across two reads every time rather than when the pipe happens to.
+  if (mode === "split-multibyte") {
+    const reply = Buffer.from(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "price €5", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
+    const cut = reply.indexOf(Buffer.from("€")) + 1;
+    process.stdout.write(reply.subarray(0, cut));
+    setTimeout(() => process.stdout.write(reply.subarray(cut)), 80);
+    return;
+  }
+  // A page of a known size, so a test can set the line cap either side of it.
+  if (mode === "big-page") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "y".repeat(200000), engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
+    return;
+  }
+  // A blank startup line and a reply in one write. The reply is small enough for
+  // one pipe read, so a cap check that measures only the first line of a chunk
+  // sees a zero-byte line and lets it through.
+  if (mode === "blank-then-long") {
+    process.stdout.write(
+      "\n" +
+        JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "y".repeat(5000), engines: [], elapsedMs: 1, links: [], warning: null }) +
+        "\n",
+    );
+    return;
+  }
   if (mode === "blocked") {
     process.stdout.write(
       JSON.stringify({ verdict: "blocked", rungReached: 4, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
@@ -88,11 +137,19 @@ input.on("line", async (line) => {
     );
     return;
   }
-  // A protocol-3 response without links is a schema violation, not an empty
+  // A protocol-4 response without links is a schema violation, not an empty
   // result: the caller must be told the pair is stale, not handed [].
   if (mode === "missing-links") {
     process.stdout.write(
       JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "body", engines: [], elapsedMs: 1, warning: null }) + "\n",
+    );
+    return;
+  }
+  // The child stopped its own read at the cap the parent sent. The warning is
+  // the real child's wording, so the parent's help path is what is exercised.
+  if (mode === "over-cap") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "error", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: `ladder response is larger than the ${request.maxResponseBytes} bytes serp-axi will read` }) + "\n",
     );
     return;
   }

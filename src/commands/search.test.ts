@@ -1,11 +1,11 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { runSearch } from "./search.ts";
 import { SerpAxiError } from "../errors.ts";
+import { kagiSearchHtml } from "../fixtures.ts";
 
 // runSearch takes the env and the stored config as arguments, so these tests
 // hand it both. Most of them never touch process.env or the machine's real
@@ -17,10 +17,7 @@ import { SerpAxiError } from "../errors.ts";
 const SERPER_ENV: NodeJS.ProcessEnv = { SERPER_API_KEY: "test-key" };
 const BRIGHT_DATA_ENV: NodeJS.ProcessEnv = { BRIGHTDATA_API_KEY: "bd-key" };
 const NO_CONFIG = {};
-const KAGI_FIXTURE = readFileSync(
-  fileURLToPath(new URL("../fixtures/kagi-html-search.html", import.meta.url)),
-  "utf8",
-);
+const KAGI_FIXTURE = kagiSearchHtml();
 
 function fetchWithOrganic(organic: unknown[]): typeof fetch {
   return (async () => new Response(JSON.stringify({ organic }), { status: 200 })) as typeof fetch;
@@ -147,6 +144,30 @@ test("runSearch reports a definitive zero-result state", async () => {
   const output = await runSearch(["nothing here", "--provider", "serper"], fetchImpl, SERPER_ENV, NO_CONFIG);
   assert.equal(output.count, 0);
   assert.match(output.results as string, /0 results found for query "nothing here"/);
+});
+
+test("runSearch reports a provider-conflict flag before a malformed cap", async () => {
+  // Positive trigger first: the same search with no conflict reaches the network.
+  let reached = 0;
+  const okFetch = (async () => {
+    reached += 1;
+    return new Response(JSON.stringify({ organic: [] }), { status: 200 });
+  }) as typeof fetch;
+  await runSearch(["q", "--provider", "serper"], okFetch, SERPER_ENV, NO_CONFIG);
+  assert.equal(reached, 1);
+
+  const { fetchImpl, calls } = countingFetch();
+  await assert.rejects(
+    () =>
+      runSearch(
+        ["q", "--provider", "serper", "--searxng-url", "http://127.0.0.1:8888", "--max-response-bytes", "0"],
+        fetchImpl,
+        SERPER_ENV,
+        NO_CONFIG,
+      ),
+    /--searxng-url is only supported with --provider searxng/,
+  );
+  assert.equal(calls(), 0);
 });
 
 test("runSearch rejects an unknown --provider value", async () => {

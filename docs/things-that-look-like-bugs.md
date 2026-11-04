@@ -617,6 +617,11 @@ field that stays. A regex tag-stripper would delete the `<div>` a page is
 legitimately talking about, and ladder rung 1 decodes entities after it removes
 tags, so a tag in its text is content. Dropping
 `html2text` to save space would also be a guess about which field a caller reads.
+The two are not copies. A development scrape of `https://example.com` on 2026-11-03
+returned the same sentence in both, with `html2text` hard-wrapped at a line width
+(a `\n` mid-sentence); that observation was not recorded in this repo, so treat the
+exact wrap as unverified. The recorded fixture in `src/fixtures/` differs in markup
+style (`# Example Domain` against `EXAMPLE DOMAIN`) and has no mid-sentence wrap.
 
 **When this becomes a real bug:** if a field whose name ends in `html`, or whose
 value is a whole HTML document, appears in the output without
@@ -752,7 +757,9 @@ the usage error above, or if a conflicting pair reaches the network.
 (it used to be read only by `--ladder`, and by Bright Data when the flag and env
 var had not settled `includeMarkup`). A Bright Data run with `--include-markup`
 fails on it too. A bad URL, a missing API key, or a bad cap flag is still
-reported as itself, ahead of the file error.
+reported as itself, ahead of the file error. A malformed cap is checked after
+the URL, provider, axis and ladder checks, so it cannot mask one of those; it is
+still checked before the file is opened.
 
 **Why:** `maxChars` and `fullMaxChars` apply to every path, so every path needs
 the file. It is read once, after the URL and key checks, so a broken file never
@@ -766,23 +773,45 @@ diagnose than failing every run the same way.
 checked its URL, its API key (or ladder binary), and the cap flags, or if a
 path opens it twice.
 
-## Bright Data gets the character cap as `limit_per_input`
+## The Bright Data cap is applied after the records arrive
 
-**What you see:** the Bright Data request body is
-`{"input": [...], "limit_per_input": <cap>}` with the character cap (1200,
-50000, or the configured value) in `limit_per_input`, and the response is cut to
-the same cap again on our side.
+**What you see:** `serp-axi scrape --provider brightdata --max-chars 5` sends
+Bright Data no limit of any kind (the request body is `{"input": [...]}`,
+nothing else). Whatever comes back is cut afterward: every long top-level
+string except `url` is cut to 5 characters. The cap shortens the output, and
+nothing in the request asks Bright Data to send less.
 
-**Why:** the field was sent with the character limit before the caps became
-configurable, and this change passes the resolved cap through unchanged. Bright
-Data documents `limit_per_input` as a record count for discovery collections.
-Whether `/datasets/v3/scrape` reads it as a character count is unverified: no
-Bright Data document says so, and a live check needs a funded account. The local
-cut is what guarantees the cap.
+**Why:** the only limit the `/datasets/v3/scrape` reference names is
+`limit_per_input`, and it counts records per input, for discovery requests
+("Maximum records returned per input", schema `minimum: 1`). It is not a
+character limit. An earlier version sent the character cap in it anyway. Sent as
+a record count, `--max-chars 5` would have asked a discovery dataset for five
+records. The documented fields are `input`, `limit_per_input` and
+`custom_output_fields`; none limits the length of a string. Source:
+`https://docs.brightdata.com/api-reference/web-scraper-api/synchronous-requests`,
+read 2026-11-02. The cap is applied locally in `shapeScrapeRecord`.
 
-**When this becomes a real bug:** if a live request shows Bright Data rejecting
-the field, or reading it as a record count so that the cap changes how many
-records come back.
+**What the download is bounded by instead:** the byte cap in `src/body.ts`
+(`DEFAULT_MAX_RESPONSE_BYTES`, 64 MiB; `--max-response-bytes`,
+`SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` to change it). The old
+`limit_per_input` carried the character cap (1200 by default, 50000 with
+`--full`; `DEFAULT_MAX_CHARS` and `DEFAULT_FULL_MAX_CHARS` in
+`src/scrape-output.ts`), so by default it also told a discovery dataset to
+return at most 1200 records per input. That was an accident of reading a record
+count as a length, not a bound anyone chose. The request `scrapeBrightData`
+builds has only `dataset_id`, `notify` and `include_errors` in its query string
+(asserted in `src/brightdata.scrape.test.ts`), so it is not a discovery request
+and the field had no records to limit. That is read from the reference, not
+tested against the live endpoint. The byte cap is what keeps a large reply out of memory, and it stops
+the read, not just the output.
+
+**When this becomes a real bug:** if Bright Data adds a field-length limit to
+this endpoint, the download could shrink and this entry should go. Or if a live
+request shows the endpoint rejecting a body that holds only `input`; the opt-in
+live test (`SERP_AXI_LIVE_BRIGHTDATA`) sends exactly that. Or if a normal scrape
+starts hitting the byte cap because a dataset returns many records per URL, in
+which case a record limit that is chosen on purpose, not borrowed from the
+character cap, belongs in the request.
 
 ## The Bright Data cap covers top-level strings, not nested ones
 
@@ -819,3 +848,239 @@ code units, so it can exceed the number of characters a reader counts.
 
 **When this becomes a real bug:** if a cut field ends in half of a surrogate pair,
 or if backing up removes more than one unit.
+
+## Every response read goes through body.ts
+
+**What you see:** `npm run guard` (and CI, and the pre-commit hook) fails on a
+bare `response.text()`, `.json()`, `.arrayBuffer()`, `.blob()`, `.formData()` or
+`.bytes()` anywhere in `src/`, on any `.body` read (member access, subscript, or
+destructuring), and on an import or re-export of `node:http`, `node:https`,
+`node:http2` or `undici`. `src/body.ts` and the `*.test.ts` files are exempt. One
+line in production code carries a bypass: `JSON.parse(envelope.body)` in
+`src/brightdata.ts`, where `body` is a string field of Bright Data's parsed reply
+and not a stream.
+
+**Why:** the belief is that no network response is read into memory without a
+byte bound. A scan of the tree before the fix (commit `4606e31`) found nine
+unbounded reads across Serper, Kagi, SearXNG and Bright Data, so the fix was a
+bounded reader (`readBodyText`) and a rule that makes the next unbounded read
+fail the build. Three rules cover three
+routes: the method names, the `.body` stream (a `for await` loop, `getReader()`,
+a stream handed to another function), and a second HTTP client that would never
+call `fetch` at all. A rule that reports a warning would be read once and then
+ignored, so all three are errors, and `--error=unused-suppression` makes a stale
+bypass an error as well.
+
+The rules match names, not types. ast-grep cannot tell a `Response` from another
+object with a `.text()` method or a `body` field, so a false positive takes a
+bypass with the reason written next to it (`// ast-grep-ignore: <rule-id>
+(<reason>)`, on the line above or at the end of the line). The reason sits in
+parentheses because the pre-commit dash gate rejects a double hyphen, the
+separator ast-grep's own examples use; ast-grep 0.44.1 reads the rule id and
+ignores the rest. They also miss method reads that never name the method at the
+call: `response["text"]()`, `const { text } = response`, and `const read =
+response.text; read.call(response)` all pass. That is a deliberate limit. The
+risk being guarded is a developer or an agent copying `response.text()` into a
+new provider, and a rule written to stop a deliberate evasion would flag ordinary
+code to do it. The `.body` stream is different: a subscript or a destructuring
+pattern is a plausible way to reach it, so those spellings are covered.
+
+The guard covers HTTP responses only. `src/ladder.ts` reads a local child's
+stdout, not a `Response`, and bounds it by its own check: the pending line may not
+pass the same cap (see "The ladder cap bounds the child's read and its reply
+line" below). No ast-grep rule watches that read; `src/ladder.test.ts` does.
+
+`src/guards.test.ts` runs each rule against code it must catch, code it must
+leave alone, and the bypass forms, and it fails if a rule file has no case that
+makes it fire.
+
+**When this becomes a real bug:** if `unbounded-response-read` or
+`response-body-stream-access` flags code that is not a response and the bypass
+count in `src/` grows past a handful, since the rule would then be teaching people
+to type the bypass. Or if a provider reads a body without a hit from any rule, or
+`npm run guard` can pass on a tree that has a bare `response.text()`.
+
+## A response over the byte cap is an error, never a partial result
+
+**What you see:** a response larger than `--max-response-bytes` (default 64 MiB)
+stops the run with `<provider> response is larger than the <n> bytes serp-axi
+will read`, naming the flag, the env var and the config key, and saying that the
+key is read by `scrape` and `search --provider searxng`. No results are
+printed, even when the first megabyte of the body held a whole valid answer.
+
+**Why:** a JSON document cut off at a byte boundary does not parse, and a cut-off
+page of text looks complete and is wrong. The character caps (`--max-chars`)
+shorten text on purpose and mark each cut with a `<field>TruncatedFrom` count;
+the byte cap protects memory and has no such marker, so it refuses instead. A
+`content-length` over the cap is refused before a byte is read, unless the
+response is compressed: then the header counts wire bytes rather than the
+decoded ones the cap measures, so only the read can decide. Without a usable
+header the read stops the moment the running count passes the cap.
+
+**When this becomes a real bug:** if an over-cap body ever produces output from
+part of it, or if the error does not say how to raise the cap.
+
+## The byte cap counts decoded bytes, and an error body is cut at 64 KiB, not refused
+
+**What you see:** a gzip reply of 1 MiB that expands to 100 MiB is refused at the
+default cap, though only 1 MiB crossed the network (`src/body.socket.test.ts`
+serves exactly that over a real socket). Separately, an error response longer
+than 64 KiB is not an error of its own: only its first 64 KiB is read when the
+CLI quotes it. An unmapped Kagi or Serper status, a Bright Data 400 or unmapped
+status, and a Bright Data dataset-scrape 401/403 put the start of that text in
+the failure message, shortened again by `boundedDetail`. Kagi's mapped 401/403,
+429 and 5xx throw before reading the body at all. Serper reads an error body only
+for a status it does not map: the mapped 403, 429, 404 and 5xx branches decide
+from the status alone and hang up on the body unread. An unmapped body cut at
+64 KiB no longer parses, so that status reports `no details`. If an error body cannot be read at all, the message
+says `(the response body could not be read: <reason>)` where the server's text
+would have gone, and Serper's JSON parse of that sentence fails the same way.
+
+**Why:** `fetch` undoes gzip and brotli before the stream hands over any bytes,
+so the count sees the expanded size, which is what costs memory and what a
+compression bomb attacks. A compressed response's `content-length` counts wire
+bytes, so it is not compared with the decoded cap; the read still enforces the
+cap. An error body only explains a status code the run has already failed on, so
+cutting it loses little and refusing it would replace a useful failure with a
+less useful one. A mapped Serper status does not need the body at all, so reading
+it would delay the error and do I/O for nothing. The marker keeps a failed read
+from looking like a server that said nothing. SearXNG reads no error body at all;
+its errors come from the status code, and it hangs up on the body before
+throwing.
+
+**When this becomes a real bug:** if the count uses compressed bytes, if an error
+body read can throw past the status-code failure it was explaining, or if the
+failed-read marker is empty.
+
+## The `maxResponseBytes` config key is read for scrape and searxng search only
+
+**What you see:** `"maxResponseBytes": 1000` in the config file caps every
+`scrape` run and every `search --provider searxng` run, but a `search --provider
+serper`, `kagi` or `brightdata` run ignores it, and a malformed value
+(`"maxResponseBytes": "big"`) fails the paths that read it and passes the rest.
+`--max-response-bytes` and `SERP_AXI_MAX_RESPONSE_BYTES` apply to all of them.
+The overflow error names the config key only for the paths that read it, so a
+Serper search's advice does not send its reader to a key that cannot affect the
+run.
+
+**Why:** searxng is the one search path that opens the config file, for its URL,
+engines and timeout. The other search providers are configured by flag and env
+var alone, and making them open the file for one key would put a corrupt
+`config.json` in the way of a Serper search that never needed it (see "`runSearch`
+with no config argument reads the real config file" above). It is the same shape
+as the `includeMarkup` key.
+
+**When this becomes a real bug:** if a search provider starts opening the config
+file for another reason, since the key should then apply to it too, or if a path
+that does read the key lets a bad value through.
+
+## The ladder cap bounds the child's read and its reply line
+
+**What you see:** two different failures share the one cap.
+
+A page whose HTTP body is over the cap stops inside the ladder child, which
+reports `ladder response is larger than the <n> bytes serp-axi will read`; the
+run fails with the ladder verdict `error` rather than printing part of the page.
+The child did not read the whole body into memory first.
+
+A reply line that is over the cap even though the page body was under it fails
+differently: `ladder scrape failed: ladder-cli printed a line longer than <n>
+bytes, which serp-axi will not read`. The same run with a larger cap succeeds.
+A malformed `SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` stops a
+`--ladder` run too, as it stops every other scrape.
+
+**Why:** the child reads the network itself, so it cannot rely on the parent's
+line check, which only runs after the page has been serialized. The parent sends
+its resolved cap as `maxResponseBytes` on the request (protocol 4), the rung
+hands it to the isolated child as `--max-bytes`, and the HTTP rung reads the
+body with primp's `iter_bytes` instead of `response.text` or `response.json`.
+The running byte count is checked before each chunk is kept, and the response is
+closed the moment it passes, so the child holds at most the cap plus one chunk
+of a runaway page.
+
+The parent keeps its own check because the two measurements are not the same
+size. The ladder CLI prints each reply as one JSON line: the text after JSON
+escaping, plus the title, the links and the rung metadata. A quote or a newline
+in the page costs two bytes; a non-ASCII character costs its UTF-8 width, because
+the ladder CLI writes with `ensure_ascii=False` (`ladder-cli/ladder_cli/cli.py:256`).
+A page can therefore fit under the body cap and still produce a line over it.
+Every line in a chunk is measured before the chunk is appended, against the
+bytes already pending for the line it extends, and a child over the line cap is
+killed and respawned by the next fetch, because a cut-off line cannot be parsed.
+Measuring every line matters when a chunk begins with a newline (a blank startup
+line, or the end of the previous reply): checking only the first line would count
+zero bytes and let the reply after it through. The same cap bounds the startup
+output before the ready line, so a child that prints without ever ending a line
+is stopped too. This is a different thing from `--max-chars`, which trims text
+after it has been read.
+
+**When this becomes a real bug:** if a body under the cap still fails with the
+child's `larger than` error, or if the child returns a page after reading more
+than the cap (the read lives in `_read_body` in
+`ladder-cli/ladder_cli/rungs/http.py`), or if a page that fits under the cap as
+plain text fails on the parent's line check and the line is not over the cap by
+that count (the byte count lives in `onStdout` in `src/ladder.ts`, and
+`src/ladder.test.ts` pins it at the cap and one byte under), or if a malformed
+cap fails a run before the URL, the binary or the other flags have been checked.
+
+## Test-only modules are left out of the package by name
+
+**What you see:** `src/live.ts`, `src/fixtures.ts` and `src/error-assertions.ts`
+are compiled into `dist/`, and `package.json` `files` lists `!dist/live.js`,
+`!dist/fixtures.js` and `!dist/error-assertions.js` so the published tarball has
+none of them. A new test helper that is not added to that list ships.
+
+**Why:** `files` takes `dist` minus `*.test.js`, and a helper that tests import is
+not named `*.test.ts`. `live.js` was shipping before this was noticed. A test in
+`src/guards.test.ts` finds every non-test module that only test files reach,
+following a helper through another test-only module, and fails unless `files`
+excludes it, so the list cannot fall behind unnoticed.
+
+**When this becomes a real bug:** if `npm pack --dry-run --json` lists a file
+that only tests use, or if the packaging test passes with a helper missing from
+`files`.
+
+## A Bright Data hint can say "Rerun this scrape with --full" and print no command
+
+**What you see:** most truncation hints read ``Run `serp-axi scrape '<url>'
+--provider brightdata --full` to see up to 50000 characters``. For some records
+the hint reads `Rerun this scrape with --full to see up to 50000 characters`
+and shows no command.
+
+**Why:** the command names the record's `url`, then the url this scrape asked for
+(`input.url`, which Bright Data echoes back). A record that carries neither has no
+honest url to print. The hint used to print `'<url>'` there, a command the reader
+could not paste and run, so it now names the flag and leaves the command out
+(`recordUrl` in `src/commands/scrape.ts`).
+
+**When this becomes a real bug:** if a record that does carry `url` or `input.url`
+gets the command-less wording, or if a `<url>` placeholder reaches any hint again.
+
+## The shell-sensitive tests run again with poisoned settings
+
+**What you see:** `npm run check` and CI run the full suite once as `npm test`,
+then rerun only the test files that can see the shell as `npm run
+test:hostile-env`. The rerun has `SERPER_API_KEY`,
+`SERP_AXI_MAX_RESPONSE_BYTES`, the `SERP_AXI_LIVE_*` opt-ins and every other
+variable the source reads set to `/nonexistent/serp-axi-hostile-env`, and an
+empty `HOME` and `XDG_CONFIG_HOME`, so it cannot read the developer's real
+config file either. The 10 live tests are skipped in both runs.
+
+**Why:** the first run cannot see a test that reads the developer's shell or
+config. A clean runner has none of those variables and no config file, so a test
+that forgot to hand `runScrape` or `runSearch` its own env passes there and fails
+on a machine that exports a key. That happened twice before the second run
+existed: `searxng.test.ts` failed 24 of 48 tests under an exported
+`SERP_AXI_MAX_RESPONSE_BYTES`, and two `scrape.test.ts` tests read the shell and
+the real config file. The variable names are scanned from `src/` by
+`scripts/hostile-env.mjs`, so a new setting is poisoned without an edit. The
+files are found from the import graph: a test that names `process.env` or reaches
+a module that does is run, and the real-socket and ast-grep suites that cannot
+see the environment are not run a second time.
+
+**When this becomes a real bug:** if the second run passes while a test still reads
+the shell (a variable under a prefix the script does not scan: add the prefix to
+the shared list in `scripts/env-prefixes.mjs`, which both the script and
+`src/searxng.test.ts` import), if a shell-sensitive test is not selected by the
+import graph, or if the script reports a clean run after finding no names or no
+test files to run (it exits 2 instead).

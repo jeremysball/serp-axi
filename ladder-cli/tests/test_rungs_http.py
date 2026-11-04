@@ -42,8 +42,15 @@ def test_http_fetch_keeps_the_browser_jar_helpers_untouched(monkeypatch, tmp_pat
 
     def get(url, **kwargs):
         calls.append(url)
-        return SimpleNamespace(status_code=200, url=url, headers={},
-                               text="<title>Title</title><p>" + "Content " * 100 + "</p>")
+        html = "<title>Title</title><p>" + "Content " * 100 + "</p>"
+        return SimpleNamespace(
+            status_code=200,
+            url=url,
+            headers={},
+            encoding="utf-8",
+            iter_bytes=lambda chunk_size=None: iter([html.encode()]),
+            close=lambda: None,
+        )
 
     def unexpected_jar_access(*args, **kwargs):
         raise AssertionError("HTTP must not touch the browser JSON jar helpers")
