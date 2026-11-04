@@ -1,6 +1,6 @@
 """What the kernel says about a process, asked in one place.
 
-Three callers need the same two answers: the rung stop (is anything in the group
+Three callers need the same answers: the rung stop (is anything in the group
 still running), the profile lock cleanup (is the owner still running) and the
 display lock check (is the server still there). Each used to carry its own copy
 of the `/proc/<pid>/stat` parse and of the `os.kill(pid, 0)` classification, and
@@ -61,9 +61,13 @@ def read_stat(pid: int) -> Stat:
 def probe(pid: int) -> Liveness:
     """Whether a process with this pid exists, by signal 0, which sends nothing.
 
-    The caller keeps its own check for a pid at or below zero: `kill(0, 0)` and
-    `kill(-1, 0)` mean the caller's own group and everyone, not a process.
+    A pid at or below zero is not a process: `kill(0, 0)` and `kill(-1, 0)` mean
+    the caller's own group and everyone, and both succeed. They are UNKNOWN here,
+    so a lock file that holds `0` or `-1` cannot read as a live owner by way of a
+    caller that forgot to check.
     """
+    if pid <= 0:
+        return Liveness.UNKNOWN
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -71,3 +75,62 @@ def probe(pid: int) -> Liveness:
     except (PermissionError, OverflowError):
         return Liveness.UNKNOWN
     return Liveness.EXISTS
+
+
+def has_running_member(group: int) -> bool:
+    """One pass over /proc: whether a process in the group is running, which a zombie is not.
+
+    A process that is not readable is not taken for gone. Only an exit says "gone"
+    (FileNotFoundError, or ProcessLookupError, which is what reading a stat file
+    raises once the process behind an already-open file has been reaped; or
+    `getpgid` raising ProcessLookupError); any other reason a stat cannot be
+    read, such as a `hidepid` mount or a stat line that does not parse, falls
+    back to `getpgid`, which asks the kernel for the group without needing the
+    read to succeed. If that says the process is in this group, it counts as
+    running, because it cannot be shown to be a zombie. If `getpgid` cannot
+    answer either (EPERM), the process gets no vote.
+
+    If /proc cannot be listed at all, or nothing in it could be classified, the
+    answer is True: the caller already knows something is in the group, and with
+    no way to look closer that stays the answer, so the grace period decides,
+    not a crash and not an early "stopped".
+    """
+    try:
+        entries = [entry for entry in PROC.iterdir() if entry.name.isdigit()]
+    except OSError:
+        return True
+    classified = False
+    for entry in entries:
+        pid = int(entry.name)
+        try:
+            stat = read_stat(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # it exited between the listing and the read
+        except (OSError, ValueError):
+            try:
+                if os.getpgid(pid) == group:
+                    return True
+            except OSError:
+                continue  # ProcessLookupError: it exited; anything else: no answer, so no vote
+            classified = True
+            continue
+        classified = True
+        if stat.pgrp == group and stat.state != "Z":
+            return True
+    return not classified
+
+
+def group_is_running(group: int) -> bool:
+    """Whether anything in the process group is running.
+
+    `killpg(group, 0)` also succeeds while an unreaped zombie is in the group. A
+    rung's grandchild orphaned to a PID 1 that never waits stays one for good,
+    which made every stop spend its whole grace period on a group with nothing
+    running in it. So a group the kernel still knows is read through
+    `has_running_member`, which tells a zombie from a running process.
+    """
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    return has_running_member(group)

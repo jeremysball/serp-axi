@@ -45,7 +45,7 @@ never in CI.
 Testable result: Camoufox, zendriver+CF-click, and headed-Chromium rungs port
 with the spike's measured constants (timeouts, `humanize=True`, allowlist
 site), each with unit tests on recorded fixtures. Escalation order and the
-90s SIGKILL budget asserted per rung.
+90s budget asserted per rung.
 
 Files touched: `ladder-cli/ladder_cli/rungs/camoufox.py`,
 `ladder-cli/ladder_cli/rungs/zendriver.py`, `ladder-cli/ladder_cli/rungs/headed.py`,
@@ -75,9 +75,9 @@ undelivered because the isolated process dies after its fetch.
 Testable result within the corrected scope:
 
 - All live rungs use `run_rung_isolated` and the hard 90s subprocess budget,
-  with process-group SIGKILL on timeout
-  (`ladder-cli/ladder_cli/cli.py:62-103,178-180`). There is no inline soft
-  SIGALRM route.
+  with a process-group stop on timeout: SIGTERM, then SIGKILL after
+  `STOP_GRACE_S` (`ladder-cli/ladder_cli/cli.py`, `_stop_group`;
+  `ladder-cli/ladder_cli/stopping.py`). There is no inline soft SIGALRM route.
 - Unwired audio helpers load lazily and cache only within their own process.
   `answer_rounds` uses `islice` to consume at most `MAX_ROUNDS` clips
   (`ladder-cli/ladder_cli/rungs/whisper.py:42-47,66-78`). They are not a live

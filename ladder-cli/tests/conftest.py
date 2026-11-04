@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -52,6 +54,46 @@ class Recorder(list):
 
     def names(self) -> list[str]:
         return [entry[0] for entry in self]
+
+
+def reaped_pid() -> int:
+    """A pid that belonged to a real process which has exited and been reaped.
+
+    Linux hands pids out in increasing order and reuses one only after the counter
+    wraps `pid_max`, so a pid freed a moment ago stays free for the length of a
+    test. This checks that instead of trusting it, with a bare `os.kill` and not
+    `procfs.probe`, so the tests that assert `probe` calls such a pid gone are not
+    checking it against itself.
+    """
+    for _ in range(5):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        try:
+            os.kill(child.pid, 0)
+        except ProcessLookupError:
+            return child.pid
+    pytest.fail("a pid stayed taken after the process that held it was reaped, five times running")
+
+
+def unreaped_child(*, own_group: bool = True) -> subprocess.Popen:
+    """A child that has exited and not been reaped: a zombie, by default alone in a group of its own.
+
+    The caller reaps it with `.wait()`. `os.waitid(..., WNOWAIT)` waits for the exit
+    without collecting it, which is what leaves the zombie.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=own_group)
+    os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+    return child
+
+
+def write_fake_stat(root: Path, pid: int, state: str, pgrp: int, comm: str = "name") -> None:
+    """One `/proc/<pid>/stat` under `root`, in the shape a real kernel writes.
+
+    Twelve fields rather than the six `read_stat` reads, so a test that builds a
+    process table feeds the parser the line it gets in production.
+    """
+    (root / str(pid)).mkdir()
+    (root / str(pid) / "stat").write_text(f"{pid} ({comm}) {state} 1 {pgrp} {pgrp} 0 -1 4194560 0 0 0 0\n")
 
 
 def inject_module(monkeypatch, name: str, module):

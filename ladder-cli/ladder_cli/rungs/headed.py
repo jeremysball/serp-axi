@@ -18,9 +18,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from .. import procfs
-from ..stopping import stop_with_grace
-from . import STOP_GRACE_S, RungContext, RungResult, zendriver
+from .. import procfs, stopping
+from . import RungContext, RungResult, zendriver
 
 # ladder.py:82 `headless=not headed` with headed True
 HEADLESS = False
@@ -37,6 +36,10 @@ XVFB_SETTLE_S = 1.5
 XVFB_DISPLAY_LOW = 200
 XVFB_DISPLAY_HIGH = 699
 XVFB_READY_TIMEOUT_S = 10.0
+# Where Xvfb keeps a display's files: the lock `.X<n>-lock` here, the socket
+# `X<n>` under `.X11-unix/` in it. A name, not a literal at each use, so every
+# reader derives the same two paths and a test can point them at a scratch directory.
+X11_ROOT = Path("/tmp")
 # What a lock may hold before it is not one Xvfb wrote. Xvfb writes `"%10d\n"`,
 # eleven bytes (read off a real server's lock, 2026-11-02). The bound is looser
 # than that on purpose: it is there to refuse a file with more in it, not to
@@ -44,14 +47,18 @@ XVFB_READY_TIMEOUT_S = 10.0
 LOCK_MAX_BYTES = 64
 
 
-# What Xvfb prints when another server holds the slot. The first is the lock
-# (a live pid in it), the second the socket (something already listening, which
-# a dead lock does not show). Both are the slot being taken, not Xvfb being broken.
-XVFB_COLLISION_MESSAGES = ("Server is already active for display", "server already running")
-
-
 class _DisplayCollision(RuntimeError):
     pass
+
+
+def lock_path(number: int) -> Path:
+    """The lock file Xvfb writes for display `number`, and removes on a clean stop."""
+    return X11_ROOT / f".X{number}-lock"
+
+
+def socket_path(number: int) -> Path:
+    """The unix socket Xvfb listens on for display `number`."""
+    return X11_ROOT / ".X11-unix" / f"X{number}"
 
 
 def display_for_pid(pid: int) -> str:
@@ -107,31 +114,61 @@ def _lock_is_held(lock: Path) -> bool:
         raise
     except (OSError, ValueError):
         return True
-    if owner != os.getuid() or pid <= 0:
+    if owner != os.getuid():
         return True
     # A zombie counts as held: it still occupies the pid, and Xvfb treats a lock
-    # whose pid answers signal 0 as active.
+    # whose pid answers signal 0 as active (checked against a real server on
+    # 2026-11-03: it exits 1, "Server is already active for display"). A pid at or
+    # below zero is UNKNOWN to `probe`, so a lock holding `0` is held too.
     return procfs.probe(pid) is not procfs.Liveness.GONE
 
 
-def display_is_free(number: int) -> bool:
-    """Xvfb's own lock, which is what a second server on the slot would fail on.
+def _reclaim_zombie_lock(number: int) -> None:
+    """Remove the lock of a server that has died and was never reaped.
 
-    A lock only counts while its server is alive; a socket with no lock at all
-    still counts, since nothing says whose it is. A slot whose lock says free is
-    asked one more question: does anything answer on its socket. A dead lock
+    Xvfb starts over a lock whose pid is gone, but not over one whose pid is a
+    zombie, and a zombie nobody reaps stays one: this CLI is PID 1's grandchild
+    in a container whose PID 1 never waits, and an Xvfb it had to SIGKILL after
+    its rung child was killed too is orphaned to that PID 1. Nothing else would
+    ever remove such a lock, and each one would take a slot for good. Only a lock
+    of ours naming a process that is a zombie is removed; anything else, a
+    running server included, is left alone.
+    """
+    lock = lock_path(number)
+    try:
+        owner, pid = _read_lock(lock)
+        state = procfs.read_stat(pid).state
+    except (OSError, ValueError):
+        return  # no lock, not a lock we can vouch for, or its owner is not a process we can read
+    if owner == os.getuid() and state == "Z":
+        lock.unlink(missing_ok=True)
+
+
+def display_is_free(number: int) -> bool:
+    """Whether a second server on the slot would start: Xvfb's own lock, then its socket.
+
+    A lock only counts while its server is alive. Whatever the lock says, the
+    socket is asked one more question: does anything answer on it. A dead lock
     beside a live listener is another server's slot (review finding G6), and
     Xvfb refuses it ("server already running", exit 1, checked against a real
     server on 2026-11-03 with a stand-in listener on the abstract address), so
-    claiming it only buys a failed start.
+    claiming it only buys a failed start. A socket file with nothing listening
+    and no lock is not a server: Xvfb starts over it (same day, a real server
+    came up over such a file and removed it on SIGTERM), so it does not hold the
+    slot either, and enough of them would have used up the 500 slots.
+
+    A connect that fails for a reason other than "nothing is there" cannot say,
+    and a slot is only offered with proof that it is free, so that is not free.
     """
     try:
-        if _lock_is_held(Path(f"/tmp/.X{number}-lock")):
+        if _lock_is_held(lock_path(number)):
             return False
     except FileNotFoundError:
-        if Path(f"/tmp/.X11-unix/X{number}").exists():
-            return False
-    return not _accepts_connections(number)
+        pass
+    try:
+        return not _accepts_connections(number)
+    except OSError:
+        return False
 
 
 def free_display(preferred: str) -> int:
@@ -145,6 +182,7 @@ def free_display(preferred: str) -> int:
     start = int(preferred.lstrip(":"))
     for offset in range(high - low + 1):
         candidate = low + (start - low + offset) % (high - low + 1)
+        _reclaim_zombie_lock(candidate)
         if display_is_free(candidate):
             return candidate
     raise RuntimeError(f"no free Xvfb display between :{low} and :{high}")
@@ -169,6 +207,10 @@ def display(url: str, options: dict[str, Any], ctx: RungContext | None = None) -
     preferred = display_for_pid(os.getpid())
     for _ in range(XVFB_DISPLAY_HIGH - XVFB_DISPLAY_LOW + 1):
         number = free_display(preferred)
+        # No `start_new_session`: Xvfb stays in this process's group. A rung is run
+        # in a group of its own (`cli.run_rung_isolated`), so a stop of the rung
+        # reaches the display server with the group's SIGTERM, which lets it remove
+        # its lock, and with the group's SIGKILL when it will not.
         process = subprocess.Popen(
             xvfb_command(number),
             stdout=subprocess.DEVNULL,
@@ -188,9 +230,13 @@ def display(url: str, options: dict[str, Any], ctx: RungContext | None = None) -
                 os.environ.pop("DISPLAY", None)
             else:
                 os.environ["DISPLAY"] = previous
-            _stop_display(process)
-            if process.stderr is not None:
-                process.stderr.close()
+            try:
+                _stop_display(process)
+            finally:
+                # `_stop_display` raises for a server that survives SIGKILL; the pipe
+                # it was reading is closed either way.
+                if process.stderr is not None:
+                    process.stderr.close()
     raise RuntimeError("all Xvfb display allocations collided")
 
 
@@ -205,7 +251,11 @@ def _stop_display(process: subprocess.Popen) -> None:
     group's stop, so a SIGTERM that `main` turns into SystemExit during the wait
     still kills the server. What is particular to a display is here: it is a
     child with a handle, so "gone" is `Popen.wait`, which returns the instant it
-    exits, and the kill is followed by the wait that reaps it.
+    exits, and the kill is followed by the wait that reaps it. That wait is bounded
+    by the grace period as well: a server in uninterruptible sleep (a `/tmp` on a
+    stalled mount, where it removes its lock) ignores SIGKILL until the call
+    returns, and waiting without a limit would hold the rung's result for as long.
+    It raises instead, so the failure is reported rather than the rung hanging.
     """
 
     def wait_gone(seconds: float) -> bool:
@@ -217,9 +267,14 @@ def _stop_display(process: subprocess.Popen) -> None:
 
     def kill() -> None:
         process.kill()
-        process.wait()
+        try:
+            process.wait(timeout=stopping.STOP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"Xvfb (pid {process.pid}) did not exit within {stopping.STOP_GRACE_S:g}s of SIGKILL"
+            ) from None
 
-    stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)
+    stopping.stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill)
 
 
 def _lock_names(lock: Path, pid: int) -> bool:
@@ -230,26 +285,33 @@ def _lock_names(lock: Path, pid: int) -> bool:
         return False
 
 
-def _accepts_connections(number: int) -> bool:
+def _accepts_connections(number: int, timeout_s: float = 1.0) -> bool:
     """Whether something answers a connect on the display's socket.
 
     The lock is written before the server binds its socket, so a lock naming our
-    pid does not mean a client can connect yet. Measured against a real Xvfb on
-    2026-11-03: of 200 starts, 39 showed the lock before the socket, by 0.012 to
-    0.071 ms on an idle machine. A connect that succeeds is the proof, and both
+    pid does not mean a client can connect yet (the measurement is in
+    docs/things-that-look-like-bugs.md, "Rung 4 treats a display as ready…").
+    A connect that succeeds is the proof, and both
     addresses are tried because Xvfb listens on the socket file and on the Linux
     abstract socket of the same name, and where it cannot create the file (a
     read-only or foreign `/tmp/.X11-unix`, which it tolerates) only the abstract
     one exists. The connection is closed without a word; the server drops a
     client that never sends its setup request.
+
+    Only "nothing is there" answers False: no such socket file, or one that
+    refuses the connection (a file left behind, or an abstract name nobody
+    holds). Any other failure (a connect that timed out on a full backlog, a
+    permission error) is raised as the OSError it is, because it does not say
+    the slot is empty and a caller that read it as empty would hand out a slot
+    that is in use.
     """
-    path = os.fspath(Path(f"/tmp/.X11-unix/X{number}"))
+    path = os.fspath(socket_path(number))
     for address in (path, "\0" + path):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-            probe.settimeout(1.0)
+            probe.settimeout(timeout_s)
             try:
                 probe.connect(address)
-            except OSError:
+            except (FileNotFoundError, ConnectionRefusedError):
                 continue
             return True
     return False
@@ -271,13 +333,24 @@ def _await_display(number: int, process: subprocess.Popen) -> None:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             stderr = (process.stderr.read() if process.stderr else b"").decode(errors="replace").strip()
-            if any(message in stderr for message in XVFB_COLLISION_MESSAGES):
+            # Whether another server holds the slot is asked of the slot, the way
+            # the search asked it, and not read off the words Xvfb printed: those
+            # change between versions and wrappers, and a miss turned a lost race
+            # for one slot into a failed rung with 499 free.
+            if not display_is_free(number):
                 raise _DisplayCollision(f"Xvfb :{number} was claimed by another server")
             raise RuntimeError(f"Xvfb :{number} exited immediately: {stderr or process.returncode}")
-        if _lock_names(Path(f"/tmp/.X{number}-lock"), process.pid):
-            locked = True
-            if _accepts_connections(number):
-                return
+        # A lock that names this server cannot name anything else while it runs, so
+        # it is read until it does and not again.
+        locked = locked or _lock_names(lock_path(number), process.pid)
+        if locked:
+            try:
+                # The connect is held to the time left, or a slot that never answers
+                # could run the wait past its own deadline.
+                if _accepts_connections(number, timeout_s=max(0.0, min(1.0, deadline - time.monotonic()))):
+                    return
+            except OSError:
+                pass  # it cannot say yet; the loop asks again until the deadline, which reports it
         time.sleep(0.05)
     if locked:
         raise RuntimeError(f"Xvfb :{number} wrote its lock but never accepted a connection within {XVFB_READY_TIMEOUT_S:g}s")

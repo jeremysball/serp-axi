@@ -107,27 +107,24 @@ live rung, or the response claims rung 5 ran when only rung 4 was attempted.
 at 90 to 95 seconds, not at 90.
 
 **Why:** the rung's process group gets SIGTERM first and up to
-`STOP_GRACE_S` (5 seconds, `ladder_cli/rungs/__init__.py`, the one value the
-group stop and the display stop both read) to stop before SIGKILL. Rung 4 runs
-an Xvfb display server. On SIGTERM Xvfb removes its own `/tmp/.X<n>-lock` and
+`STOP_GRACE_S` (5 seconds, `ladder_cli/stopping.py`, the one value the group
+stop and the display stop both read) to stop before SIGKILL. Rung 4 runs an
+Xvfb display server. On SIGTERM Xvfb removes its own `/tmp/.X<n>-lock` and
 socket; SIGKILL left both behind on every timeout. The wait ends as soon as
 nothing in the group is still running, so a rung that stops promptly costs
 nothing extra. A zombie does not count as running: under a PID 1 that never
 waits, a rung's orphaned grandchild stays one for good.
 
-"Nothing is running" is read off `/proc` twice in a row, because one scan is
-not atomic: a child forked after the listing is in neither the listing nor the
-answer, and a stop that called the group empty would skip the SIGKILL. The
-second scan starts after the first ended, so one missed fork is caught. That
-narrows the window and does not close it: a child that forks again and exits
-inside the first scan can still be in neither. The last step closes the rest:
-when the scans say the group is empty, `_stop_group` sends it one SIGKILL
-anyway, but only while the group leader has not been reaped. The leader is not
-reaped inside the wait (`communicate()` does that afterwards) so that its pid
-stays allocated, and a pid number is not handed to another process while any
-task still uses it as a pid or a group id. That last line is reasoned from how
-the kernel allocates pids, not tested here; what is tested is that the signal
-is sent in the missed-member case and is not sent once the leader is reaped
+"Nothing is running" is read off `/proc`, and a scan of it is not atomic: a
+child forked and gone again between the scan's reads is in no listing, so a
+stop that called the group empty could skip a member it never saw. The last step
+covers that. When the wait says the group is empty, `_stop_group` sends it one
+more SIGKILL, but only while the group leader has not been reaped. The leader is
+not reaped inside the wait (`_reap` does that afterwards) so that its pid stays
+allocated, and a pid number is not handed to another process while any task
+still uses it as a pid or a group id. That last line is reasoned from how the
+kernel allocates pids, not tested here; what is tested is that the signal is
+sent in the missed-member case and is not sent once the leader is reaped
 (`test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped`,
 `test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped`). A `/proc`
 that cannot be listed, or a scan that classified no process at all, counts as
@@ -139,6 +136,53 @@ in the first `killpg` itself), if the wait runs the full 5 seconds when nothing
 is left running, if a group is called stopped while a member that cannot be
 read is still in it, if the last SIGKILL is sent after the leader has been
 reaped, or if a timed-out rung 4 leaves a lock behind for a pid that is dead.
+
+## Stopping a rung can wait 5 seconds twice, and the grace period has no knob
+
+**What you see:** a rung that ignores SIGTERM and whose pipes a straggler holds
+open can keep the CLI for up to 10 seconds past the 90-second budget: up to 5
+for the group to stop, then up to 5 more in `_reap`. `STOP_GRACE_S` is a
+constant, not a flag, environment variable or config key. The parent's
+120-second request cap does not wait for either: it resets the child with
+`child.kill()` (`src/ladder.ts:526`, SIGTERM), which `main` turns into
+`SystemExit` (`ladder_cli/cli.py:330`), so a stop in progress is interrupted and
+finishes through the same `finally` that kills the group.
+
+**Why:** both waits are bounded by the same value. The group's stop ends as soon
+as nothing in it is running, and `_reap` only waits when something outside the
+group holds the pipes, so the worst case is a sum of two bounded waits and not
+an unbounded one. (The display stop has its own bounded wait after SIGKILL, but
+it runs inside the rung's own process, on a path where the rung is ending by
+itself, and the parent's stop reaches Xvfb through the shared group instead.) No
+knob exists because nothing has needed a different value yet; the house rule is a flag, an
+environment variable and a config key together, and adding all three for a value
+no run has had to change would be three new surfaces to document. The 5 seconds
+is a bound for something that does not stop when asked, not a measured stop time
+(`ladder_cli/stopping.py` says so beside the constant).
+
+**When this becomes a real bug:** if a stop runs longer than the sum of its
+bounded waits, if the parent's 120-second cap resets the child during a stop and
+the group is left running (read from the code above, not tested end to end), or
+if someone needs a longer or shorter grace period
+for a real rung and has no way to set one (then add the triplet).
+
+## A straggler outside the group cannot hang the CLI, and its output is dropped
+
+**What you see:** after a timed-out rung, `_reap` gives `communicate()` the grace
+period and then kills the leader and closes the pipes, even though the pipes had
+not reached end of file. Anything the rung printed after the timeout is gone.
+
+**Why:** `communicate()` returns only at end of file on both pipes. A descendant
+that left the group (`setsid`, a double fork) and inherited them holds them open
+for as long as it lives, and the group's SIGKILL cannot reach it, so an unbounded
+`communicate()` would hold the resident CLI for that long. A stopped rung's
+output is not used (the result is the budget error), so nothing the CLI reports
+is lost. Covered by
+`test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes`.
+
+**When this becomes a real bug:** if a rung that finished normally has its
+output cut off by this path, or if a timed-out rung's output starts to be used
+in the result.
 
 ## The display stop and the rung-group stop share a routine and differ in how they wait
 
@@ -158,16 +202,18 @@ zombie from a running process, and has to survive a SIGTERM landing mid-wait.
 Giving the display that poll would add a loop where a wait suffices, and giving
 the group the display's wait would watch only the group leader and miss a
 grandchild removing its own lock. The grace period is one constant,
-`rungs.STOP_GRACE_S`, read at call time by both callers.
-`test_the_display_and_the_rung_group_are_given_one_grace_period` pins that
-`headed`, `cli` and `rungs` hold the same value (with distinct stand-ins so a
-copied literal cannot pass), and that each stop waits for it.
+`stopping.STOP_GRACE_S`, read when the stop runs and not passed in as a
+parameter, so there is no second copy to drift.
+`test_the_grace_period_is_read_when_the_stop_runs_and_is_not_a_parameter` pins
+that, and `test_the_display_waits_for_the_one_grace_period_the_group_stop_uses`
+pins that the display's wait is that value and not a copy.
 
 **When this becomes a real bug:** if either stop stops going through
-`stop_with_grace`, if a third stop appears that copies the routine instead of
-calling it, or if a SIGTERM landing during either wait leaves the server or the
-group running (`test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it`
-and the two real-process SIGTERM tests in `tests/test_cli.py`).
+`stop_with_grace` (`test_the_display_and_the_rung_group_are_stopped_by_the_one_routine`),
+if a third stop appears that copies the routine instead of calling it, or if a
+SIGTERM landing during either wait leaves the server or the group running
+(`test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it` and the
+two real-process SIGTERM tests in `tests/test_cli.py`).
 
 ## A display slot with a lock we cannot prove dead is skipped, never reclaimed
 
@@ -176,8 +222,9 @@ nothing is using, yet the headed rung steps over them. With enough of them it
 fails with `no free Xvfb display between :200 and :699`.
 
 **Why:** a slot is taken back only when its lock names a pid that no longer
-exists and the lock belongs to the current user. A lock owned by someone else
-sits in a sticky `/tmp`, where we cannot remove it, so the slot is not ours to take.
+exists (or a zombie, below) and the lock belongs to the current user. A lock
+owned by someone else sits in a sticky `/tmp`, where we cannot remove it, so the
+slot is not ours to take.
 A lock that is empty, garbled, longer than 64 bytes, names a pid too large to
 probe, or is not a regular file at all (a FIFO, a symlink, a directory) is
 skipped for the same reason: claiming a slot needs proof, not a lack of proof.
@@ -186,23 +233,64 @@ Xvfb writes eleven bytes (`"%10d\n"`, read off a real server's lock on
 64 bytes would take the number at the front of it for a server's pid. Such a
 lock is never opened in a way that waits, so a FIFO planted in `/tmp` cannot
 hang the search. A dead server's pid that the kernel has since handed to
-another process also reads as held, and so does a pid that is a zombie: a real
-Xvfb refuses to start over a lock naming one ("Server is already active",
-checked 2026-11-02). A lock for a dead pid that we own is reclaimed, because
-Xvfb starts over it (checked against a real server, over both a leftover lock
-and its socket), unless something is listening on the slot's socket. A dead
-lock beside a live listener is another server's slot: a real Xvfb started
-there exits 1 with "server already running" (checked 2026-11-03, with a
+another process also reads as held. A lock for a dead pid that we own is
+reclaimed, because Xvfb starts over it (checked against a real server, over both
+a leftover lock and its socket), unless something is listening on the slot's
+socket. A dead lock beside a live listener is another server's slot: a real Xvfb
+started there exits 1 with "server already running" (checked 2026-11-03, with a
 stand-in listener on the abstract address), so `display_is_free` connects to
-the socket before it calls the slot free, and `display()` treats that message
-like the lock-side "Server is already active" and moves to the next slot
-instead of failing the rung.
+the socket before it calls the slot free.
+
+A lock naming a zombie is the one held lock that is reclaimed. A real Xvfb
+refuses to start over it (rc 1, "Server is already active for display ...
+remove /tmp/.X<n>-lock", checked 2026-11-03), and a zombie nobody reaps stays
+one: this CLI runs under a PID 1 that may never wait, and an Xvfb that was
+SIGKILLed after its rung child was killed too is orphaned to that PID 1.
+Nothing else would ever remove its lock, and each one would take a slot for good,
+so `free_display` removes the lock first (`_reclaim_zombie_lock`), and only when
+the lock is ours and its pid is a zombie. A running server, another user's lock
+and anything unreadable are left alone. The read and the unlink are two steps; a
+lock that goes away between them is not an error (`missing_ok`).
+`test_only_a_zombies_lock_is_reclaimed`,
+`test_the_slot_search_reclaims_a_zombies_lock_and_offers_the_slot` and the
+real-server `test_a_lock_naming_a_zombie_is_held_until_it_is_reclaimed_and_then_the_real_server_starts`
+cover it.
+
+A socket file with no lock and nothing listening does not hold its slot either.
+A real Xvfb started over one, wrote its own lock, and removed both on SIGTERM
+(rc 0, checked 2026-11-03), and enough such files would have used up the 500
+slots. The slot is free unless something answers on the socket
+(`test_a_socket_file_with_no_lock_holds_its_slot_only_while_something_listens_on_it`,
+and the real-server `test_a_real_xvfb_starts_over_a_socket_file_left_by_a_killed_server`).
+
+When a server we start exits at once, `_await_display` decides whether another
+server won the slot by asking `display_is_free`, not by reading the words Xvfb
+printed: those change between versions and wrappers, and a miss turned a lost
+race for one slot into a failed rung with 499 free. A lost race moves to the
+next slot; any other early exit fails the rung.
 
 **When this becomes a real bug:** if a lock we own that names a dead pid is
 skipped while nothing listens on its socket, since that is the leak this exists
 to close, if the headed rung reports no free display while fewer than 500 slots
 hold a live, foreign, or unreadable lock or a live listener, or if a slot
 taken by another server fails the rung instead of moving on.
+
+## A rung 4 whose Xvfb survives SIGKILL raises instead of returning its page
+
+**What you see:** a headed fetch that had its page fails with `Xvfb (pid N) did
+not exit within 5s of SIGKILL`, and the rung reports `error`.
+
+**Why:** a server in uninterruptible sleep (a `/tmp` on a stalled mount, where it
+removes its lock) ignores SIGKILL until the call returns. `_stop_display` waits
+for it after the kill, and without a limit that wait would hold the rung's
+result for as long as the mount stays stalled. It waits `STOP_GRACE_S` and then
+raises, so the failure is named and the rung is not left hanging. The raise
+comes out of the `with` block that held the page, so the page is dropped with
+it. Covered by
+`test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap`.
+
+**When this becomes a real bug:** if the error is raised for a server that did
+exit, or if a rung that has nothing wrong with its display reports it.
 
 ## Rung 4 treats a display as ready when its lock names the server and a connect succeeds
 

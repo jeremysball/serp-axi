@@ -44,7 +44,7 @@ def test_collection_error_is_an_invalid_mutation(gate, monkeypatch, tmp_path, ca
     monkeypatch.setattr(gate, "PYTEST", [sys.executable, "-m", "pytest", "-q"])
     monkeypatch.setattr(gate, "BELIEFS", [gate.Belief(
         name="collection errors are not surviving beliefs", path=target,
-        old="VALUE = 1", new="VALUE = (", test="test_case.py::test_value",
+        old="VALUE = 1", new="VALUE = (", tests=("test_case.py::test_value",),
         why="A collection error cannot establish whether the assertion detects the mutation.",
     )])
     monkeypatch.setattr(sys, "argv", ["mutations.py"])
@@ -128,6 +128,34 @@ def test_test_process_writes_are_confined_to_scratch(gate, monkeypatch, tmp_path
     assert after == before
 
 
+def test_a_unix_socket_under_a_tests_tmp_path_can_be_bound_inside_the_gate(gate, monkeypatch, tmp_path):
+    """The gate's scratch path must leave a test room for a socket in its own tmp_path.
+
+    A unix socket path holds 107 bytes. The scratch directory, the redirected
+    TMPDIR and pytest's own `pytest-of-<user>/pytest-N/<test name>0` already fill
+    most of that, and a test that binds `.X11-unix/X301` under its tmp_path then
+    fails with "AF_UNIX path too long" on clean code, which the gate reports as an
+    invalid belief. Twelve beliefs read that way until the gate gave pytest a short
+    base directory. The test name below is as long as pytest keeps (30 characters).
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "test_case.py").write_text(
+        "import socket\n"
+        "def test_a_slot_is_free_once_the_server_that_locked_it_is_gone(tmp_path):\n"
+        "    address = tmp_path / '.X11-unix' / 'X301'\n"
+        "    address.parent.mkdir()\n"
+        "    with socket.socket(socket.AF_UNIX) as server:\n"
+        "        server.bind(str(address))\n"
+    )
+    monkeypatch.setattr(gate, "LADDER", checkout)
+    monkeypatch.setattr(gate, "PYTEST", [sys.executable, "-m", "pytest", "-q"])
+
+    outcome, last = gate.run_tests("test_case.py")
+
+    assert outcome == "pass", last
+
+
 def test_killing_a_running_mutant_preserves_checkout_source(gate, tmp_path):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -159,7 +187,7 @@ mutations.PYTEST = [sys.executable, '-m', 'pytest', '-q']
 mutations.BELIEFS = [mutations.Belief(
     'interruption preserves checkout source',
     mutations.LADDER / 'test_case.py', 'VALUE = 1', 'VALUE = 2',
-    'test_case.py::test_value', 'A killed gate must not strand a mutant.')]
+    ('test_case.py::test_value',), 'A killed gate must not strand a mutant.')]
 sys.argv = ['mutations.py']
 sys.exit(mutations.main())
 """

@@ -245,17 +245,20 @@ def clear_locks(profile_dir: Path) -> int:
         pid = int(pid_text)
     except (OSError, ValueError) as error:
         raise RuntimeError(f"profile lock owner is unknown: {lock}") from error
-    if host != socket.gethostname() or pid <= 0:
+    if host != socket.gethostname():
         raise RuntimeError(f"profile lock is not a verifiable local owner: {lock}")
     liveness = procfs.probe(pid)
     if liveness is procfs.Liveness.UNKNOWN:
-        # The pid is someone else's, or does not fit a pid_t, so it cannot be asked about.
+        # The pid is someone else's, does not fit a pid_t, or is not a pid at all
+        # (zero and below), so it cannot be asked about.
         raise RuntimeError(f"profile lock owner cannot be checked: {lock}")
     if liveness is procfs.Liveness.EXISTS:
         # A zombie exists to `probe` but has exited, so its lock is stale: only a
         # running owner (or one whose state cannot be read) keeps the lock.
         try:
             state = procfs.read_stat(pid).state
+        except (FileNotFoundError, ProcessLookupError):
+            state = "Z"  # it exited between the probe and the read: the proof the lock needs
         except (OSError, ValueError) as error:
             raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
         if state != "Z":

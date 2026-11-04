@@ -8,9 +8,11 @@ generic mutation tool.
 
 A generic sweep reports surviving MUTANTS. This reports surviving BELIEFS. Every
 entry below is one sentence this codebase holds to be true, paired with the
-smallest edit that makes it false and the exact test that must go red when it
-is. If a belief survives, that test is hollow: it agrees with the code rather
-than with the claim.
+smallest edit that makes it false and the tests that must go red when it is.
+A belief held from more than one side lists every one of them, and each is run
+alone against the mutant: the belief is killed only if all of them go red. If a
+belief survives, at least one listed test is hollow: it agrees with the code
+rather than with the claim, and the report names which.
 
 That distinction is the whole point. When this file caught a real defect, the
 report read "no rung carries its own budget SURVIVED", which names a false thing
@@ -49,13 +51,22 @@ PYTEST = ["uv", "run", "--frozen", "--extra", "test", "pytest", "-q"]
 
 @dataclass(frozen=True)
 class Belief:
-    """One sentence the suite claims to hold, plus the edit that falsifies it."""
+    """One sentence the suite claims to hold, plus the edit that falsifies it.
+
+    `tests` is every test that claims to notice this edit, and each one is run on
+    its own against the mutant: the belief is killed only if all of them go red.
+    One edit is sometimes guarded from more than one side (the wait, the kill,
+    the order), and a belief that stopped at the first red test would let the
+    others rot into agreeing with the code. Two beliefs with the same edit are a
+    mistake for the same reason, so `main` refuses the pair and the second test
+    is listed here instead.
+    """
 
     name: str
     path: Path
     old: str
     new: str
-    test: str
+    tests: tuple[str, ...]
     why: str
 
 
@@ -66,7 +77,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/__init__.py",
         old='    "zendriver_headed_cf": headed,',
         new='',
-        test="tests/test_escalation.py::test_every_rung_in_the_climb_is_reachable",
+        tests=("tests/test_escalation.py::test_every_rung_in_the_climb_is_reachable",),
         why="A rung in RUNGS with no module is a dead step: the climb reaches for nothing.",
     ),
     Belief(
@@ -74,7 +85,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/__init__.py",
         old='RUNGS: tuple[str, ...] = ("http", "camoufox", "zendriver_cf", "zendriver_headed_cf")',
         new='RUNGS: tuple[str, ...] = ("camoufox", "http", "zendriver_cf", "zendriver_headed_cf")',
-        test="tests/test_escalation.py::test_the_climb_starts_cheap_and_only_reaches_for_a_browser_when_it_must",
+        tests=("tests/test_escalation.py::test_the_climb_starts_cheap_and_only_reaches_for_a_browser_when_it_must",),
         why="The 80-in-100 case pays rung 1's cost alone, so a browser first is the wrong order.",
     ),
     Belief(
@@ -82,7 +93,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/cli.py",
         old="DEFAULT_RUNG_TIMEOUT_S = 90.0",
         new="DEFAULT_RUNG_TIMEOUT_S = 1.0",
-        test="tests/test_escalation.py::test_every_rung_is_killed_by_the_same_measured_budget",
+        tests=("tests/test_escalation.py::test_every_rung_is_killed_by_the_same_measured_budget",),
         why="90s is the measured budget. A different number is a claim with no measurement behind it.",
     ),
     Belief(
@@ -90,7 +101,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/cli.py",
         old="    budget = DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s",
         new='    budget = 5.0 if rung == "http" else (DEFAULT_RUNG_TIMEOUT_S if timeout_s is None else timeout_s)',
-        test="tests/test_escalation.py::test_no_rung_carries_its_own_budget",
+        tests=("tests/test_escalation.py::test_no_rung_carries_its_own_budget",),
         why="One deadline, one owner. A per-rung budget gives one deadline two owners.",
     ),
     # ---- unwired audio helpers cache only within their own process ----
@@ -99,7 +110,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="_model: Any | None = None",
         new="_model: Any | None = object()",
-        test="tests/test_rungs_whisper.py::test_importing_the_module_loads_nothing",
+        tests=("tests/test_rungs_whisper.py::test_importing_the_module_loads_nothing",),
         why="Importing optional audio helpers must leave the model unloaded.",
     ),
     Belief(
@@ -107,7 +118,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="    if _model is None:",
         new="    if True:",
-        test="tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",
+        tests=("tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",),
         why="Repeated helper calls should not reconstruct their model.",
     ),
     Belief(
@@ -115,7 +126,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="        _model = _build(device=DEVICE, compute_type=COMPUTE_TYPE)",
         new="        _build(device=DEVICE, compute_type=COMPUTE_TYPE)",
-        test="tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",
+        tests=("tests/test_rungs_whisper.py::test_the_helper_reuses_one_model_within_its_process",),
         why="Discarding the constructed model makes the next helper call rebuild it.",
     ),
     Belief(
@@ -123,7 +134,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/__init__.py",
         old='"zendriver_headed_cf")',
         new='"zendriver_headed_cf", "whisper")',
-        test="tests/test_escalation.py::test_ceiling_five_stops_at_the_last_implemented_rung",
+        tests=("tests/test_escalation.py::test_ceiling_five_stops_at_the_last_implemented_rung",),
         why="An unwired audio helper must not become a duplicate browser attempt.",
     ),
     Belief(
@@ -131,7 +142,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old='MODEL_NAME = "base.en"',
         new='MODEL_NAME = "tiny.en"',
-        test="tests/test_rungs_whisper.py::test_the_construction_carries_the_measured_arguments",
+        tests=("tests/test_rungs_whisper.py::test_the_construction_carries_the_measured_arguments",),
         why="A constant ported from a measured run is a claim about that run.",
     ),
     Belief(
@@ -139,7 +150,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="load().transcribe(path, language=LANGUAGE, beam_size=BEAM_SIZE)",
         new="load().transcribe(path, language=LANGUAGE)",
-        test="tests/test_rungs_whisper.py::test_transcription_carries_the_measured_arguments",
+        tests=("tests/test_rungs_whisper.py::test_transcription_carries_the_measured_arguments",),
         why="q5_audio.py:47 pinned beam_size=5; dropping it is a silent decode change.",
     ),
     Belief(
@@ -147,7 +158,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old='    return re.sub(r"[^a-z0-9 ]", "", transcript.lower()).strip()',
         new="    return transcript.lower().strip()",
-        test="tests/test_rungs_whisper.py::test_the_answer_is_the_measured_sanitised_form_of_the_transcript",
+        tests=("tests/test_rungs_whisper.py::test_the_answer_is_the_measured_sanitised_form_of_the_transcript",),
         why="The challenge field wants only the words and digits it asked for.",
     ),
     Belief(
@@ -155,7 +166,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/whisper.py",
         old="islice(clips, MAX_ROUNDS)",
         new="list(clips)",
-        test="tests/test_rungs_whisper.py::test_the_measured_loop_stops_at_three_clips_no_matter_how_many_are_offered",
+        tests=("tests/test_rungs_whisper.py::test_the_measured_loop_stops_at_three_clips_no_matter_how_many_are_offered",),
         why="q5_audio.py:42 stopped at three; answering a fourth is a different run.",
     ),
     # ---- the cookie jar is filtered, on both sides ----
@@ -164,7 +175,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old='KEEP: tuple[str, ...] = ("cf_clearance", "_px3", "_pxhd", "datadome")',
         new='KEEP: tuple[str, ...] = ("cf_clearance", "_px3", "_pxhd")',
-        test="tests/test_jars.py::test_only_the_defence_cookies_the_spike_kept_are_kept",
+        tests=("tests/test_jars.py::test_only_the_defence_cookies_the_spike_kept_are_kept",),
         why="solver_probe.py:27 named four; a browsing cookie has no business here.",
     ),
     Belief(
@@ -172,7 +183,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old='    return scope == base or scope.endswith("." + base)',
         new="    return scope.endswith(base)",
-        test="tests/test_jars.py::test_the_domain_match_stops_at_a_label_boundary",
+        tests=("tests/test_jars.py::test_the_domain_match_stops_at_a_label_boundary",),
         why='"evil-example.com".endswith("example.com") is true: lookalikes get in.',
     ),
     Belief(
@@ -180,7 +191,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="judge = zendriver.judge",
         new='judge = lambda page: zendriver.judge({"title": "", "text": "", "status": 404})',
-        test="tests/test_fixture_replay.py::test_the_browser_rungs_apply_one_set_of_rules",
+        tests=("tests/test_fixture_replay.py::test_the_browser_rungs_apply_one_set_of_rules",),
         why="A page judged twice must not read differently because it climbed twice.",
     ),
     Belief(
@@ -188,7 +199,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/zendriver.py",
         old='        return asyncio.run(_fetch(url, {**options, "user_data_dir": str(profile)}, ctx))',
         new='        return asyncio.run(_fetch(url, {**options, "user_data_dir": str(prepare_profile(headed=not options["headless"]))}, ctx))',
-        test="tests/test_rungs_zendriver.py::test_browser_launch_uses_the_exact_profile_already_leased",
+        tests=("tests/test_rungs_zendriver.py::test_browser_launch_uses_the_exact_profile_already_leased",),
         why="Selecting the profile again can move the browser away from the directory protected by the lease.",
     ),
     Belief(
@@ -203,7 +214,7 @@ BELIEFS: list[Belief] = [
             + "        return None"
         ),
         new='    return url.split("/")[2]',
-        test="tests/test_jars.py::test_a_url_the_filter_cannot_scope_is_rejected_rather_than_crashed",
+        tests=("tests/test_jars.py::test_a_url_the_filter_cannot_scope_is_rejected_rather_than_crashed",),
         why="A raw string split raises IndexError on a scheme-less URL and keeps :port in the scope.",
     ),
     Belief(
@@ -211,7 +222,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old="    return extracted.top_domain_under_public_suffix",
         new='    return ".".join(host.split(".")[-2:])',
-        test="tests/test_jars.py::test_a_multi_label_public_suffix_is_not_treated_as_the_base_domain",
+        tests=("tests/test_jars.py::test_a_multi_label_public_suffix_is_not_treated_as_the_base_domain",),
         why="Two labels turns www.bbc.co.uk into co.uk and lets every .co.uk sibling through.",
     ),
     Belief(
@@ -219,7 +230,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old="    return filter_cookies(cookies, url)",
         new="    return cookies",
-        test="tests/test_jars.py::test_loading_a_jar_re_applies_the_filter_rather_than_trusting_the_file",
+        tests=("tests/test_jars.py::test_loading_a_jar_re_applies_the_filter_rather_than_trusting_the_file",),
         why="A jar is data on disk and anything can widen one by hand.",
     ),
     Belief(
@@ -227,7 +238,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old='    "SingletonSocket",' + chr(10) + ")",
         new='    "SingletonSocket",' + chr(10) + '    "never-existed",' + chr(10) + ")",
-        test="tests/test_jars.py::test_a_killed_browser_leaves_no_lock_behind_for_the_next_launch",
+        tests=("tests/test_jars.py::test_a_killed_browser_leaves_no_lock_behind_for_the_next_launch",),
         why="The test pins the measured five names; a sixth must not pass as five.",
     ),
     Belief(
@@ -235,7 +246,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old='    return profile_dir / f"{name}.cookies.json"',
         new='    return profile_dir / f"{name}.cookies.dat"',
-        test="tests/test_jars.py::test_the_jar_path_is_named_after_the_profile_and_says_json",
+        tests=("tests/test_jars.py::test_the_jar_path_is_named_after_the_profile_and_says_json",),
         why="zendriver's .cookies.dat is a pickle; this module writes JSON under its own name.",
     ),
     # ---- the request's jars reach the browser ----
@@ -244,7 +255,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/cli.py",
         old='        jar_in=Path(request.jarIn) if request.jarIn is not None else None,',
         new='        jar_in=None,',
-        test="tests/test_cli.py::test_the_requests_jar_paths_reach_the_runner",
+        tests=("tests/test_cli.py::test_the_requests_jar_paths_reach_the_runner",),
         why="The parent sent jarIn/jarOut and dispatch dropped both on the floor.",
     ),
     Belief(
@@ -252,7 +263,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/cli.py",
         old='        args += ["--jar-in", str(ctx.jar_in)]',
         new="        args += []",
-        test="tests/test_cli.py::test_an_isolated_child_is_told_the_jars_on_its_command_line",
+        tests=("tests/test_cli.py::test_an_isolated_child_is_told_the_jars_on_its_command_line",),
         why="A subprocess cannot see the parent's memory; argv is the handoff.",
     ),
     Belief(
@@ -260,7 +271,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/zendriver.py",
         old="        jars.clear_locks(profile)",
         new="        pass",
-        test="tests/test_rungs_zendriver.py::test_a_stale_profile_lock_is_cleared_before_the_browser_starts",
+        tests=("tests/test_rungs_zendriver.py::test_a_stale_profile_lock_is_cleared_before_the_browser_starts",),
         why="clear_locks was tested on its own and called by nothing, so launches still stalled.",
     ),
     Belief(
@@ -268,7 +279,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/zendriver.py",
         old="            await browser.cookies.set_all([_cookie_param(cookie) for cookie in carried])",
         new="            pass",
-        test="tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",
+        tests=("tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",),
         why="A jar loaded after the page arrives replays nothing.",
     ),
     Belief(
@@ -276,7 +287,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/zendriver.py",
         old="            jars.save(ctx.jar_out, (_jar_cookie(cookie) for cookie in earned), url)",
         new="            pass",
-        test="tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",
+        tests=("tests/test_rungs_zendriver.py::test_the_carried_jar_is_loaded_before_the_page_and_earned_cookies_saved_before_stop",),
         why="Chrome flushes cookies lazily and stop() kills it first, which is why the jar exists.",
     ),
     # ---- rung 4 gives its virtual display back ----
@@ -285,7 +296,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/procfs.py",
         old="    except ProcessLookupError:\n        return Liveness.GONE\n",
         new="    except ProcessLookupError:\n        return Liveness.EXISTS\n",
-        test="tests/test_rungs_headed.py::test_a_slot_is_free_once_the_server_that_locked_it_is_gone",
+        tests=("tests/test_rungs_headed.py::test_a_slot_is_free_once_the_server_that_locked_it_is_gone",),
         why="A lock left by a killed Xvfb takes its slot for good, and 500 headed fetches later rung 4 finds no display.",
     ),
     Belief(
@@ -293,34 +304,61 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="    except (OSError, ValueError):\n        return True\n",
         new="    except (OSError, ValueError):\n        return False\n",
-        test="tests/test_rungs_headed.py::test_a_lock_that_does_not_name_a_pid_is_treated_as_held",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_does_not_name_a_pid_is_treated_as_held",),
         why="Claiming a slot needs proof its server is dead; a lock we cannot read could be a live server mid-write.",
     ),
     Belief(
         name="a display is asked to stop before it is killed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    stop_with_grace(term=process.terminate,",
-        new="    stop_with_grace(term=process.kill,",
+        old="    stopping.stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill)\n",
+        new="    stopping.stop_with_grace(term=process.kill, wait_gone=wait_gone, kill=kill)\n",
         # A fake process, not the real-Xvfb test: this gate runs under a read-only
         # bwrap root where Xvfb cannot write /tmp/.X<n>-lock, so a real server
         # never comes up. The real-server version runs in the ordinary suite.
-        test="tests/test_rungs_headed.py::test_the_display_is_reaped_on_success_too",
+        tests=(
+            "tests/test_rungs_headed.py::test_the_display_is_reaped_on_success_too",
+            "tests/test_rungs_headed.py::test_a_server_that_exits_on_sigterm_is_not_killed",
+        ),
         why="Xvfb removes its own lock and socket on SIGTERM; SIGKILL leaves both behind on every fetch.",
     ),
     Belief(
         name="a display that ignores the request to stop is killed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    def kill() -> None:\n        process.kill()\n        process.wait()\n",
-        new="    def kill() -> None:\n        pass\n",
-        test="tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",
+        old="        process.kill()\n        try:\n            process.wait(timeout=stopping.STOP_GRACE_S)\n",
+        new="        try:\n            process.wait(timeout=stopping.STOP_GRACE_S)\n",
+        tests=("tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",),
         why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
+    ),
+    Belief(
+        name="the display's stderr pipe is closed even when the stop raises",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="            try:\n                _stop_display(process)\n            finally:\n",
+        new="            if True:\n                _stop_display(process)\n            if True:\n",
+        tests=("tests/test_rungs_headed.py::test_the_stderr_pipe_is_closed_even_when_the_display_could_not_be_reaped",),
+        why="`_stop_display` raises for a server that survives SIGKILL, and a close that comes after it leaks the pipe once per unkillable server in a resident CLI.",
+    ),
+    Belief(
+        name="the wait after SIGKILL is bounded, and by the one grace period",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="            process.wait(timeout=stopping.STOP_GRACE_S)\n        except subprocess.TimeoutExpired:\n            raise RuntimeError(",
+        new="            process.wait(timeout=5.0)\n        except subprocess.TimeoutExpired:\n            raise RuntimeError(",
+        tests=("tests/test_rungs_headed.py::test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap",),
+        why="Review finding F13: a server in uninterruptible sleep ignores SIGKILL, and a wait without a limit held the rung's result for as long. A number of its own is the second copy of the grace period.",
+    ),
+    Belief(
+        name="a server that will not die after SIGKILL is raised, not swallowed",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="        except subprocess.TimeoutExpired:\n            raise RuntimeError(\n",
+        new="        except subprocess.TimeoutExpired:\n            return\n            raise RuntimeError(\n",
+        tests=("tests/test_rungs_headed.py::test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap",),
+        why="Review finding F13: the bounded wait is only better than the unbounded one if its failure is reported.",
     ),
     Belief(
         name="a display lock whose owner cannot be asked about is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="    return procfs.probe(pid) is not procfs.Liveness.GONE\n",
         new="    return procfs.probe(pid) is procfs.Liveness.EXISTS\n",
-        test="tests/test_rungs_headed.py::test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held",
+        tests=("tests/test_rungs_headed.py::test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held",),
         why="Only a pid that is shown to be gone frees a slot; one that cannot be asked about (too large for a pid_t, or someone else's) is not shown to be anything.",
     ),
     Belief(
@@ -328,31 +366,42 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="        text = os.read(fd, LOCK_MAX_BYTES + 1)\n",
         new="        text = os.read(fd, LOCK_MAX_BYTES)\n",
-        test="tests/test_rungs_headed.py::test_a_lock_longer_than_xvfb_writes_is_treated_as_held",
+        tests=("tests/test_rungs_headed.py::test_a_lock_longer_than_xvfb_writes_is_treated_as_held",),
         why="A read capped at the bound cannot tell a file of exactly that length from a longer one, so the number at the front of a longer file passed for a server's pid.",
     ),
     Belief(
         name="a display lock another user owns is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    if owner != os.getuid() or pid <= 0:\n        return True\n",
-        new="    if pid <= 0:\n        return True\n",
-        test="tests/test_rungs_headed.py::test_a_lock_we_could_not_remove_is_treated_as_held",
+        old="    if owner != os.getuid():\n        return True\n",
+        new="    if False:\n        return True\n",
+        tests=("tests/test_rungs_headed.py::test_a_lock_we_could_not_remove_is_treated_as_held",),
         why="/tmp is sticky, so a lock we do not own is one nothing of ours can clear; its slot is not ours to take.",
     ),
     Belief(
         name="a display lock that vanishes mid-check falls back to the socket",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old='    except FileNotFoundError:\n        if Path(f"/tmp/.X11-unix/X{number}").exists():\n            return False\n',
-        new="    except FileNotFoundError:\n        pass\n",
-        test="tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",
+        old="    except FileNotFoundError:\n        pass\n    try:\n        return not _accepts_connections(number)\n",
+        new="    except FileNotFoundError:\n        return True\n    try:\n        return not _accepts_connections(number)\n",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",),
         why="A lock removed between the check and the read says nothing about a socket that is still there.",
+    ),
+    Belief(
+        name="an absent display lock is not a held one",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except FileNotFoundError:\n        raise\n    except (OSError, ValueError):\n        return True\n",
+        new="    except (OSError, ValueError):\n        return True\n",
+        tests=(
+            "tests/test_rungs_headed.py::test_a_socket_file_with_no_lock_holds_its_slot_only_while_something_listens_on_it",
+            "tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",
+        ),
+        why="`_lock_is_held` raises FileNotFoundError so the caller decides what no lock means; folding it into 'unreadable' would read every slot without a lock as taken.",
     ),
     Belief(
         name="a display is ready only when its lock names the server we started",
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="        return _read_lock(lock)[1] == pid\n",
         new="        return _read_lock(lock)[1] > 0\n",
-        test="tests/test_rungs_headed.py::test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one",
+        tests=("tests/test_rungs_headed.py::test_readiness_waits_for_the_lock_the_new_server_wrote_not_a_stale_one",),
         why="A slot reclaimed from a dead server still holds the old pid; reading that as ready starts the browser early.",
     ),
     Belief(
@@ -360,7 +409,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW",
         new="os.O_RDONLY | os.O_NOFOLLOW",
-        test="tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[fifo]",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[fifo]",),
         why="/tmp is shared; opening a FIFO for reading blocks until a writer shows up, which would hang the slot search for good.",
     ),
     Belief(
@@ -368,7 +417,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW",
         new="os.O_RDONLY | os.O_NONBLOCK",
-        test="tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[symlink]",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[symlink]",),
         why="A link is read as whatever it points at, so a planted one could name any dead pid and free a slot that is not ours.",
     ),
     Belief(
@@ -376,71 +425,78 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="        if not stat.S_ISREG(status.st_mode):\n",
         new="        if False:\n",
-        test="tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[fifo-holding-a-dead-pid]",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_is_not_a_plain_file_is_held_and_never_waited_on[fifo-holding-a-dead-pid]",),
         why="Xvfb writes a regular file; a FIFO that happens to hold a dead pid is not evidence that a server died.",
     ),
     Belief(
-        name="both stops wait for the one shared grace period",
-        path=LADDER / "ladder_cli/rungs/headed.py",
-        old="kill=kill, grace_s=STOP_GRACE_S)",
-        new="kill=kill, grace_s=5.0)",
-        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_given_one_grace_period",
-        why="Two constants for one wait drift apart; the comment on rungs.STOP_GRACE_S says there is only one.",
-    ),
-    Belief(
-        name="the rung group's stop waits for the one shared grace period",
-        path=LADDER / "ladder_cli/cli.py",
-        old="kill=kill, grace_s=STOP_GRACE_S)",
-        new="kill=kill, grace_s=5.0)",
-        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
-        why="The group stop is the other reader of rungs.STOP_GRACE_S; a number of its own is the drift the shared constant exists to prevent.",
+        name="both stops wait for the one grace period, read when the stop runs",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="        gone = wait_gone(STOP_GRACE_S)\n",
+        new="        gone = wait_gone(5.0)\n",
+        tests=(
+            "tests/test_stopping.py::test_the_grace_period_is_read_when_the_stop_runs_and_is_not_a_parameter",
+            "tests/test_rungs_headed.py::test_the_display_waits_for_the_one_grace_period_the_group_stop_uses",
+        ),
+        why="Two constants for one wait drift apart (review findings F09 and F10); `stopping.STOP_GRACE_S` is the one home and a copy of its value cannot follow a change to it.",
     ),
     Belief(
         name="the display stop goes through the shared stop routine",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)\n",
-        new="    process.terminate()\n    if not wait_gone(STOP_GRACE_S):\n        kill()\n",
-        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
+        old="    stopping.stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill)\n",
+        new="    process.terminate()\n    if not wait_gone(stopping.STOP_GRACE_S):\n        kill()\n",
+        tests=("tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",),
         why="Review findings G8 and H9: a second copy of the TERM-then-KILL loop is how the display lost the group's kill-in-a-finally.",
     ),
     Belief(
         name="the rung group stop goes through the shared stop routine",
         path=LADDER / "ladder_cli/cli.py",
-        old="        stop_with_grace(term=term, wait_gone=wait_gone, kill=kill, grace_s=STOP_GRACE_S)\n",
-        new="        term()\n        if not wait_gone(STOP_GRACE_S):\n            kill()\n",
-        test="tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",
+        old=(
+            "        stopping.stop_with_grace(\n"
+            "            term=lambda: _signal_group(group, signal.SIGTERM),\n"
+            "            wait_gone=wait_gone,\n"
+            "            kill=lambda: _signal_group(group, signal.SIGKILL),\n"
+            "        )\n"
+        ),
+        new=(
+            "        _signal_group(group, signal.SIGTERM)\n"
+            "        if not wait_gone(stopping.STOP_GRACE_S):\n"
+            "            _signal_group(group, signal.SIGKILL)\n"
+        ),
+        tests=("tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",),
         why="Review findings G8 and H9, from the group's side.",
     ),
     Belief(
-        name="a SIGTERM landing while the display is stopping still kills it",
+        name="a SIGTERM landing while something is stopping still kills it",
         path=LADDER / "ladder_cli/stopping.py",
         old="    finally:\n        if not gone:\n            kill()\n",
         new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
-        test="tests/test_rungs_headed.py::test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it",
-        why="`main` turns SIGTERM into SystemExit, which can land in the wait; the display stop had no kill that survived it (review finding H9).",
+        # One edit, three sides: the routine on its own, the display through it, and
+        # a real rung group through it. Two beliefs with the same edit would be
+        # reported as one, so the other tests are listed here and each must go red.
+        tests=(
+            "tests/test_stopping.py::test_a_sigterm_that_lands_in_the_wait_still_kills_and_still_surfaces",
+            "tests/test_rungs_headed.py::test_a_sigterm_that_lands_while_the_display_is_stopping_still_kills_it",
+            "tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",
+        ),
+        why="`main` turns SIGTERM into SystemExit, which can land in the wait; the kill must not depend on the wait finishing (review finding H9).",
     ),
     Belief(
-        name="the shared stop kills even when the wait is interrupted",
+        name="the request to stop is inside the try that holds the kill",
         path=LADDER / "ladder_cli/stopping.py",
-        old="    finally:\n        if not gone:\n            kill()\n",
-        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
-        test="tests/test_stopping.py::test_a_sigterm_that_lands_in_the_wait_still_kills_and_still_surfaces",
-        why="The routine's own guarantee, checked without a real process: a SystemExit out of the wait must not skip the kill.",
-    ),
-    Belief(
-        name="the shared stop kills even when the request to stop is interrupted",
-        path=LADDER / "ladder_cli/stopping.py",
-        old="    try:\n        term()\n        gone = wait_gone(grace_s)\n",
-        new="    term()\n    try:\n        gone = wait_gone(grace_s)\n",
-        test="tests/test_stopping.py::test_a_sigterm_that_lands_in_the_request_to_stop_still_kills_and_still_surfaces",
-        why="The routine's own guarantee for the other call: the request is inside the try that owes the kill.",
+        old="    try:\n        term()\n        gone = wait_gone(STOP_GRACE_S)\n",
+        new="    term()\n    try:\n        gone = wait_gone(STOP_GRACE_S)\n",
+        tests=(
+            "tests/test_stopping.py::test_a_sigterm_that_lands_in_the_request_to_stop_still_kills_and_still_surfaces",
+            "tests/test_cli.py::test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it",
+        ),
+        why="`main` turns SIGTERM into SystemExit, which can surface in the first request; outside the try, nothing is left to send the SIGKILL.",
     ),
     Belief(
         name="the shared stop asks before it waits",
         path=LADDER / "ladder_cli/stopping.py",
-        old="        term()\n        gone = wait_gone(grace_s)\n",
-        new="        gone = wait_gone(grace_s)\n        term()\n",
-        test="tests/test_stopping.py::test_a_target_that_stops_when_asked_is_never_killed",
+        old="        term()\n        gone = wait_gone(STOP_GRACE_S)\n",
+        new="        gone = wait_gone(STOP_GRACE_S)\n        term()\n",
+        tests=("tests/test_stopping.py::test_a_target_that_stops_when_asked_is_never_killed",),
         why="Waiting out the grace period before asking stops nothing and kills everything that would have stopped on request.",
     ),
     # ---- a slot is free when nothing answers on it, whatever its lock says ----
@@ -449,24 +505,32 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old="    return not _accepts_connections(number)\n",
         new="    return True\n",
-        test="tests/test_rungs_headed.py::test_a_dead_lock_beside_a_live_listener_does_not_free_the_slot",
+        tests=("tests/test_rungs_headed.py::test_a_dead_lock_beside_a_live_listener_does_not_free_the_slot",),
         why="A stale lock says its own server is gone, not that nobody else is listening; a real Xvfb on such a slot exits 'server already running' (review finding G6).",
     ),
     Belief(
-        name="xvfb saying a server is already running is a collision not a failure",
+        name="an early exit on a slot that is taken is a collision whatever Xvfb said",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old='XVFB_COLLISION_MESSAGES = ("Server is already active for display", "server already running")',
-        new='XVFB_COLLISION_MESSAGES = ("Server is already active for display",)',
-        test="tests/test_rungs_headed.py::test_xvfb_saying_a_server_is_already_running_is_a_collision_not_a_failure",
-        why="The socket-side collision message means the slot is taken; treating it as a broken Xvfb fails the rung instead of trying the next slot.",
+        old="            if not display_is_free(number):\n                raise _DisplayCollision(",
+        new="            if False:\n                raise _DisplayCollision(",
+        tests=("tests/test_rungs_headed.py::test_an_early_exit_is_a_collision_when_the_slot_is_taken_and_a_failure_when_it_is_not",),
+        why="Review finding F29: the slot is asked, not Xvfb's words; a lost race for one slot must try the next, not fail the rung with 499 free.",
+    ),
+    Belief(
+        name="an early exit on a slot that is free is a failure whatever Xvfb said",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="            if not display_is_free(number):\n                raise _DisplayCollision(",
+        new="            if True:\n                raise _DisplayCollision(",
+        tests=("tests/test_rungs_headed.py::test_an_early_exit_is_a_collision_when_the_slot_is_taken_and_a_failure_when_it_is_not",),
+        why="The other half of the pair: an Xvfb that cannot start on an empty slot is broken, and retrying another slot would loop over a fault that is not the slot's.",
     ),
     # ---- a display is ready when it answers, not when its lock appears ----
     Belief(
         name="a display is not ready until a connect to its socket succeeds",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="            if _accepts_connections(number):\n                return\n",
-        new="            if True:\n                return\n",
-        test="tests/test_rungs_headed.py::test_readiness_waits_for_a_socket_that_answers_not_just_the_lock",
+        old="                if _accepts_connections(number, timeout_s=max(0.0, min(1.0, deadline - time.monotonic()))):\n                    return\n",
+        new="                if True:\n                    return\n",
+        tests=("tests/test_rungs_headed.py::test_readiness_waits_for_a_socket_that_answers_not_just_the_lock",),
         why="Xvfb writes its lock before it binds its socket (39 of 200 real starts); a browser pointed at it in that gap cannot connect (review finding G4).",
     ),
     Belief(
@@ -474,112 +538,167 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/rungs/headed.py",
         old='    for address in (path, "\\0" + path):\n',
         new="    for address in (path,):\n",
-        test="tests/test_rungs_headed.py::test_readiness_accepts_a_display_that_only_listens_on_the_abstract_socket",
+        tests=("tests/test_rungs_headed.py::test_readiness_accepts_a_display_that_only_listens_on_the_abstract_socket",),
         why="Xvfb tolerates a /tmp/.X11-unix it cannot write and serves on the abstract socket alone; requiring the file would break that working setup.",
+    ),
+    # ---- a display slot held by a zombie is reclaimed, and only a zombie's ----
+    Belief(
+        name="only a zombie's display lock is reclaimed",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old='    if owner == os.getuid() and state == "Z":\n',
+        new="    if owner == os.getuid():\n",
+        tests=("tests/test_rungs_headed.py::test_only_a_zombies_lock_is_reclaimed",),
+        why="Review finding F02: a running server's lock is a live server and a reaped owner's lock is `display_is_free`'s to call free; unlinking either takes a slot out from under a working Xvfb.",
+    ),
+    Belief(
+        name="a lock owned by another user is never reclaimed",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old='    if owner == os.getuid() and state == "Z":\n',
+        new='    if state == "Z":\n',
+        tests=("tests/test_rungs_headed.py::test_only_a_zombies_lock_is_reclaimed",),
+        why="/tmp is sticky, so a lock another user wrote is not ours to remove; the unlink would fail or, with the sticky bit off, take someone else's slot.",
+    ),
+    Belief(
+        name="the slot search reclaims a zombie's lock before it asks if the slot is free",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="        _reclaim_zombie_lock(candidate)\n",
+        new="        pass\n",
+        tests=("tests/test_rungs_headed.py::test_the_slot_search_reclaims_a_zombies_lock_and_offers_the_slot",),
+        why="Real Xvfb refuses a lock that names a zombie (rc 1, measured 2026-11-03), so without the call every such slot is lost for as long as the zombie is.",
+    ),
+    Belief(
+        name="Xvfb stays in the rung's process group",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="            xvfb_command(number),\n            stdout=subprocess.DEVNULL,\n            stderr=subprocess.PIPE,\n",
+        new="            xvfb_command(number),\n            stdout=subprocess.DEVNULL,\n            stderr=subprocess.PIPE,\n            start_new_session=True,\n",
+        tests=("tests/test_rungs_headed.py::test_xvfb_is_started_in_the_rungs_own_process_group",),
+        why="Review finding F36: the group's SIGTERM and SIGKILL are what reach an Xvfb the display's own stop never got to; a session of its own puts it out of their reach.",
     ),
     # ---- a rung that blows its budget is stopped, not just removed ----
     Belief(
         name="a rung's process group is asked to stop before it is killed",
         path=LADDER / "ladder_cli/cli.py",
-        old="            os.killpg(group, signal.SIGTERM)\n",
-        new="            os.killpg(group, signal.SIGKILL)\n",
-        test="tests/test_cli.py::test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first",
+        old="            term=lambda: _signal_group(group, signal.SIGTERM),\n",
+        new="            term=lambda: _signal_group(group, signal.SIGKILL),\n",
+        tests=("tests/test_cli.py::test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first",),
         why="Xvfb leaves its lock file behind on SIGKILL, so every rung 4 timeout burned a display slot for good.",
-    ),
-    Belief(
-        name="the first request to stop is inside the try that holds the kill",
-        path=LADDER / "ladder_cli/stopping.py",
-        old="    try:\n        term()\n        gone = wait_gone(grace_s)\n",
-        new="    term()\n    try:\n        gone = wait_gone(grace_s)\n",
-        test="tests/test_cli.py::test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it",
-        why="`main` turns SIGTERM into SystemExit, which can surface in the first killpg; outside the try, nothing is left to send the SIGKILL.",
     ),
     Belief(
         name="a rung is not done until everything it started has stopped",
         path=LADDER / "ladder_cli/cli.py",
-        old="            if not _group_exists(group):\n",
+        old="            if not procfs.group_is_running(group):\n",
         new="            if process.poll() is not None:\n",
-        test="tests/test_cli.py::test_a_rung_is_not_done_until_what_it_started_has_finished_stopping",
+        tests=("tests/test_cli.py::test_a_rung_is_not_done_until_what_it_started_has_finished_stopping",),
         why="The rung's own process dying says nothing about a display server still removing its lock.",
     ),
     Belief(
-        name="a rung group that ignores the request to stop is killed",
+        name="a rung group that ignores the request to stop is killed on the way out of an interrupted stop",
         path=LADDER / "ladder_cli/cli.py",
-        old="    def kill() -> None:\n        try:\n            os.killpg(group, signal.SIGKILL)\n",
-        new="    def kill() -> None:\n        try:\n            os.killpg(group, signal.SIGTERM)\n",
-        test="tests/test_cli.py::test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period",
-        why="Asking first must not let a rung that will not stop hold the budget open indefinitely.",
-    ),
-    Belief(
-        name="a second SIGTERM during the stop still kills what ignored the first",
-        path=LADDER / "ladder_cli/stopping.py",
-        old="    finally:\n        if not gone:\n            kill()\n",
-        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
-        test="tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",
-        why="`main` turns SIGTERM into SystemExit, which can land in the wait; the kill must not depend on the wait finishing.",
+        old="            kill=lambda: _signal_group(group, signal.SIGKILL),\n",
+        new="            kill=lambda: _signal_group(group, signal.SIGTERM),\n",
+        # Only the interrupted stop is listed. On the path that is not interrupted the
+        # SIGKILL after `stop_with_grace` (the next belief) sends the same signal at the
+        # same moment, so `kill` is redundant there and a test of that path cannot tell
+        # the two apart: it would pass on this mutant, and listing it would make the
+        # gate report a hollow test that is really an equivalent mutant.
+        tests=("tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",),
+        why="Asking first must not let a rung that will not stop outlive a stop that was cut short; on that path nothing after the routine runs.",
     ),
     Belief(
         name="a member the scans missed is killed before the group is called stopped",
         path=LADDER / "ladder_cli/cli.py",
-        old="                if process.returncode is None:\n                    kill()\n                return True\n",
-        new="                return True\n",
-        test="tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",
-        why="A fork that lands between two /proc scans is in neither, and calling the group stopped then leaves it running (review finding H2); the last SIGKILL is the only thing that does not depend on the listing.",
+        old="        if process.returncode is None:\n            _signal_group(group, signal.SIGKILL)\n",
+        new="        if False:\n            _signal_group(group, signal.SIGKILL)\n",
+        tests=("tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",),
+        why="A fork that lands between two /proc reads is in no listing, and calling the group stopped then leaves it running (review finding H2); the last SIGKILL is the only thing that does not depend on the listing.",
     ),
     Belief(
         name="the last SIGKILL is not sent once the leader has been reaped",
         path=LADDER / "ladder_cli/cli.py",
-        old="                if process.returncode is None:\n",
-        new="                if True:\n",
-        test="tests/test_cli.py::test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped[0-0]",
+        old="        if process.returncode is None:\n            _signal_group(group, signal.SIGKILL)\n",
+        new="        if True:\n            _signal_group(group, signal.SIGKILL)\n",
+        tests=("tests/test_cli.py::test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped[0-0]",),
         why="An unreaped leader holds the group id; after it is reaped the number can belong to an unrelated process, which a SIGKILL would hit.",
     ),
     Belief(
-        name="a zombie left in a stopped group is not waited on",
+        name="a reap that has waited the grace period gives up on the pipes",
         path=LADDER / "ladder_cli/cli.py",
-        old="    return _has_live_member(group)\n",
+        old="        process.communicate(timeout=stopping.STOP_GRACE_S)\n",
+        new="        process.communicate()\n",
+        tests=(
+            "tests/test_cli.py::test_reap_reads_for_the_grace_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
+            "tests/test_cli.py::test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes",
+        ),
+        why="A descendant that left the group and inherited the pipes holds them open as long as it lives; an unbounded read hangs the resident CLI on it.",
+    ),
+    Belief(
+        name="a reap that gave up closes the pipes it was reading",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        for pipe in (process.stdout, process.stderr):\n            if pipe is not None:\n                pipe.close()\n",
+        new="",
+        tests=(
+            "tests/test_cli.py::test_reap_reads_for_the_grace_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
+            "tests/test_cli.py::test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes",
+        ),
+        why="Killing the leader does not close the read ends held in this process; left open they are a descriptor leak per timed-out rung in a CLI that stays resident.",
+    ),
+    # ---- what the kernel says about a group, asked in one place ----
+    Belief(
+        name="a zombie left in a stopped group is not waited on",
+        path=LADDER / "ladder_cli/procfs.py",
+        old="    return has_running_member(group)\n",
         new="    return True\n",
-        test="tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
+        tests=(
+            "tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
+            "tests/test_procfs.py::test_a_group_holding_only_a_zombie_is_not_running_though_killpg_still_finds_it",
+        ),
         why="Under a PID 1 that never waits, an orphaned grandchild is a zombie for good; counting it makes every stop spend the whole grace period.",
     ),
     Belief(
         name="a zombie in the group does not count as running",
-        path=LADDER / "ladder_cli/cli.py",
+        path=LADDER / "ladder_cli/procfs.py",
         old='        if stat.pgrp == group and stat.state != "Z":\n',
         new="        if stat.pgrp == group:\n",
-        test="tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
+        tests=(
+            "tests/test_cli.py::test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period",
+            "tests/test_procfs.py::test_a_running_process_in_the_group_keeps_it_running_and_a_zombie_does_not",
+        ),
         why="Same cost as the belief above, reached through the scan itself: a zombie is the stop's answer, not a reason to wait.",
     ),
     Belief(
-        name="a group is not called stopped on one empty scan",
-        path=LADDER / "ladder_cli/cli.py",
-        old="    return _scan_for_live_member(group) or _scan_for_live_member(group)\n",
-        new="    return _scan_for_live_member(group)\n",
-        test="tests/test_cli.py::test_a_group_is_not_called_stopped_on_one_empty_scan_alone",
-        why="A scan of /proc is not atomic: a child forked after the listing is missed, and calling the group stopped then skips the SIGKILL.",
-    ),
-    Belief(
         name="a group member whose state cannot be read is asked about its group directly",
-        path=LADDER / "ladder_cli/cli.py",
+        path=LADDER / "ladder_cli/procfs.py",
         old="                if os.getpgid(pid) == group:\n                    return True\n",
         new="                pass\n",
-        test="tests/test_cli.py::test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone",
+        tests=(
+            "tests/test_procfs.py::test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone",
+            "tests/test_procfs.py::test_only_an_exit_reads_as_gone_and_any_other_failed_read_asks_the_kernel[unparseable]",
+            "tests/test_procfs.py::test_only_an_exit_reads_as_gone_and_any_other_failed_read_asks_the_kernel[refused]",
+        ),
         why="An unreadable stat is not an exit; counting it as gone lets a hidepid mount or a malformed line skip the SIGKILL.",
     ),
     Belief(
+        name="a stat read that fails with ProcessLookupError is an exit",
+        path=LADDER / "ladder_cli/procfs.py",
+        old="        except (FileNotFoundError, ProcessLookupError):\n            continue  # it exited between the listing and the read\n",
+        new="        except FileNotFoundError:\n            continue  # it exited between the listing and the read\n",
+        tests=("tests/test_procfs.py::test_only_an_exit_reads_as_gone_and_any_other_failed_read_asks_the_kernel[reaped-behind-an-open-file]",),
+        why="Reading a stat through a handle opened before the process was reaped raises ProcessLookupError, not FileNotFoundError (measured 2026-11-03); the arm is reachable, and without it an exit reads as an unreadable stat.",
+    ),
+    Belief(
         name="a /proc that cannot be listed leaves the group counted as running",
-        path=LADDER / "ladder_cli/cli.py",
+        path=LADDER / "ladder_cli/procfs.py",
         old="    except OSError:\n        return True\n    classified = False\n",
         new="    except ValueError:\n        return True\n    classified = False\n",
-        test="tests/test_cli.py::test_a_group_is_taken_to_be_running_when_proc_cannot_be_listed",
+        tests=("tests/test_procfs.py::test_a_group_is_taken_to_be_running_when_proc_cannot_be_listed",),
         why="`iterdir` raising turned a stop on a host without /proc into a crash with the rung still running.",
     ),
     Belief(
         name="a /proc with nothing classifiable leaves the group counted as running",
-        path=LADDER / "ladder_cli/cli.py",
+        path=LADDER / "ladder_cli/procfs.py",
         old="    return not classified\n",
         new="    return False\n",
-        test="tests/test_cli.py::test_a_group_is_taken_to_be_running_when_nothing_in_proc_could_be_classified",
+        tests=("tests/test_procfs.py::test_a_group_is_taken_to_be_running_when_nothing_in_proc_could_be_classified",),
         why="`killpg` already said something is in the group; a scan that read nothing has not shown it gone.",
     ),
     # ---- what the kernel says about a process, asked in one place ----
@@ -588,7 +707,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/procfs.py",
         old='text.rsplit(")", 1)[1]',
         new='text.split(")", 1)[1]',
-        test="tests/test_procfs.py::test_read_stat_takes_the_state_and_group_after_the_last_parenthesis",
+        tests=("tests/test_procfs.py::test_read_stat_takes_the_state_and_group_after_the_last_parenthesis",),
         why="The comm field is a process name and can hold a `)`; splitting at the first one reads the wrong fields.",
     ),
     Belief(
@@ -596,7 +715,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/procfs.py",
         old="    except (PermissionError, OverflowError):\n        return Liveness.UNKNOWN\n",
         new="    except PermissionError:\n        return Liveness.UNKNOWN\n",
-        test="tests/test_procfs.py::test_probe_a_pid_too_large_to_ask_about_is_unknown[2147483648]",
+        tests=("tests/test_procfs.py::test_probe_a_pid_too_large_to_ask_about_is_unknown[2147483648]",),
         why="os.kill raises OverflowError past a pid_t; one planted lock would crash every caller that asks.",
     ),
     # ---- a profile lock whose owner cannot be probed is refused, not a crash ----
@@ -605,7 +724,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old="    if liveness is procfs.Liveness.UNKNOWN:\n",
         new="    if False:\n",
-        test="tests/test_jars.py::test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock",
+        tests=("tests/test_jars.py::test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock",),
         why="Without the refusal an owner that cannot be checked falls through and its lock is cleared.",
     ),
     Belief(
@@ -613,7 +732,7 @@ BELIEFS: list[Belief] = [
         path=LADDER / "ladder_cli/state/jars.py",
         old='        if state != "Z":\n',
         new="        if True:\n",
-        test="tests/test_jars.py::test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner",
+        tests=("tests/test_jars.py::test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner",),
         why="A zombie exists to signal 0 but is gone; refusing its lock strands the profile until something reaps it.",
     ),
 ]
@@ -636,6 +755,10 @@ def _forget_imports(project: Path) -> None:
 
 @contextmanager
 def _scratch_project():
+    # Callers give pytest a short base directory (`run_tests` passes --basetemp):
+    # a test that binds a unix socket under its tmp_path has 107 bytes for the
+    # whole path, and this directory's name plus pytest's default layout under
+    # TMPDIR used up all of them for the longest test names.
     with tempfile.TemporaryDirectory(prefix="serp-axi-mutation-") as temporary:
         project = Path(temporary) / "ladder-cli"
         shutil.copytree(
@@ -688,7 +811,7 @@ def run_tests(selector: str, project: Path | None = None) -> tuple[str, str]:
     ]
     try:
         proc = subprocess.run(
-            sandbox + wrapper + PYTEST + [selector], cwd=project,
+            sandbox + wrapper + PYTEST + [f"--basetemp={project.parent / 'bt'}", selector], cwd=project,
             capture_output=True, text=True, timeout=600, env=env
         )
     except FileNotFoundError:
@@ -725,23 +848,56 @@ def _baseline(selector: str) -> tuple[str, str]:
     return _BASELINE[selector]
 
 
+def _table_problems(beliefs: list[Belief]) -> list[str]:
+    """Mistakes in the table itself, found before any test runs.
+
+    A belief with no test can never be killed or survive, so it would be counted
+    as nothing at all. Two beliefs with the same edit are one claim written twice
+    under different names: both would be "killed" by whichever tests exist, and
+    the gate's count would say two things were held where one was.
+    """
+    problems = []
+    seen: dict[tuple[Path, str, str], str] = {}
+    names: set[str] = set()
+    for belief in beliefs:
+        if not belief.tests:
+            problems.append(f"[{belief.name}] lists no tests")
+        if belief.name in names:
+            problems.append(f"[{belief.name}] is named twice")
+        names.add(belief.name)
+        key = (belief.path, belief.old, belief.new)
+        if key in seen:
+            problems.append(f"[{belief.name}] is the same edit as [{seen[key]}]; list its test there instead")
+        seen.setdefault(key, belief.name)
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("match", nargs="?", help="only beliefs whose name contains this")
     parser.add_argument("--list", action="store_true", help="print beliefs and exit")
     args = parser.parse_args()
 
+    problems = _table_problems(BELIEFS)
+    if problems:
+        for problem in problems:
+            print(f"BAD TABLE: {problem}", file=sys.stderr)
+        return 2
+
     chosen = [b for b in BELIEFS if not args.match or args.match in b.name]
     if args.list:
         for belief in chosen:
-            print(f"- {belief.name}\n    test: {belief.test}\n    why:  {belief.why}")
+            print(f"- {belief.name}")
+            for test in belief.tests:
+                print(f"    test: {test}")
+            print(f"    why:  {belief.why}")
         return 0
 
     if not chosen:
         print("no beliefs matched", file=sys.stderr)
         return 2
 
-    survived: list[Belief] = []
+    survived: list[tuple[Belief, list[str]]] = []
     invalid: list[Belief] = []
     killed = 0
 
@@ -755,38 +911,46 @@ def main() -> int:
             invalid.append(belief)
             continue
 
-        base, base_last = _baseline(belief.test)
-        if base != "pass":
-            # The belief cannot demonstrate anything: its test is already red on
-            # clean code, or matches no test at all. Counting that as a kill would
-            # have the gate certifying itself.
-            print(f"INVALID   [{belief.name}]: its test is {base} on clean code ({base_last})")
+        not_clean = [(t, *_baseline(t)) for t in belief.tests]
+        not_clean = [(t, base, last) for t, base, last in not_clean if base != "pass"]
+        if not_clean:
+            # The belief cannot demonstrate anything: a test of it is already red
+            # on clean code, or matches no test at all. Counting that as a kill
+            # would have the gate certifying itself.
+            test, base, last = not_clean[0]
+            print(f"INVALID   [{belief.name}]: {test} is {base} on clean code ({last})")
             invalid.append(belief)
             continue
 
-        with _scratch_project() as project:
-            target = project / belief.path.relative_to(LADDER)
-            target.write_text(original.replace(belief.old, belief.new, 1))
-            outcome, last = run_tests(belief.test, project)
+        outcomes: dict[str, tuple[str, str]] = {}
+        for test in belief.tests:
+            with _scratch_project() as project:
+                target = project / belief.path.relative_to(LADDER)
+                target.write_text(original.replace(belief.old, belief.new, 1))
+                outcomes[test] = run_tests(test, project)
 
-        if outcome == "fail":
-            killed += 1
-            print(f"killed    [{belief.name}]")
-        elif outcome == "error":
+        errored = [(t, last) for t, (outcome, last) in outcomes.items() if outcome == "error"]
+        hollow = [t for t, (outcome, _) in outcomes.items() if outcome == "pass"]
+        if errored:
             invalid.append(belief)
-            print(f"INVALID   [{belief.name}]: mutant test could not run ({last})")
-        else:
-            survived.append(belief)
-            print(f"SURVIVED  [{belief.name}] -> {last}")
-            print(f"          hollow test: {belief.test}")
+            test, last = errored[0]
+            print(f"INVALID   [{belief.name}]: mutant test could not run: {test} ({last})")
+        elif hollow:
+            survived.append((belief, hollow))
+            print(f"SURVIVED  [{belief.name}] -> {outcomes[hollow[0]][1]}")
+            for test in hollow:
+                print(f"          hollow test: {test}")
             print(f"          consequence: {belief.why}")
+        else:
+            killed += 1
+            print(f"killed    [{belief.name}]" + (f" by all {len(belief.tests)} tests" if len(belief.tests) > 1 else ""))
 
     print()
     print(f"{killed}/{len(chosen)} beliefs killed")
     if survived:
-        print(f"\n{len(survived)} hollow test(s): the suite does not hold these beliefs.")
-        for belief in survived:
-            print(f"  - {belief.name}")
+        print(f"\n{len(survived)} hollow belief(s): the suite does not hold these.")
+        for belief, hollow in survived:
+            print(f"  - {belief.name} ({len(hollow)} of {len(belief.tests)} tests stayed green)")
     if invalid:
         print(f"\n{len(invalid)} stale entr(ies): the code moved and the claim did not.")
         for belief in invalid:
