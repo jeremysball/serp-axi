@@ -48,6 +48,29 @@ def test_a_target_that_does_not_stop_is_asked_then_waited_on_then_killed_in_that
     assert events == ["term", ("wait", 0.75), "kill"]
 
 
+@pytest.mark.parametrize(("gone",), [(True,), (False,)], ids=["gone", "not-gone"])
+def test_always_kill_sends_one_kill_even_when_the_wait_said_gone(monkeypatch, gone) -> None:
+    """The group stop's last SIGKILL belongs to the shared routine, not to a line after it.
+
+    The pair is the same routine with `always_kill` on: one row where the wait
+    found the target gone (only `always_kill` can send the kill) and one where it
+    did not (the ordinary reason). Both end with exactly one kill, so the second
+    kill decision that used to sit after the routine is gone (review findings
+    F19, F20 and F21).
+    """
+    monkeypatch.setattr(stopping, "STOP_GRACE_S", 0.75)
+    events, term, kill = _recorder()
+
+    def wait_gone(seconds: float) -> bool:
+        events.append(("wait", seconds))
+        return gone
+
+    stop_with_grace(term=term, wait_gone=wait_gone, kill=kill, always_kill=True)
+
+    assert events == ["term", ("wait", 0.75), "kill"]
+    assert events.count("kill") == 1, "the routine sent the one kill, not one here and one after it"
+
+
 def test_a_sigterm_that_lands_in_the_wait_still_kills_and_still_surfaces() -> None:
     """`main` turns SIGTERM into SystemExit, which can surface in the wait."""
     events, term, kill = _recorder()

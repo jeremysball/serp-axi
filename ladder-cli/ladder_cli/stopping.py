@@ -24,12 +24,26 @@ from typing import Callable
 # changes both stops.
 STOP_GRACE_S = 5.0
 
+# How long `cli._reap` keeps reading a stopped rung's pipes after the stop. Not
+# `STOP_GRACE_S`: a descendant outside the group can hold the pipes open, which
+# is a different question from how long the group gets to answer SIGTERM, and
+# tuning one must not silently retune the other. A separate named bound, not a
+# second copy of the number: 5.0 is today's value, not a value it has to share.
+PIPE_DRAIN_S = 5.0
+
+# How long a target that survived SIGKILL gets to finish dying before the stop
+# raises. A process in uninterruptible sleep ignores SIGKILL until its call
+# returns. Separate from `STOP_GRACE_S` for the same reason as `PIPE_DRAIN_S`:
+# it measures a different thing.
+KILL_WAIT_S = 5.0
+
 
 def stop_with_grace(
     *,
     term: Callable[[], None],
     wait_gone: Callable[[float], bool],
     kill: Callable[[], None],
+    always_kill: bool = False,
 ) -> None:
     """Send `term`, wait up to `STOP_GRACE_S` seconds for the target to be gone, else `kill`.
 
@@ -43,11 +57,19 @@ def stop_with_grace(
     SIGTERM handler raises can surface in either, but only in the resident loop:
     `main` installs that handler for the loop and returns before it for a
     `--rung` child, where a SIGTERM takes the default action and ends the process
-    wherever it is. So in a rung child the `finally` guards any other exception
+    wherever it is (pinned by
+    `test_a_rung_child_takes_sigterm_as_the_default_action_not_via_the_resident_handler`).
+    So in a rung child the `finally` guards any other exception
     during the wait (a failing `/proc` read, a `KeyboardInterrupt`), and the
     process ending on SIGTERM is covered by the display server sharing the rung's
     process group, which gets the group's SIGTERM and SIGKILL itself (see
     `headed.display`).
+
+    `always_kill` asks for `kill` even when `wait_gone` said the target was gone.
+    The group stop needs that: one `/proc` scan is not atomic, so "nothing
+    running" can miss a child forked and gone again between two reads. The
+    leader is not reaped until after this routine returns, so the group id is
+    still ours and a SIGKILL to an empty group does nothing.
 
     The grace period is not a parameter: a caller that could pass its own number
     is a second constant for the two stops to disagree on. `STOP_GRACE_S` is read
@@ -58,5 +80,5 @@ def stop_with_grace(
         term()
         gone = wait_gone(STOP_GRACE_S)
     finally:
-        if not gone:
+        if not gone or always_kill:
             kill()

@@ -251,11 +251,12 @@ def _stop_display(process: subprocess.Popen) -> None:
     group's stop, so a SIGTERM that `main` turns into SystemExit during the wait
     still kills the server. What is particular to a display is here: it is a
     child with a handle, so "gone" is `Popen.wait`, which returns the instant it
-    exits, and the kill is followed by the wait that reaps it. That wait is bounded
-    by the grace period as well: a server in uninterruptible sleep (a `/tmp` on a
-    stalled mount, where it removes its lock) ignores SIGKILL until the call
-    returns, and waiting without a limit would hold the rung's result for as long.
-    It raises instead, so the failure is reported rather than the rung hanging.
+    exits, and the kill is followed by the wait that reaps it. That wait is
+    bounded by `KILL_WAIT_S`, not the SIGTERM grace: a server in uninterruptible
+    sleep (a `/tmp` on a stalled mount, where it removes its lock) ignores
+    SIGKILL until the call returns, and waiting without a limit would hold the
+    rung's result for as long. It raises instead, so the failure is reported
+    rather than the rung hanging.
     """
 
     def wait_gone(seconds: float) -> bool:
@@ -268,10 +269,10 @@ def _stop_display(process: subprocess.Popen) -> None:
     def kill() -> None:
         process.kill()
         try:
-            process.wait(timeout=stopping.STOP_GRACE_S)
+            process.wait(timeout=stopping.KILL_WAIT_S)
         except subprocess.TimeoutExpired:
             raise RuntimeError(
-                f"Xvfb (pid {process.pid}) did not exit within {stopping.STOP_GRACE_S:g}s of SIGKILL"
+                f"Xvfb (pid {process.pid}) did not exit within {stopping.KILL_WAIT_S:g}s of SIGKILL"
             ) from None
 
     stopping.stop_with_grace(term=process.terminate, wait_gone=wait_gone, kill=kill)

@@ -74,21 +74,33 @@ def _reap(process: subprocess.Popen) -> None:
     `communicate()` reads until both pipes reach EOF, and a descendant that left
     the group (`setsid`, a double fork) and inherited them holds them open for as
     long as it lives, which the group's SIGKILL cannot end. So the read gets
-    `STOP_GRACE_S` and no more: past it the leader is killed and reaped, and the
+    `PIPE_DRAIN_S` and no more: past it the leader is killed and reaped, and the
     pipes are closed here, so a straggler outside the group cannot hang the
     resident CLI. What the stopped rung printed is not used, so none of it is lost.
+
+    The wait after that SIGKILL is bounded too (`KILL_WAIT_S`): a leader in
+    uninterruptible sleep ignores SIGKILL until its call returns, and an
+    unbounded `wait()` would hold the resident CLI for as long as the mount stays
+    stalled. It raises instead, so a leader that cannot be reaped is reported
+    rather than silently left behind.
     """
     try:
-        process.communicate(timeout=stopping.STOP_GRACE_S)
+        process.communicate(timeout=stopping.PIPE_DRAIN_S)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
+        try:
+            process.wait(timeout=stopping.KILL_WAIT_S)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"rung (pid {process.pid}) did not exit within {stopping.KILL_WAIT_S:g}s of SIGKILL"
+            ) from None
+        finally:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
 
-def _stop_group(process: subprocess.Popen) -> None:
+def _stop_group(process: subprocess.Popen, *, leader_reaped: bool = False) -> None:
     """Stop a rung and everything it started, and reap it.
 
     The group is asked to stop with SIGTERM first, because SIGKILL gives nothing
@@ -99,9 +111,18 @@ def _stop_group(process: subprocess.Popen) -> None:
 
     The order, the grace period and the kill that survives an exception mid-stop
     are `stopping.stop_with_grace`, shared with the display stop. What is
-    particular to a group is here: it has no wait, so "gone" is a poll of /proc.
-    The reaping is in a `finally` of its own for the same reason the kill is in
-    one: the child must not be left unreaped by whatever interrupted the stop.
+    particular to a group is here: it has no wait, so "gone" is a poll of /proc,
+    and the kill is followed by its own bounded wait and a raise. The reaping is
+    in a `finally` of its own for the same reason the kill is in one: the child
+    must not be left unreaped by whatever interrupted the stop.
+
+    The last SIGKILL, which covers a member the /proc scans missed, is sent only
+    while the leader is unreaped, because only an unreaped leader keeps the group
+    id from being handed to an unrelated process. The budget/exception path
+    reaches here with the leader unreaped. The normal-exit path (`leader_reaped`)
+    has already had it reaped by `communicate`, so it kills only what the grace
+    period did not stop, and a live member found a moment ago is the only thing
+    that held the id.
     """
     group = process.pid
 
@@ -109,31 +130,56 @@ def _stop_group(process: subprocess.Popen) -> None:
         # The leader is not reaped in here, on purpose. A pid stays allocated while
         # its process is an unreaped zombie, so the group id cannot be handed to
         # anything else until `_reap` below reaps it, and a signal to the group can
-        # only reach this group. A zombie is not "running" to `group_is_running`,
-        # so leaving it unreaped does not hold the wait up. One check is made at the
+        # only reach this group (pinned against the real kernel by
+        # `test_an_unreaped_leader_keeps_its_pid_and_group_id_allocated`). A zombie
+        # is not "running" to `group_is_running`, so leaving it unreaped does not
+        # hold the wait up.
+        #
+        # A scan of /proc is the expensive question, so it is asked at most every
+        # 0.2s; between scans the cheap `killpg(group, 0)` says whether the group
+        # still exists at all. A zombie-only group still answers that signal, so a
+        # cheap "gone" is the only early answer it gives. One scan is made at the
         # deadline, so a group that went at the last moment is not called running.
         deadline = time.monotonic() + seconds
+        next_scan = 0.0
         while True:
-            if not procfs.group_is_running(group):
-                return True
+            now = time.monotonic()
+            if now >= next_scan or now >= deadline:
+                if not procfs.group_is_running(group):
+                    return True
+                next_scan = now + 0.2
+            else:
+                try:
+                    os.killpg(group, 0)
+                except ProcessLookupError:
+                    return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.02)
 
+    def kill() -> None:
+        _signal_group(group, signal.SIGKILL)
+        if not wait_gone(stopping.KILL_WAIT_S):
+            raise RuntimeError(
+                f"rung group {group} did not stop within {stopping.KILL_WAIT_S:g}s of SIGKILL"
+            )
+
     try:
+        # `always_kill` is the H2 answer: a /proc scan is not atomic, so a child
+        # forked and gone again between its reads is in no listing, and "nothing
+        # is running" can still be wrong. One SIGKILL inside the shared routine's
+        # `finally` settles it, and is safe while the leader is unreaped, which is
+        # what keeps the group id from being anyone else's. It is not after the
+        # routine: a SIGTERM landing in that window must not skip it (review
+        # findings F19, F20 and F21). When the leader was already reaped there is
+        # no such guarantee, so `leader_reaped` turns it off and only a group that
+        # outlasted the grace period is killed.
         stopping.stop_with_grace(
             term=lambda: _signal_group(group, signal.SIGTERM),
             wait_gone=wait_gone,
-            kill=lambda: _signal_group(group, signal.SIGKILL),
+            kill=kill,
+            always_kill=not leader_reaped,
         )
-        # A scan of /proc is not atomic: a child forked and gone again between its
-        # reads is in no listing, so "nothing is running" can still be wrong. One
-        # last SIGKILL settles it, and is safe while the leader is unreaped, which
-        # is what keeps the group id from being anyone else's (review finding H2).
-        # It is here, not inside `wait_gone`, so the poll stays a pure question and
-        # the one routine stays the only place a stop decides to kill.
-        if process.returncode is None:
-            _signal_group(group, signal.SIGKILL)
     finally:
         _reap(process)
 
@@ -176,6 +222,16 @@ def run_rung_isolated(
         if isinstance(error, subprocess.TimeoutExpired):
             return RungResult(RungVerdict.ERROR, reason=f"rung {rung} exceeded its {budget:g}s budget")
         raise
+
+    # A rung that exits without raising has already been reaped by `communicate`,
+    # so nothing ran the graceful group stop. A child killed by a signal (the OOM
+    # killer, a SIGKILL, a native crash) cannot run its own cleanup, and an Xvfb it
+    # started would keep its display lock for the life of the machine. A live
+    # process still in the group proves the group id is still ours, so stop it.
+    # When nothing is left there, no signal is sent: the leader has been reaped and
+    # its number could otherwise belong to an unrelated group.
+    if procfs.has_running_member(process.pid):
+        _stop_group(process, leader_reaped=True)
 
     # Split on LF only, never str.splitlines(): U+2028 LINE SEPARATOR is legal
     # inside a JSON string, and splitlines() treats it as a line break. A page

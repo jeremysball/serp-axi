@@ -101,112 +101,170 @@ Every live rung keeps the killable subprocess budget.
 **When this becomes a real bug:** if audio integration ships without adding a
 live rung, or the response claims rung 5 ran when only rung 4 was attempted.
 
-## A timed-out rung can run up to 5 seconds past its budget
+## A timed-out rung can run up to 20 seconds past its budget
 
 **What you see:** a rung with a 90-second budget sometimes returns its `error`
-at 90 to 95 seconds, not at 90.
+at 90 to 110 seconds, not at 90.
 
 **Why:** the rung's process group gets SIGTERM first and up to
-`STOP_GRACE_S` (5 seconds, `ladder_cli/stopping.py`, the one value the group
-stop and the display stop both read) to stop before SIGKILL. Rung 4 runs an
-Xvfb display server. On SIGTERM Xvfb removes its own `/tmp/.X<n>-lock` and
-socket; SIGKILL left both behind on every timeout. The wait ends as soon as
-nothing in the group is still running, so a rung that stops promptly costs
-nothing extra. A zombie does not count as running: under a PID 1 that never
-waits, a rung's orphaned grandchild stays one for good.
+`STOP_GRACE_S` (5 seconds, `ladder_cli/stopping.py`) to stop before SIGKILL.
+Rung 4 runs an Xvfb display server. On SIGTERM Xvfb removes its own
+`/tmp/.X<n>-lock` and socket; SIGKILL left both behind on every timeout. If it
+is still there after the grace period, the group gets SIGKILL and then
+`KILL_WAIT_S` (5 seconds) to finish dying; a member in uninterruptible sleep
+that survives that raises instead of being called stopped. `_reap` then gives
+the pipes `PIPE_DRAIN_S` (5 seconds) and, if a straggler still holds them, kills
+the leader and waits `KILL_WAIT_S` once more. So the bound is
+90 + 5 + 5 + 5 + 5 = 110 seconds. Each wait ends as soon as its target is gone,
+so a rung that stops promptly costs nothing extra. A zombie does not count as
+running: under a PID 1 that never waits, a rung's orphaned grandchild stays one
+for good.
 
 "Nothing is running" is read off `/proc`, and a scan of it is not atomic: a
 child forked and gone again between the scan's reads is in no listing, so a
 stop that called the group empty could skip a member it never saw. The last step
-covers that. When the wait says the group is empty, `_stop_group` sends it one
-more SIGKILL, but only while the group leader has not been reaped. The leader is
-not reaped inside the wait (`_reap` does that afterwards) so that its pid stays
+covers that. `_stop_group` asks `stopping.stop_with_grace` to send one final
+SIGKILL even when the wait said the group was empty, in the routine's own
+`finally`, so a SIGTERM landing after the wait cannot skip it. The leader is not
+reaped inside the wait (`_reap` does that afterwards) so that its pid stays
 allocated, and a pid number is not handed to another process while any task
-still uses it as a pid or a group id. That last line is reasoned from how the
-kernel allocates pids, not tested here; what is tested is that the signal is
-sent in the missed-member case and is not sent once the leader is reaped
-(`test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped`,
-`test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped`). A `/proc`
-that cannot be listed, or a scan that classified no process at all, counts as
+still uses it as a pid or a group id. That invariant is checked against the real
+kernel by `test_an_unreaped_leader_keeps_its_pid_and_group_id_allocated`; the
+missed-member kill is
+`test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped`,
+and the raise for a member that survives SIGKILL is
+`test_a_group_member_that_survives_sigkill_is_reported_not_called_stopped`.
+
+The full `/proc` scan is the expensive question, so `_stop_group` asks it at
+most every 0.2 seconds; between scans the cheap `killpg(group, 0)` asks only
+whether the group still exists. `test_a_stubborn_group_is_scanned_for_members_only_a_few_times_a_second`
+pins that a stop does not turn into fifty process-table scans. A `/proc` that
+cannot be listed, or a scan that classified no process at all, counts as
 running, so the grace period decides and not a crash or an early "stopped".
 
-**When this becomes a real bug:** if a group that ignores SIGTERM survives the
-grace period (including when a second SIGTERM lands during the wait, or lands
-in the first `killpg` itself), if the wait runs the full 5 seconds when nothing
-is left running, if a group is called stopped while a member that cannot be
-read is still in it, if the last SIGKILL is sent after the leader has been
-reaped, or if a timed-out rung 4 leaves a lock behind for a pid that is dead.
+**When this becomes a real bug:** if a stop runs longer than 20 seconds past its
+budget, if a group is called stopped while a member is still running, if the
+last SIGKILL is sent after the leader has been reaped, or if a timed-out rung 4
+leaves a lock behind for a pid that is dead.
 
-## Stopping a rung can wait 5 seconds twice, and the grace period has no knob
+## The stop bounds are separate constants, and none has a knob
 
-**What you see:** a rung that ignores SIGTERM and whose pipes a straggler holds
-open can keep the CLI for up to 10 seconds past the 90-second budget: up to 5
-for the group to stop, then up to 5 more in `_reap`. `STOP_GRACE_S` is a
-constant, not a flag, environment variable or config key. The parent's
-120-second request cap does not wait for either: it resets the child with
+**What you see:** three waits in the stop paths (`STOP_GRACE_S`,
+`PIPE_DRAIN_S`, `KILL_WAIT_S`, all 5 seconds in `ladder_cli/stopping.py`) but
+no flag, environment variable or config key for any of them. The parent's
+120-second request cap does not wait for them either: it resets the child with
 `child.kill()` (`src/ladder.ts:526`, SIGTERM), which `main` turns into
 `SystemExit` (`ladder_cli/cli.py:330`), so a stop in progress is interrupted and
 finishes through the same `finally` that kills the group.
 
-**Why:** both waits are bounded by the same value. The group's stop ends as soon
-as nothing in it is running, and `_reap` only waits when something outside the
-group holds the pipes, so the worst case is a sum of two bounded waits and not
-an unbounded one. (The display stop has its own bounded wait after SIGKILL, but
-it runs inside the rung's own process, on a path where the rung is ending by
-itself, and the parent's stop reaches Xvfb through the shared group instead.) No
-knob exists because nothing has needed a different value yet; the house rule is a flag, an
-environment variable and a config key together, and adding all three for a value
-no run has had to change would be three new surfaces to document. The 5 seconds
-is a bound for something that does not stop when asked, not a measured stop time
-(`ladder_cli/stopping.py` says so beside the constant).
+**Why:** they answer different questions, so one number cannot be right for all
+three. `STOP_GRACE_S` is how long SIGTERM gets to clean up; `PIPE_DRAIN_S` is
+how long a stopped rung's pipes get to reach end of file; `KILL_WAIT_S` is how
+long a target that survived SIGKILL gets to finish dying. Keeping them separate
+is what stops a change made for a slow Xvfb from silently changing the other
+two bounds. No knob exists because nothing has needed a different value yet; the
+house rule is a flag, an environment variable and a config key together, and
+adding all three for values no run has had to change would be three new surfaces
+to document. They are bounds for something that does not stop when asked, not
+measured stop times (`ladder_cli/stopping.py` says so beside them).
 
 **When this becomes a real bug:** if a stop runs longer than the sum of its
 bounded waits, if the parent's 120-second cap resets the child during a stop and
-the group is left running (read from the code above, not tested end to end), or
-if someone needs a longer or shorter grace period
-for a real rung and has no way to set one (then add the triplet).
+the group is left running (read from the code above, not tested end to end), if
+someone needs a longer or shorter bound for a real rung and has no way to set one
+(then add the triplet), or if the parent's single SIGTERM to the resident CLI is
+lost and the CLI and its rung group outlive the parent (the parent has no SIGKILL
+escalation; adding one needs a timer value, which is a new tunable).
 
 ## A straggler outside the group cannot hang the CLI, and its output is dropped
 
-**What you see:** after a timed-out rung, `_reap` gives `communicate()` the grace
-period and then kills the leader and closes the pipes, even though the pipes had
-not reached end of file. Anything the rung printed after the timeout is gone.
+**What you see:** after a timed-out rung, `_reap` gives `communicate()` the pipe
+drain bound and then kills the leader and closes the pipes, even though the pipes
+had not reached end of file. Anything the rung printed after the timeout is gone.
+If the leader is in uninterruptible sleep and survives that SIGKILL, `_reap`
+raises instead of waiting on it forever.
 
 **Why:** `communicate()` returns only at end of file on both pipes. A descendant
 that left the group (`setsid`, a double fork) and inherited them holds them open
 for as long as it lives, and the group's SIGKILL cannot reach it, so an unbounded
-`communicate()` would hold the resident CLI for that long. A stopped rung's
+`communicate()` would hold the resident CLI for that long. The wait after the
+leader's own SIGKILL is bounded for the same reason. A stopped rung's
 output is not used (the result is the budget error), so nothing the CLI reports
 is lost. Covered by
-`test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes`.
+`test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes`
+and `test_a_leader_that_survives_sigkill_is_reported_not_waited_on_forever`.
 
 **When this becomes a real bug:** if a rung that finished normally has its
 output cut off by this path, or if a timed-out rung's output starts to be used
 in the result.
 
+## A rung that exits on its own still has what it started stopped
+
+**What you see:** a rung that was not stopped by the budget has a process it
+started in its group killed after it returns, even though `communicate()` came
+back normally.
+
+**Why:** the leader exiting says nothing about the group. A child killed by the
+OOM killer, a SIGKILL or a native crash cannot run its own cleanup, and an Xvfb
+it started keeps its `/tmp/.X<n>-lock` for the life of the machine; that is the
+leak this closes. After the normal return, `run_rung_isolated` stops the group
+when `/proc` shows a live member, which also proves the group id is still ours.
+If nothing is left there, no signal is sent: the leader has been reaped and its
+number could otherwise belong to an unrelated group. For the same reason this
+stop skips the unconditional last SIGKILL (`leader_reaped`): the leader is
+already reaped, so only a group that outlasted the grace period is killed, and
+one that stopped on SIGTERM gets nothing more. Covered by
+`test_a_rung_that_dies_on_a_signal_has_what_it_started_stopped` and
+`test_a_reaped_leaders_emptied_group_is_not_sent_a_last_sigkill`.
+
+**When this becomes a real bug:** if a rung deliberately leaves a background
+process to outlive its request (none does), or if a member is killed after the
+rung has already stopped it.
+
+## A SIGKILL of the resident CLI leaves its rung group behind
+
+**What you see:** after the resident ladder-cli is killed with SIGKILL (the OOM
+killer, an external `kill -9`, or a supervisor timeout), the `--rung` child and
+the Xvfb it started keep running, and the display slot stays held.
+
+**Why:** SIGKILL cannot be caught, and the rung is deliberately in its own
+session (`start_new_session=True`) so the group stop can reach everything the
+rung starts. The budget and SIGTERM paths run that stop; a resident CLI that is
+itself killed cannot. A parent-death signal on the rung alone would still leave
+the Xvfb it started alive, so closing this needs a supervisor/watchdog or a
+parent-death chain through every child, not one more `prctl` in the rung.
+
+**When this becomes a real bug:** if the resident CLI is routinely killed
+externally and the leaked process and display slot matter; then add the
+supervisor or parent-death chain. Until then, stop the CLI with SIGTERM.
+
 ## The display stop and the rung-group stop share a routine and differ in how they wait
 
 **What you see:** `headed._stop_display` and `cli._stop_group` both end in a
 call to `stopping.stop_with_grace`, yet each passes its own `wait_gone`, and the
-group's polls every 20 ms while the display's is one `Popen.wait(timeout)`.
+group asks `killpg(group, 0)` every 20 ms while scanning `/proc` at most every
+200 ms, where the display's is one `Popen.wait(timeout)`.
 
-**Why:** the order (SIGTERM, wait up to `STOP_GRACE_S`, SIGKILL in a `finally`)
-is the part that has to be the same, so it lives once in `ladder_cli/stopping.py`.
-A display stop used to carry its own copy without the `finally`, and a SIGTERM
-that `main` turned into `SystemExit` during its wait left Xvfb running; sharing
-the routine is what removed that. What cannot be shared is how "gone" is
-known. The display has a `Popen`, so `Popen.wait(timeout)` returns the instant
-it exits. A process group has no wait: the only question the kernel answers is
-whether something in it is still there, so `_stop_group` polls, has to tell a
-zombie from a running process, and has to survive a SIGTERM landing mid-wait.
-Giving the display that poll would add a loop where a wait suffices, and giving
-the group the display's wait would watch only the group leader and miss a
-grandchild removing its own lock. The grace period is one constant,
-`stopping.STOP_GRACE_S`, read when the stop runs and not passed in as a
-parameter, so there is no second copy to drift.
+**Why:** the order (SIGTERM, wait up to `STOP_GRACE_S`, SIGKILL in a `finally`,
+then a bounded wait for the kill) is the part that has to be the same, so it
+lives once in `ladder_cli/stopping.py`. A display stop used to carry its own copy
+without the `finally`, and a SIGTERM that `main` turned into `SystemExit` during
+its wait left Xvfb running; sharing the routine is what removed that. What
+cannot be shared is how "gone" is known. The display has a `Popen`, so
+`Popen.wait(timeout)` returns the instant it exits. A process group has no wait:
+the only question the kernel answers is whether something in it is still there,
+so `_stop_group` polls, has to tell a zombie from a running process, and has to
+survive a SIGTERM landing mid-wait. The group also needs the kill even when the
+poll says empty, because one `/proc` scan cannot see a member forked and gone
+between its reads; the display's wait has no such gap, so only the group passes
+`always_kill=True`. Giving the display that poll would add a loop where a wait
+suffices, and giving the group the display's wait would watch only the group
+leader and miss a grandchild removing its own lock. The grace period is one
+constant, `stopping.STOP_GRACE_S`, read when the stop runs and not passed in as
+a parameter, so there is no second copy to drift.
 `test_the_grace_period_is_read_when_the_stop_runs_and_is_not_a_parameter` pins
 that, and `test_the_display_waits_for_the_one_grace_period_the_group_stop_uses`
-pins that the display's wait is that value and not a copy.
+pins that the display's SIGTERM wait is that value and not a copy.
 
 **When this becomes a real bug:** if either stop stops going through
 `stop_with_grace` (`test_the_display_and_the_rung_group_are_stopped_by_the_one_routine`),
@@ -283,7 +341,7 @@ not exit within 5s of SIGKILL`, and the rung reports `error`.
 **Why:** a server in uninterruptible sleep (a `/tmp` on a stalled mount, where it
 removes its lock) ignores SIGKILL until the call returns. `_stop_display` waits
 for it after the kill, and without a limit that wait would hold the rung's
-result for as long as the mount stays stalled. It waits `STOP_GRACE_S` and then
+result for as long as the mount stays stalled. It waits `KILL_WAIT_S` and then
 raises, so the failure is named and the rung is not left hanging. The raise
 comes out of the `with` block that held the page, so the page is dropped with
 it. Covered by

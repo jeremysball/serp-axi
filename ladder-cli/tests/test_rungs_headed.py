@@ -1221,6 +1221,7 @@ def test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_n
     """
     process = FakeProcess(ignores_terminate=True, ignores_kill=True)
     monkeypatch.setattr(stopping, "STOP_GRACE_S", 0.5)
+    monkeypatch.setattr(stopping, "KILL_WAIT_S", 0.5)
 
     with pytest.raises(RuntimeError, match=rf"Xvfb \(pid {FAKE_SERVER_PID}\) did not exit within 0\.5s of SIGKILL"):
         headed._stop_display(process)
@@ -1334,7 +1335,8 @@ def test_the_display_and_the_rung_group_are_stopped_by_the_one_routine(monkeypat
 
     assert len(calls) == 2, "each stop went through the shared routine once"
     for call in calls:
-        assert set(call) == {"term", "wait_gone", "kill"}
+        assert {"term", "wait_gone", "kill"} <= set(call)
+    assert calls[1]["always_kill"] is True, "the group's missed-member kill is the routine's, not a line after it"
 
 
 def test_the_turnstile_click_is_not_restated() -> None:

@@ -83,7 +83,9 @@ def has_running_member(group: int) -> bool:
     A process that is not readable is not taken for gone. Only an exit says "gone"
     (FileNotFoundError, or ProcessLookupError, which is what reading a stat file
     raises once the process behind an already-open file has been reaped; or
-    `getpgid` raising ProcessLookupError); any other reason a stat cannot be
+    `getpgid` raising ProcessLookupError; the kernel behavior is checked by
+    `test_an_open_stat_file_raises_process_lookup_error_after_its_process_is_reaped`);
+    any other reason a stat cannot be
     read, such as a `hidepid` mount or a stat line that does not parse, falls
     back to `getpgid`, which asks the kernel for the group without needing the
     read to succeed. If that says the process is in this group, it counts as

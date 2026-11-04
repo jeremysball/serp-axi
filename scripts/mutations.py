@@ -324,8 +324,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display that ignores the request to stop is killed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="        process.kill()\n        try:\n            process.wait(timeout=stopping.STOP_GRACE_S)\n",
-        new="        try:\n            process.wait(timeout=stopping.STOP_GRACE_S)\n",
+        old="        process.kill()\n        try:\n            process.wait(timeout=stopping.KILL_WAIT_S)\n",
+        new="        try:\n            process.wait(timeout=stopping.KILL_WAIT_S)\n",
         tests=("tests/test_rungs_headed.py::test_a_display_that_ignores_sigterm_is_killed_after_the_grace_period",),
         why="Asking first must not leave a wedged Xvfb running, or the fetch returns with a display still held.",
     ),
@@ -338,12 +338,12 @@ BELIEFS: list[Belief] = [
         why="`_stop_display` raises for a server that survives SIGKILL, and a close that comes after it leaks the pipe once per unkillable server in a resident CLI.",
     ),
     Belief(
-        name="the wait after SIGKILL is bounded, and by the one grace period",
+        name="the wait after SIGKILL is bounded, and reads its own named bound",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="            process.wait(timeout=stopping.STOP_GRACE_S)\n        except subprocess.TimeoutExpired:\n            raise RuntimeError(",
+        old="            process.wait(timeout=stopping.KILL_WAIT_S)\n        except subprocess.TimeoutExpired:\n            raise RuntimeError(",
         new="            process.wait(timeout=5.0)\n        except subprocess.TimeoutExpired:\n            raise RuntimeError(",
         tests=("tests/test_rungs_headed.py::test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap",),
-        why="Review finding F13: a server in uninterruptible sleep ignores SIGKILL, and a wait without a limit held the rung's result for as long. A number of its own is the second copy of the grace period.",
+        why="Review findings F13 and F25: a server in uninterruptible sleep ignores SIGKILL, and the wait after it is a different question from the SIGTERM grace, so it has its own bound.",
     ),
     Belief(
         name="a server that will not die after SIGKILL is raised, not swallowed",
@@ -454,13 +454,14 @@ BELIEFS: list[Belief] = [
             "        stopping.stop_with_grace(\n"
             "            term=lambda: _signal_group(group, signal.SIGTERM),\n"
             "            wait_gone=wait_gone,\n"
-            "            kill=lambda: _signal_group(group, signal.SIGKILL),\n"
+            "            kill=kill,\n"
+            "            always_kill=not leader_reaped,\n"
             "        )\n"
         ),
         new=(
             "        _signal_group(group, signal.SIGTERM)\n"
             "        if not wait_gone(stopping.STOP_GRACE_S):\n"
-            "            _signal_group(group, signal.SIGKILL)\n"
+            "            kill()\n"
         ),
         tests=("tests/test_rungs_headed.py::test_the_display_and_the_rung_group_are_stopped_by_the_one_routine",),
         why="Review findings G8 and H9, from the group's side.",
@@ -468,8 +469,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a SIGTERM landing while something is stopping still kills it",
         path=LADDER / "ladder_cli/stopping.py",
-        old="    finally:\n        if not gone:\n            kill()\n",
-        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone:\n            kill()\n",
+        old="    finally:\n        if not gone or always_kill:\n            kill()\n",
+        new="    except ProcessLookupError:\n        pass\n    else:\n        if not gone or always_kill:\n            kill()\n",
         # One edit, three sides: the routine on its own, the display through it, and
         # a real rung group through it. Two beliefs with the same edit would be
         # reported as one, so the other tests are listed here and each must go red.
@@ -594,39 +595,72 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a rung group that ignores the request to stop is killed on the way out of an interrupted stop",
         path=LADDER / "ladder_cli/cli.py",
-        old="            kill=lambda: _signal_group(group, signal.SIGKILL),\n",
-        new="            kill=lambda: _signal_group(group, signal.SIGTERM),\n",
-        # Only the interrupted stop is listed. On the path that is not interrupted the
-        # SIGKILL after `stop_with_grace` (the next belief) sends the same signal at the
-        # same moment, so `kill` is redundant there and a test of that path cannot tell
-        # the two apart: it would pass on this mutant, and listing it would make the
-        # gate report a hollow test that is really an equivalent mutant.
-        tests=("tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",),
+        old="        _signal_group(group, signal.SIGKILL)\n        if not wait_gone(stopping.KILL_WAIT_S):\n",
+        new="        _signal_group(group, signal.SIGTERM)\n        if not wait_gone(stopping.KILL_WAIT_S):\n",
+        tests=(
+            "tests/test_cli.py::test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first",
+            "tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",
+        ),
         why="Asking first must not let a rung that will not stop outlive a stop that was cut short; on that path nothing after the routine runs.",
+    ),
+    Belief(
+        name="the group stop's last SIGKILL belongs to the shared routine",
+        path=LADDER / "ladder_cli/stopping.py",
+        old="        if not gone or always_kill:\n            kill()\n",
+        new="        if not gone:\n            kill()\n",
+        tests=(
+            "tests/test_stopping.py::test_always_kill_sends_one_kill_even_when_the_wait_said_gone[gone]",
+            "tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",
+        ),
+        why="Review findings F19 and F20: the missed-member SIGKILL used to sit after the routine, where a SIGTERM in the gap skipped it; now the routine sends it once, in its `finally`.",
     ),
     Belief(
         name="a member the scans missed is killed before the group is called stopped",
         path=LADDER / "ladder_cli/cli.py",
-        old="        if process.returncode is None:\n            _signal_group(group, signal.SIGKILL)\n",
-        new="        if False:\n            _signal_group(group, signal.SIGKILL)\n",
+        old="            always_kill=not leader_reaped,\n",
+        new="            always_kill=False,\n",
         tests=("tests/test_cli.py::test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped",),
         why="A fork that lands between two /proc reads is in no listing, and calling the group stopped then leaves it running (review finding H2); the last SIGKILL is the only thing that does not depend on the listing.",
     ),
     Belief(
-        name="the last SIGKILL is not sent once the leader has been reaped",
+        name="a reaped leader's emptied group is not sent a last SIGKILL",
         path=LADDER / "ladder_cli/cli.py",
-        old="        if process.returncode is None:\n            _signal_group(group, signal.SIGKILL)\n",
-        new="        if True:\n            _signal_group(group, signal.SIGKILL)\n",
-        tests=("tests/test_cli.py::test_the_last_sigkill_is_sent_only_while_the_leader_is_unreaped[0-0]",),
-        why="An unreaped leader holds the group id; after it is reaped the number can belong to an unrelated process, which a SIGKILL would hit.",
+        old="            always_kill=not leader_reaped,\n",
+        new="            always_kill=True,\n",
+        tests=("tests/test_cli.py::test_a_reaped_leaders_emptied_group_is_not_sent_a_last_sigkill",),
+        why="Only an unreaped leader keeps the group id from being handed to an unrelated process. On the normal-exit path `communicate` has already reaped it, so a SIGKILL sent to the emptied group could hit someone else's.",
     ),
     Belief(
-        name="a reap that has waited the grace period gives up on the pipes",
+        name="a rung that dies on a signal has what it started stopped",
         path=LADDER / "ladder_cli/cli.py",
-        old="        process.communicate(timeout=stopping.STOP_GRACE_S)\n",
+        old="    if procfs.has_running_member(process.pid):\n        _stop_group(process, leader_reaped=True)\n",
+        new="    if False:\n        _stop_group(process, leader_reaped=True)\n",
+        tests=("tests/test_cli.py::test_a_rung_that_dies_on_a_signal_has_what_it_started_stopped",),
+        why="Review finding F23: a child killed by OOM or a crash cannot run its own cleanup, so the group stop must also run on the path where `communicate` returns normally.",
+    ),
+    Belief(
+        name="a group that survives SIGKILL is reported, not called stopped",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        if not wait_gone(stopping.KILL_WAIT_S):\n            raise RuntimeError(",
+        new="        if False:\n            raise RuntimeError(",
+        tests=("tests/test_cli.py::test_a_group_member_that_survives_sigkill_is_reported_not_called_stopped[survives-SIGKILL]",),
+        why="Review finding F22: a member in uninterruptible sleep ignores SIGKILL, and the candidate must not hand the next request a profile or display still held.",
+    ),
+    Belief(
+        name="the cheap group check runs often while the /proc scan stays rare",
+        path=LADDER / "ladder_cli/cli.py",
+        old="                next_scan = now + 0.2\n",
+        new="                next_scan = now\n",
+        tests=("tests/test_cli.py::test_a_stubborn_group_is_scanned_for_members_only_a_few_times_a_second",),
+        why="Review finding F31: a full process-table scan every 20 ms for the grace period is thousands of file reads per stop; `killpg` answers the cheap question.",
+    ),
+    Belief(
+        name="a reap that has waited the drain period gives up on the pipes",
+        path=LADDER / "ladder_cli/cli.py",
+        old="        process.communicate(timeout=stopping.PIPE_DRAIN_S)\n",
         new="        process.communicate()\n",
         tests=(
-            "tests/test_cli.py::test_reap_reads_for_the_grace_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
+            "tests/test_cli.py::test_reap_reads_for_the_drain_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
             "tests/test_cli.py::test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes",
         ),
         why="A descendant that left the group and inherited the pipes holds them open as long as it lives; an unbounded read hangs the resident CLI on it.",
@@ -634,13 +668,24 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a reap that gave up closes the pipes it was reading",
         path=LADDER / "ladder_cli/cli.py",
-        old="        for pipe in (process.stdout, process.stderr):\n            if pipe is not None:\n                pipe.close()\n",
-        new="",
+        old="            for pipe in (process.stdout, process.stderr):\n                if pipe is not None:\n                    pipe.close()\n",
+        new="            pass\n",
         tests=(
-            "tests/test_cli.py::test_reap_reads_for_the_grace_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
+            "tests/test_cli.py::test_reap_reads_for_the_drain_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
             "tests/test_cli.py::test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes",
         ),
         why="Killing the leader does not close the read ends held in this process; left open they are a descriptor leak per timed-out rung in a CLI that stays resident.",
+    ),
+    Belief(
+        name="a reap that cannot collect the leader does not wait without a limit",
+        path=LADDER / "ladder_cli/cli.py",
+        old="            process.wait(timeout=stopping.KILL_WAIT_S)\n",
+        new="            process.wait()\n",
+        tests=(
+            "tests/test_cli.py::test_reap_reads_for_the_drain_period_and_only_then_kills_and_closes_the_pipes[pipes-held-open]",
+            "tests/test_cli.py::test_a_leader_that_survives_sigkill_is_reported_not_waited_on_forever",
+        ),
+        why="Review finding F01: a leader in uninterruptible sleep ignores SIGKILL, and the unbounded `wait()` that followed held the resident CLI forever.",
     ),
     # ---- what the kernel says about a group, asked in one place ----
     Belief(

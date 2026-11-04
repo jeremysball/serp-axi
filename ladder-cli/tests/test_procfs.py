@@ -267,3 +267,31 @@ def test_only_an_exit_reads_as_gone_and_any_other_failed_read_asks_the_kernel(mo
     monkeypatch.setattr(procfs.os, "getpgid", lambda pid: group)
 
     assert procfs.has_running_member(group) is running
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the behavior is the Linux /proc read, not a fake tree")
+def test_an_open_stat_file_raises_process_lookup_error_after_its_process_is_reaped() -> None:
+    """The `ProcessLookupError` arm is a real kernel answer, not a claim in a docstring.
+
+    A stat file opened while its process was a zombie keeps reading until the
+    process is reaped; the next read through that already-open file raises
+    `ProcessLookupError`, while a fresh read raises `FileNotFoundError`. That is
+    the race `has_running_member` catches in its `except` clause, and
+    `test_only_an_exit_reads_as_gone_and_any_other_failed_read_asks_the_kernel`
+    checks what the module does with it.
+    """
+    child = unreaped_child(own_group=False)
+    fd = os.open(f"/proc/{child.pid}/stat", os.O_RDONLY)
+    try:
+        assert os.read(fd, 4096), "precondition: the open file read while the process was a zombie"
+        child.wait()
+        os.lseek(fd, 0, os.SEEK_SET)
+        with pytest.raises(ProcessLookupError):
+            os.read(fd, 4096)
+    finally:
+        os.close(fd)
+        if child.returncode is None:
+            child.wait()
+
+    with pytest.raises(FileNotFoundError):
+        procfs.read_stat(child.pid)
