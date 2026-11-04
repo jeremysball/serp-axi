@@ -40,8 +40,9 @@ first scrape request and tears it down when idle. Transport is stdin/stdout
 with NDJSON: one JSON request object per line, one JSON response object per
 line. No sockets, no ports, no supervision beyond the parent holding the child
 handle. A supervised-process failure surfaces as a failed request, never a
-hang: every rung keeps the spike's 90s SIGKILL budget, and the parent applies
-its own overall timeout on top.
+hang: every rung keeps the spike's 90s budget (an expired one is stopped with
+SIGTERM, then SIGKILL after `STOP_GRACE_S`), and the parent applies its own
+overall timeout on top.
 
 Readiness is signalled explicitly. The child prints a single
 `{"ready": true, ...}` line once its event loop is up and before it reads its
@@ -119,8 +120,10 @@ replaces `verdict`.
 
 Browser and model dependencies load on first need, not at startup. The
 resident CLI owns the NDJSON loop, but every live rung runs in a separate
-subprocess under the hard 90s SIGKILL budget. There is no inline soft
-SIGALRM route and no cross-fetch browser or model residency.
+subprocess under a hard 90s budget: on expiry the rung's process group gets
+SIGTERM, then SIGKILL after the grace period (`STOP_GRACE_S` in
+`ladder-cli/ladder_cli/stopping.py`). There is no inline soft SIGALRM route and
+no cross-fetch browser or model residency.
 
 Four live rungs are registered, in order: HTTP (`primp`, browser
 impersonation), Camoufox 0.5.6 (`humanize=True`, verified at
@@ -273,8 +276,8 @@ scrape command (src/commands/scrape.ts)
 exactly one child per process, one in-flight request at a time (a second
 concurrent scrape queues behind the first; the falsifier in 1.1 is measured here,
 not designed for). A child that dies mid-request surfaces its stderr tail as the
-request error. SIGKILL per rung stays inside the child; the parent's overall
-timeout races the response read.
+request error. The per-rung stop (SIGTERM, then SIGKILL) stays inside the
+child; the parent's overall timeout races the response read.
 
 Python side (`ladder-cli/ladder_cli/`, separate from the npm layout):
 
@@ -288,7 +291,7 @@ __main__ / cli.py
          record actual rungReached = index + 1
          run_rung_isolated(rung, url, ctx=ctx)
            -> python -m ladder_cli --rung <rung> <url> [jar flags]
-           -> new session; 90s hard budget; SIGKILL process group on timeout
+           -> new session; 90s hard budget; SIGTERM then SIGKILL to the group on timeout
            -> child: _run_rung_child -> fetch -> JSON page or stderr exception
            -> supervisor: judge page or map child failure
          empty ok -> blocked

@@ -2,15 +2,112 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import io
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
 
-from ladder_cli import cli
+import pytest
+
+from ladder_cli import cli, procfs, stopping
 from ladder_cli.rungs import RungResult, RungVerdict
+
+from conftest import kill_group, unreaped_child
+
+
+# A rung that ignores SIGTERM and writes its pid to the file named in argv[1], so a
+# test can tell a stop that asked and waited from one that also killed.
+STUBBORN_RUNG = (
+    "import os, signal, sys, time\n"
+    "from pathlib import Path\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+    "time.sleep(15)\n"
+)
+
+
+def _stubborn_rung(ready) -> list[str]:
+    return [sys.executable, "-c", STUBBORN_RUNG, str(ready)]
+
+
+# A rung with a second process in its group. Both ignore SIGTERM. `_reap` kills the
+# leader after the grace period whatever happened before it, so a test that only
+# watches the leader cannot tell a group-wide SIGKILL from none at all; the member
+# is what only the group-wide SIGKILL reaches.
+def _rung_that_starts(
+    member_code: str,
+    *,
+    quiet: bool = False,
+    ignore_term: bool = False,
+    wait_for: str = "sys.argv[2]",
+    leader_pid_file: str | None = None,
+    member_argv: str = "sys.argv[1], sys.argv[2]",
+    end: str = "time.sleep(60)\n",
+) -> str:
+    """A stand-in rung: start `member_code` in the rung's own group, wait, then `end`.
+
+    `wait_for` is the file the leader waits for before it goes on. `quiet` sends
+    the member's stdio to /dev/null, as Xvfb's goes in the real rung, so the
+    pipes closing says nothing about it. `ignore_term` makes the leader ignore
+    SIGTERM like a browser that will not stop. `leader_pid_file` names the argv
+    that receives the leader's own pid once the member is up, and `member_argv`
+    is the argument list the member gets: it is explicit because a member that
+    takes only a pid file (as `STUBBORN_RUNG` does) must not be handed the
+    leader's path in its place.
+    """
+    stdio = ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL" if quiet else ""
+    ignoring = "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else ""
+    leader = f"Path({leader_pid_file}).write_text(str(os.getpid()))\n" if leader_pid_file else ""
+    return (
+        "import os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"{ignoring}"
+        f"subprocess.Popen([sys.executable, '-c', {member_code!r}, {member_argv}]{stdio})\n"
+        f"while not Path({wait_for}).exists():\n"
+        "    time.sleep(0.01)\n"
+        f"{leader}"
+        f"{end}"
+    )
+
+
+STUBBORN_LEADER = _rung_that_starts(
+    STUBBORN_RUNG,
+    ignore_term=True,
+    wait_for="sys.argv[2]",
+    leader_pid_file="sys.argv[1]",
+    member_argv="sys.argv[2]",
+    end="time.sleep(15)\n",
+)
+
+
+def _stubborn_family(leader_ready, member_ready) -> list[str]:
+    return [sys.executable, "-c", STUBBORN_LEADER, str(leader_ready), str(member_ready)]
+
+
+def _assert_member_was_killed(member_ready) -> None:
+    """The member outlives its leader's death unless the whole group was sent SIGKILL.
+
+    SIGKILL lands asynchronously, so the member gets a moment to finish exiting. It
+    sleeps 15 seconds, so waiting two never lets a survivor pass for a casualty.
+    """
+    pid = int(member_ready.read_text())
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            running = procfs.read_stat(pid).state != "Z"
+        except (FileNotFoundError, ProcessLookupError):
+            running = False
+        if not running:
+            return
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)  # the test's own cleanup, not the code's
+            raise AssertionError("the group's second member is still running: the SIGKILL did not reach the group")
+        time.sleep(0.02)
 
 
 def sequence(*results: RungResult):
@@ -154,6 +251,540 @@ def test_a_rung_that_blows_its_budget_is_killed() -> None:
     assert elapsed < 20, f"the SIGKILL did not land; waited {elapsed}s"
     assert result.verdict is RungVerdict.ERROR
     assert "budget" in result.reason
+
+
+def _rung_that_stops_on_term(marker: str, *, delay: float = 0.0) -> str:
+    """A member that writes `marker` to argv[1] when SIGTERM arrives, then exits.
+
+    `delay` is the time it takes to clean up before writing: a rung is not done
+    until what it started has finished stopping.
+    """
+    return (
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        "stopped, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
+        "def stop(signum, frame):\n"
+        f"    time.sleep({delay})\n"
+        f"    stopped.write_text({marker!r})\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "ready.write_text('ready')\n"
+        "time.sleep(60)\n"
+    )
+
+
+_STOPS_ON_TERM = _rung_that_stops_on_term("asked")
+
+
+def test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first(tmp_path) -> None:
+    """Whatever the rung started (a display server, a browser) gets to clean up after itself.
+
+    SIGKILL gives no process that chance, and Xvfb leaves its lock file behind
+    on one. The stand-in child starts a grandchild in its group that records
+    having been asked, then both hang until the budget expires.
+    """
+    stopped, ready = tmp_path / "stopped", tmp_path / "ready"
+    child = _rung_that_starts(_STOPS_ON_TERM)
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=2.0,
+        argv=[sys.executable, "-c", child, str(stopped), str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the grandchild was up before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert stopped.exists(), "the group was killed outright, with no chance to stop itself"
+
+
+_SLOW_TO_STOP = _rung_that_stops_on_term("cleaned up", delay=0.6)
+
+
+def test_a_rung_is_not_done_until_what_it_started_has_finished_stopping(tmp_path) -> None:
+    """The rung itself dying is not the end of it: Xvfb outlives it while it removes its lock.
+
+    The grandchild's output goes to /dev/null, as Xvfb's does in the real rung, so
+    the pipes closing says nothing about it. Only waiting on the group does.
+    """
+    finished, ready = tmp_path / "finished", tmp_path / "ready"
+    child = _rung_that_starts(_SLOW_TO_STOP, quiet=True)
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=1.5,
+        argv=[sys.executable, "-c", child, str(finished), str(ready)],
+    )
+
+    assert ready.exists(), "precondition: the grandchild was up before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert finished.exists(), "the rung was reported stopped while its grandchild was still cleaning up"
+
+
+def test_a_rung_that_ignores_the_request_to_stop_is_killed_after_the_grace_period(tmp_path, monkeypatch) -> None:
+    """Asking first must not mean waiting forever on a rung that will not stop."""
+    monkeypatch.setattr(stopping, "STOP_GRACE_S", 0.3)
+    ready = tmp_path / "ready"
+    started = time.monotonic()
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=1.5,
+        argv=_stubborn_rung(ready),
+    )
+
+    assert ready.exists(), "precondition: the child was ignoring SIGTERM before the budget ran out"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert time.monotonic() - started < 10, "the kill did not land after the grace period"
+    try:
+        os.kill(int(ready.read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("the rung that ignored SIGTERM is still running")
+
+
+def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_the_first(tmp_path, monkeypatch) -> None:
+    """`main` turns SIGTERM into SystemExit, so one can land inside the grace wait.
+
+    Without a fallback that exits the wait with the SIGKILL still unsent, a rung
+    that ignores SIGTERM outlives the CLI that was stopping it. The stand-in
+    raises SystemExit from the wait's own sleep, which is where the handler's
+    exception would surface.
+    """
+    ready = tmp_path / "ready"
+    member = tmp_path / "member"
+
+    def second_sigterm(seconds: float) -> None:
+        raise SystemExit(128 + 15)
+
+    group = None
+    try:
+        monkeypatch.setattr(cli.time, "sleep", second_sigterm)
+        with pytest.raises(SystemExit):
+            cli.run_rung_isolated(
+                "http",
+                "https://example.com/article",
+                timeout_s=1.5,
+                argv=_stubborn_family(ready, member),
+            )
+        monkeypatch.undo()
+        assert ready.exists(), "precondition: the rung was ignoring SIGTERM before the budget ran out"
+        group = int(ready.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(group, 0)
+        # `_reap` kills the leader after the grace period even when the SIGKILL never
+        # went out, so the leader alone cannot show it did. The member can.
+        _assert_member_was_killed(member)
+    finally:
+        kill_group(group)
+
+
+def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(tmp_path, monkeypatch) -> None:
+    """Review finding: the first `killpg` sat outside the `try` that holds the kill.
+
+    `main` turns SIGTERM into SystemExit, which can surface in that very call.
+    Then nothing had been sent and nothing was left to send it, and a rung that
+    ignores SIGTERM outlived the CLI that was stopping it. The stand-in raises
+    from the first SIGTERM before it reaches the group, which is where the
+    handler's exception would surface. The kill reaches the real group.
+    """
+    ready = tmp_path / "ready"
+    member = tmp_path / "member"
+    real_killpg = os.killpg
+
+    def interrupted(group: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            raise SystemExit(128 + 15)
+        real_killpg(group, sig)
+
+    group = None
+    try:
+        monkeypatch.setattr(cli.os, "killpg", interrupted)
+        with pytest.raises(SystemExit):
+            cli.run_rung_isolated(
+                "http",
+                "https://example.com/article",
+                timeout_s=1.5,
+                argv=_stubborn_family(ready, member),
+            )
+        monkeypatch.undo()
+        assert ready.exists(), "precondition: the rung was ignoring SIGTERM before the budget ran out"
+        group = int(ready.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(group, 0)
+        _assert_member_was_killed(member)  # same reason as the test above
+    finally:
+        kill_group(group)
+
+
+def test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped(tmp_path, monkeypatch) -> None:
+    """Review finding H2: two scans that find nothing running can still be wrong.
+
+    A child forked and gone again between them is in neither listing. Here the
+    scans are blind on purpose (stood in for by `procfs.has_running_member` saying
+    nothing runs) while a real rung ignores SIGTERM, which is exactly what a missed member
+    looks like to the wait. Only the last SIGKILL, sent while the leader is still
+    unreaped, ends it. The rung has a second process in its group: `_reap` kills
+    the leader after the grace period even with no SIGKILL, so the leader alone
+    cannot show the signal went out. The member can.
+    """
+    monkeypatch.setattr(procfs, "has_running_member", lambda group: False)
+    ready = tmp_path / "ready"
+    member = tmp_path / "member"
+
+    try:
+        result = cli.run_rung_isolated(
+            "http",
+            "https://example.com/article",
+            timeout_s=1.5,
+            argv=_stubborn_family(ready, member),
+        )
+
+        assert ready.exists(), "precondition: the rung was ignoring SIGTERM before the budget ran out"
+        assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(ready.read_text()), 0)
+        _assert_member_was_killed(member)
+    finally:
+        kill_group(int(ready.read_text()) if ready.exists() else None)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc and signals process groups, as the group check does")
+def test_an_unreaped_leader_keeps_its_pid_and_group_id_allocated() -> None:
+    """The kernel invariant `_stop_group` leans on when it sends its last SIGKILL.
+
+    The comment above `wait_gone` says a pid stays allocated while its process is
+    an unreaped zombie, so the group id cannot be handed to anything else until
+    `_reap` runs. This checks that against a real child rather than a fake: while
+    the leader is a zombie its pid and group are still there, and reaping it is
+    what releases both.
+    """
+    leader = unreaped_child()
+    try:
+        assert procfs.read_stat(leader.pid).state == "Z", "precondition: the leader is an unreaped zombie"
+        assert os.getpgid(leader.pid) == leader.pid, "the zombie still holds its group"
+        os.killpg(leader.pid, 0)  # the group id is still ours, not another process's
+    finally:
+        leader.wait()
+
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(leader.pid)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(leader.pid, 0)
+
+
+class _GroupLeader:
+    """The leader side `_stop_group` needs once the signals are stubbed out."""
+
+    pid = 4_000_000
+    stdout = None
+    stderr = None
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        return "", ""
+
+
+@pytest.mark.parametrize(("survives",), [(True,), (False,)], ids=["survives-SIGKILL", "stops-on-SIGKILL"])
+def test_a_group_member_that_survives_sigkill_is_reported_not_called_stopped(monkeypatch, survives) -> None:
+    """`_stop_display` raises for this; the group stop used to call it stopped.
+
+    A member in uninterruptible sleep ignores SIGKILL until its call returns. The
+    pair is the same stop with only the post-SIGKILL answer changed: one row still
+    running (it must raise) and one row gone (it must return).
+    """
+    monkeypatch.setattr(stopping, "STOP_GRACE_S", 0.01)
+    monkeypatch.setattr(stopping, "KILL_WAIT_S", 0.01)
+    monkeypatch.setattr(procfs, "group_is_running", lambda group: survives)
+    sent: list[int] = []
+    monkeypatch.setattr(cli, "_signal_group", lambda group, sig: sent.append(sig))
+
+    if survives:
+        with pytest.raises(RuntimeError, match="did not stop within"):
+            cli._stop_group(_GroupLeader())  # type: ignore[arg-type]
+    else:
+        cli._stop_group(_GroupLeader())  # type: ignore[arg-type]
+
+    assert sent.count(signal.SIGTERM) == 1, "precondition: the group was asked to stop"
+    assert sent.count(signal.SIGKILL) == 1, "the one kill is sent either way, and only once"
+
+
+class _Pipe:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _LeaderWhosePipesMayStayOpen:
+    """The leader of a stopped rung: `communicate` either finishes or hits its timeout."""
+
+    def __init__(self, pipes_held_open: bool, survives_kill: bool = False) -> None:
+        self.pid = 4_000_002
+        self.pipes_held_open = pipes_held_open
+        self.survives_kill = survives_kill
+        self.stdout = _Pipe()
+        self.stderr = _Pipe()
+        self.timeouts: list[float | None] = []
+        self.wait_timeouts: list[float | None] = []
+        self.killed = False
+        self.waited = False
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.timeouts.append(timeout)
+        if self.pipes_held_open:
+            raise subprocess.TimeoutExpired("rung", timeout)
+        return "", ""
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> None:
+        self.waited = True
+        self.wait_timeouts.append(timeout)
+        if self.survives_kill and timeout is not None:
+            raise subprocess.TimeoutExpired("rung", timeout)
+
+
+@pytest.mark.parametrize("pipes_held_open", [True, False], ids=["pipes-held-open", "pipes-closed"])
+def test_reap_reads_for_the_drain_period_and_only_then_kills_and_closes_the_pipes(monkeypatch, pipes_held_open) -> None:
+    """The bounded read: the drain period comes from `stopping`, and a timeout is what triggers the fallback.
+
+    The pair differs only in whether the read finishes. When it does, the leader
+    is left alone; when it does not, the leader is killed and reaped and both
+    pipes are closed by hand, because nothing else will.
+    """
+    monkeypatch.setattr(stopping, "PIPE_DRAIN_S", 2.5)
+    monkeypatch.setattr(stopping, "KILL_WAIT_S", 1.25)
+    leader = _LeaderWhosePipesMayStayOpen(pipes_held_open)
+
+    cli._reap(leader)  # type: ignore[arg-type]
+
+    assert leader.timeouts == [2.5], "the read was bounded by the pipe drain bound"
+    assert leader.killed is pipes_held_open
+    assert leader.waited is pipes_held_open
+    assert leader.wait_timeouts == ([1.25] if pipes_held_open else [])
+    assert leader.stdout.closed is pipes_held_open
+    assert leader.stderr.closed is pipes_held_open
+
+
+def test_a_leader_that_survives_sigkill_is_reported_not_waited_on_forever(monkeypatch) -> None:
+    """A leader in uninterruptible sleep ignores SIGKILL; the reap must not hang on it.
+
+    The pipes are closed on the way out too, which is why the kill and the raise
+    live either side of the same `finally`.
+    """
+    monkeypatch.setattr(stopping, "PIPE_DRAIN_S", 0.25)
+    monkeypatch.setattr(stopping, "KILL_WAIT_S", 0.5)
+    leader = _LeaderWhosePipesMayStayOpen(pipes_held_open=True, survives_kill=True)
+
+    with pytest.raises(RuntimeError, match=r"did not exit within 0\.5s of SIGKILL"):
+        cli._reap(leader)  # type: ignore[arg-type]
+
+    assert leader.killed, "precondition: the reap reached the kill"
+    assert leader.wait_timeouts == [0.5], "the wait after SIGKILL is bounded too"
+    assert leader.stdout.closed and leader.stderr.closed, "the raise did not leak the pipes"
+
+
+def test_reap_does_not_hang_on_a_straggler_outside_the_group_that_holds_the_pipes(monkeypatch, tmp_path) -> None:
+    """The same fallback on the real kernel: a process that left the group and kept the pipes.
+
+    `setsid` takes the straggler out of the rung's group, so the group's SIGKILL
+    cannot end it, and it inherited the rung's stdout and stderr, so `communicate`
+    would wait for it to exit. The rung exits at once, so what is left to wait on
+    is only the straggler's 30-second sleep.
+    """
+    monkeypatch.setattr(stopping, "PIPE_DRAIN_S", 0.5)
+    pid_file = tmp_path / "straggler.pid"
+    rung = (
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "straggler = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)\n"
+        "Path(sys.argv[1]).write_text(str(straggler.pid))\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", rung, str(pid_file)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    straggler = None
+    try:
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the rung never started its straggler"
+            time.sleep(0.01)
+        straggler = int(pid_file.read_text())
+        started = time.monotonic()
+
+        cli._reap(process)
+
+        assert time.monotonic() - started < 10, "the reap waited for the straggler's own sleep"
+        os.kill(straggler, 0)  # precondition: the straggler outlived the reap, so it really held the pipes
+        assert process.returncode is not None, "the leader was reaped"
+        assert process.stdout.closed and process.stderr.closed
+    finally:
+        if straggler is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(straggler, signal.SIGKILL)
+        if process.returncode is None:
+            process.kill()
+            process.wait()
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None and not pipe.closed:
+                pipe.close()
+
+
+def _rung_that_dies_on_a_signal_leaving_a_member(tmp_path):
+    """The argv of a rung that SIGKILLs itself after starting one quiet child, and the file that child writes.
+
+    The child sleeps 30 seconds with SIGTERM at its default action, so a group
+    stop that reaches it ends it on the first signal.
+    """
+    member_file = tmp_path / "member"
+    member_code = (
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    rung = _rung_that_starts(
+        member_code,
+        quiet=True,
+        wait_for="sys.argv[1]",
+        member_argv="sys.argv[1]",
+        end="os.kill(os.getpid(), signal.SIGKILL)\n",
+    )
+    return [sys.executable, "-c", rung, str(member_file)], member_file
+
+
+def test_a_rung_that_dies_on_a_signal_has_what_it_started_stopped(tmp_path) -> None:
+    """A child killed by the OOM killer or a crash cannot run its own cleanup.
+
+    `communicate` returns normally with the leader's signal return code, so this
+    used to skip the group stop entirely and leave an Xvfb (here, a quiet child
+    in the rung's group) holding its display lock for the life of the machine.
+    """
+    argv, member_file = _rung_that_dies_on_a_signal_leaving_a_member(tmp_path)
+
+    result = cli.run_rung_isolated("http", "https://example.com/article", timeout_s=5, argv=argv)
+
+    assert member_file.exists(), "precondition: the rung started a process in its group"
+    assert result.verdict is RungVerdict.ERROR
+    _assert_member_was_killed(member_file)
+
+
+def test_a_reaped_leaders_emptied_group_is_not_sent_a_last_sigkill(monkeypatch, tmp_path) -> None:
+    """Once `communicate` has reaped the leader, nothing holds the group id.
+
+    The same rung as above, but the group stop is watched. The member ends on the
+    SIGTERM, so the group is empty when the grace wait returns. The leader is
+    already reaped, so its number may be someone else's by now, and a SIGKILL sent
+    to it would hit that group. The unconditional last SIGKILL belongs to the
+    budget path, where the leader is still a zombie holding the number.
+    """
+    sent: list[int] = []
+    real_signal_group = cli._signal_group
+
+    def spy(group: int, sig: int) -> None:
+        sent.append(sig)
+        real_signal_group(group, sig)
+
+    monkeypatch.setattr(cli, "_signal_group", spy)
+    argv, member_file = _rung_that_dies_on_a_signal_leaving_a_member(tmp_path)
+
+    cli.run_rung_isolated("http", "https://example.com/article", timeout_s=5, argv=argv)
+
+    assert sent[:1] == [signal.SIGTERM], "precondition: the group stop ran and asked the member to stop"
+    _assert_member_was_killed(member_file)
+    assert signal.SIGKILL not in sent
+
+
+def test_a_stubborn_group_is_scanned_for_members_only_a_few_times_a_second(monkeypatch, tmp_path) -> None:
+    """Review finding F31: the cheap question is asked often, the /proc scan rarely.
+
+    A group that ignores SIGTERM used to cost a full process-table scan every
+    20 ms for the whole grace period (about 50 a second). The cheap
+    `killpg(group, 0)` is still asked that often, but the scan is bounded to one
+    every 0.2 s; the last SIGKILL covers a member a slower scan missed.
+    """
+    monkeypatch.setattr(stopping, "STOP_GRACE_S", 1.0)
+    monkeypatch.setattr(stopping, "KILL_WAIT_S", 0.5)
+    calls: list[int] = []
+    real = procfs.has_running_member
+
+    def counting(group: int) -> bool:
+        calls.append(group)
+        return real(group)
+
+    monkeypatch.setattr(procfs, "has_running_member", counting)
+    ready = tmp_path / "ready"
+
+    result = cli.run_rung_isolated(
+        "http",
+        "https://example.com/article",
+        timeout_s=0.3,
+        argv=_stubborn_rung(ready),
+    )
+
+    assert ready.exists(), "precondition: the group was still ignoring SIGTERM"
+    assert result.verdict is RungVerdict.ERROR and "budget" in result.reason
+    assert len(calls) >= 2, "precondition: the group was scanned while it ran"
+    assert len(calls) <= 12, f"{len(calls)} full /proc scans in one stop; the cheap check was not used"
+
+
+_ORPHANS_THE_GRANDCHILD_TO_A_PARENT_THAT_NEVER_REAPS = (
+    "import ctypes, subprocess, sys, time\n"
+    "from pathlib import Path\n"
+    "from ladder_cli import cli, stopping\n"
+    # What a container whose PID 1 never waits does: orphans stay zombies for good.
+    "PR_SET_CHILD_SUBREAPER = 36\n"
+    "if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:\n"
+    "    sys.exit('could not become a subreaper')\n"
+    "stopping.STOP_GRACE_S = 3.0\n"
+    "ready = Path(sys.argv[1])\n"
+    "rung = (\n"
+    "    'import subprocess, sys, time\\n'\n"
+    "    'from pathlib import Path\\n'\n"
+    "    \"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\\n\"\n"
+    "    'Path(sys.argv[1]).write_text(\"up\")\\n'\n"
+    "    'time.sleep(60)\\n'\n"
+    ")\n"
+    "process = subprocess.Popen(\n"
+    "    [sys.executable, '-c', rung, str(ready)],\n"
+    "    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,\n"
+    ")\n"
+    "while not ready.exists():\n"
+    "    time.sleep(0.01)\n"
+    "started = time.monotonic()\n"
+    "cli._stop_group(process)\n"
+    "print(time.monotonic() - started)\n"
+)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc and uses prctl, as the rest of the group check does")
+def test_a_stopped_group_whose_orphan_nobody_reaps_is_not_waited_on_for_the_whole_grace_period(tmp_path) -> None:
+    """A zombie is dead; counting it as still running costs every timeout the full wait.
+
+    `killpg(group, 0)` succeeds while an unreaped zombie is in the group. Under
+    a PID 1 that never waits, the rung's orphaned grandchild is one for good,
+    so the group is never seen to be gone and `_stop_group` always spent its
+    whole grace period, then SIGKILLed the dead. Measured on the real kernel
+    with a subreaper standing in for that PID 1.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _ORPHANS_THE_GRANDCHILD_TO_A_PARENT_THAT_NEVER_REAPS, str(tmp_path / "ready")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    elapsed = float(result.stdout.strip().splitlines()[-1])
+    assert elapsed < 2.0, f"waited {elapsed:.2f}s of a 3s grace period on a group with nothing left running"
 
 
 def test_a_final_rung_timeout_is_an_error_not_a_defended_page(make_request) -> None:
@@ -466,6 +1097,7 @@ def test_the_child_command_carries_jar_flags(monkeypatch, tmp_path) -> None:
     class FakeProcess:
         def __init__(self, command, **_kwargs):
             captured["command"] = list(command)
+            self.pid = 4_000_003
 
         def communicate(self, timeout=None):
             return (page + "\n", "")
@@ -513,6 +1145,41 @@ def test_child_mode_parses_jar_flags(monkeypatch, tmp_path) -> None:
         "url": "https://example.com/x",
         "ctx": RungContext(jar_in=Path(jar_in), jar_out=Path(jar_out)),
     }
+
+
+def test_a_rung_child_takes_sigterm_as_the_default_action_not_via_the_resident_handler() -> None:
+    """The handler belongs to the resident loop, not the `--rung` branch.
+
+    `stopping.stop_with_grace` leans on this: a SIGTERM that reaches a rung child
+    ends the process instead of raising `SystemExit` inside the stop. A signal to
+    a real child distinguishes the two by its exit status: the default action is
+    death by SIGTERM (negative return code), while the installed handler would
+    exit 143 after turning it into `SystemExit`.
+    """
+    script = (
+        "import sys, time\n"
+        "from ladder_cli import cli\n"
+        "def slow(rung, url, ctx=None):\n"
+        "    print('ready', flush=True)\n"
+        "    time.sleep(60)\n"
+        "cli.fetch = slow\n"
+        "sys.exit(cli.main(['--rung', 'http', 'https://example.com/']))\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready", "precondition: the rung child was running"
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=10)
+        assert process.returncode == -signal.SIGTERM, (
+            "a rung child installed the resident SIGTERM handler before its branch"
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 def test_each_rung_receives_only_its_own_jar_format(make_request):
