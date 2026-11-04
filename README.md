@@ -190,11 +190,13 @@ through one byte cap.
 | Response size | `--max-response-bytes <n>` | `SERP_AXI_MAX_RESPONSE_BYTES` | `maxResponseBytes` | 67108864 (64 MiB) |
 
 A response over the cap stops the run with a runtime error that names the cap and
-the three places to raise it. serp-axi never works from part of a body: a
-cut-off JSON document does not parse, and a cut-off page would look complete. The
-count is of decoded bytes, after gzip or brotli is undone, so a small compressed
-reply that expands past the cap is refused too. A `content-length` over the cap
-is refused before any byte is read.
+how to raise it. serp-axi never works from part of a body: a cut-off JSON
+document does not parse, and a cut-off page would look complete. The count is of
+decoded bytes, after gzip or brotli is undone, so a small compressed reply that
+expands past the cap is refused too. A `content-length` over the cap is refused
+before any byte is read, unless the response says it is compressed: then the
+header counts wire bytes while the cap counts decoded ones, so the read itself
+enforces the cap.
 
 The value goes flag, then env var, then the config file, then the default, and
 must be a whole number of bytes from 1 up. An empty env var counts as unset; an
@@ -202,10 +204,11 @@ empty flag value is an error. The config key is read for `scrape` and for
 `search --provider searxng`, the two paths that open the config file; the other
 search providers take the flag, the env var or the default. With `--ladder` the
 cap bounds the one JSON line the ladder CLI prints back, which is the page plus
-its title and links after escaping, so it is a little larger than the text. When Serper, Kagi or
-Bright Data fails a request, the first 64 KiB of the error response is kept to
-explain it, and a longer one is cut, not refused. SearXNG errors are reported
-from the status code alone and read no error body.
+its title and links after escaping, so it is a little larger than the text. When Kagi or
+Bright Data fails a request, or Serper returns a status it does not map, the first 64 KiB
+of the error response is kept to explain it, and a longer one is cut, not refused.
+A Serper status the CLI maps is decided from the status alone, and SearXNG errors
+are reported from the status code alone; neither reads an error body.
 
 ### `update`
 

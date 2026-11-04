@@ -641,6 +641,46 @@ test("a reply line at the cap resolves and one byte over fails", async () => {
   }
 });
 
+test("a long reply after a blank line in the same read is still stopped at the cap", { timeout: 15000 }, async () => {
+  // The blank line makes firstNewline 0; measuring only that line would count
+  // zero bytes and let the 5000-byte reply through a 1000-byte cap.
+  const ladder = client("blank-then-long", { maxLineBytes: 1000 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1000 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a large reply is drained once, not rescanned on every chunk before its newline", { timeout: 15000 }, async () => {
+  const ladder = client("big-page", { maxLineBytes: 1_000_000 });
+  const internals = ladder as unknown as { drainLines: () => void };
+  try {
+    // Settle the ready line on the first fetch, so the count below covers only
+    // the 200 KB reply that follows.
+    await ladder.fetch("https://a.example/x");
+
+    const original = internals.drainLines.bind(ladder);
+    let drains = 0;
+    internals.drainLines = () => {
+      drains += 1;
+      original();
+    };
+
+    const response = await ladder.fetch("https://a.example/x");
+    assert.equal(response.text.length, 200000);
+    // The reply has no newline until its last chunk. Draining per chunk would
+    // rescan the whole accumulated line each time, which is quadratic.
+    assert.equal(drains, 1);
+  } finally {
+    await ladder.close();
+  }
+});
+
 test("a child that never ends its reply line is stopped at the cap, not buffered forever", { timeout: 15000 }, async () => {
   const ladder = client("endless-line", { maxLineBytes: 1024 * 1024 });
   try {

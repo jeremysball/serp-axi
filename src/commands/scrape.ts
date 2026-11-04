@@ -1,7 +1,7 @@
 import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
-import { MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG } from "../body.ts";
+import { MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG, raiseCapHelp } from "../body.ts";
 import { SerpAxiError } from "../errors.ts";
 import type { AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
@@ -9,6 +9,7 @@ import { scrapeSerper } from "../serper.ts";
 import { fetchViaLadder, LADDER_AXIS_FLAG_NAMES, LadderLineTooLongError, resolveLadderAxes, resolveLadderBin } from "../ladder.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
+import { nonEmpty } from "../option-sources.ts";
 import { requestMaxResponseBytes, resolveMaxResponseBytes } from "../response-limit.ts";
 import {
   FULL_MAX_CHARS_ENV,
@@ -55,10 +56,6 @@ type Provider = (typeof PROVIDERS)[number];
 // Bright Data's record shape depends on the dataset, so every string field is
 // limited except the url, which has to stay usable as a link.
 const NON_TRUNCATED_RECORD_FIELDS: ReadonlySet<string> = new Set(["url"]);
-
-function nonEmpty(value: string | undefined): string | undefined {
-  return value !== undefined && value.length > 0 ? value : undefined;
-}
 
 function preferredUrlString(raw: string, normalized: URL): string {
   const normalizedStr = normalized.toString();
@@ -314,7 +311,6 @@ async function runBrightDataScrape(
   config: StoredConfig | undefined,
   requestedMarkup: boolean | undefined,
   charRequest: CharLimitRequest,
-  requestedMaxBytes: number | undefined,
 ): Promise<AxiOutput> {
   if (positionals.length === 0) {
     throw new SerpAxiError(
@@ -333,6 +329,7 @@ async function runBrightDataScrape(
       "export BRIGHTDATA_API_KEY=<your key> and re-run",
     );
   }
+  const requestedMaxBytes = maxResponseBytesRequest(flags, env);
   // The config file is read here, after the input checks, so a bad URL or a
   // missing key is reported as that rather than as a problem with a file the run
   // never needed. Every scrape reads it for the character limits; Bright Data is
@@ -387,6 +384,16 @@ function markupFromFlagOrEnv(flags: Record<string, string | boolean>, env: NodeJ
   return resolveIncludeMarkup({ flag, env: fromEnv });
 }
 
+// The cap flag or env value, checked once the path has finished its own input
+// checks but before it opens the config file. Checking it any earlier would let
+// a malformed cap mask a missing URL, a bad provider, or a conflicting flag.
+function maxResponseBytesRequest(
+  flags: Record<string, string | boolean>,
+  env: NodeJS.ProcessEnv,
+): number | undefined {
+  return requestMaxResponseBytes(flags["max-response-bytes"] as string | undefined, env[MAX_RESPONSE_BYTES_ENV]);
+}
+
 // `env` and `config` are injectable so a test can drive every setting without
 // touching process.env or the machine's real config file. `config` left unset
 // means "read the config file if a setting needs it".
@@ -400,15 +407,8 @@ export async function runScrape(
   const requestedMarkup = markupFromFlagOrEnv(flags, env);
   const charRequest = charLimitRequest(flags, env);
 
-  // Checked before the paths split, so a bad flag or env value fails the same way on
-  // every one of them, and before any config file is opened.
-  const requestedMaxBytes = requestMaxResponseBytes(
-    flags["max-response-bytes"] as string | undefined,
-    env[MAX_RESPONSE_BYTES_ENV],
-  );
-
   if (flags.ladder) {
-    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false, charRequest, requestedMaxBytes);
+    return runLadderScrape(positionals, flags, env, config, requestedMarkup ?? false, charRequest);
   }
 
   for (const axis of LADDER_AXIS_FLAGS) {
@@ -424,7 +424,7 @@ export async function runScrape(
   const provider = parseProvider(flags.provider);
 
   if (provider === "brightdata") {
-    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup, charRequest, requestedMaxBytes);
+    return runBrightDataScrape(positionals, flags, fetchImpl, env, config, requestedMarkup, charRequest);
   }
 
   if (flags["dataset-id"] !== undefined) {
@@ -454,6 +454,7 @@ export async function runScrape(
     throw new SerpAxiError("SERPER_API_KEY is not set", "runtime", "export SERPER_API_KEY=<your key> and re-run");
   }
 
+  const requestedMaxBytes = maxResponseBytesRequest(flags, env);
   // After the URL and key checks, for the reason given in runBrightDataScrape.
   const stored = config ?? loadStoredConfig(os.homedir(), env);
   const limits = resolveCharLimits(charRequest, stored);
@@ -485,7 +486,6 @@ async function runLadderScrape(
   config: StoredConfig | undefined,
   includeMarkup: boolean,
   charRequest: CharLimitRequest,
-  requestedMaxBytes: number | undefined,
 ): Promise<AxiOutput> {
   if (flags.provider !== undefined) {
     throw new SerpAxiError(
@@ -514,6 +514,7 @@ async function runLadderScrape(
   }
   const url = validateUrl(raw);
   const bin = resolveLadderBin(env);
+  const requestedMaxBytes = maxResponseBytesRequest(flags, env);
   const stored = config ?? loadStoredConfig(os.homedir(), env);
   const axes = resolveLadderAxes({ flag: flags, env, config: stored });
   const limits = resolveCharLimits(charRequest, stored);
@@ -529,7 +530,7 @@ async function runLadderScrape(
       `ladder scrape failed: ${message}`,
       "runtime",
       error instanceof LadderLineTooLongError
-        ? `raise the cap with ${MAX_RESPONSE_BYTES_FLAG} <n>, ${MAX_RESPONSE_BYTES_ENV}=<n>, or "${MAX_RESPONSE_BYTES_CONFIG_KEY}": <n> in the config file`
+        ? raiseCapHelp()
         : "check that the ladder CLI is installed (SERP_AXI_LADDER_BIN)",
     );
   }

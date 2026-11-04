@@ -207,6 +207,28 @@ for (const [name, call] of ERROR_READS) {
   });
 }
 
+test("a compressed body whose wire length is over the cap but decoded length is under it is read", async () => {
+  // A stored (level 0) gzip stream is slightly larger than its input, so the
+  // declared content-length is over the decoded cap even though the body fits.
+  const plain = Buffer.from("a".repeat(900));
+  const packed = gzipSync(plain, { level: 0 });
+  assert.ok(packed.length > plain.length, `the wire body must be larger to prove anything; it is ${packed.length}`);
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip", "content-length": packed.length });
+    res.end(packed);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  try {
+    const text = await readBodyText(await fetch(url), { maxBytes: plain.length, source: "Gzip length test" });
+    assert.equal(text, plain.toString("utf8"));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("the byte cap counts decoded bytes, so a small gzip body that expands past it is refused", async () => {
   // 4 MiB of one letter gzips to a few KiB: far under the cap on the wire, far over it once decoded.
   const plain = Buffer.alloc(4 * 1024 * 1024, 0x61);

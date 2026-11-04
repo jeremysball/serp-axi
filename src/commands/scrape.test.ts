@@ -474,6 +474,54 @@ test("runScrape --ladder rejects a malformed cap before it starts the ladder", a
   );
 });
 
+test("a malformed cap does not mask a more actionable usage error", async () => {
+  const noFetch = (async () => {
+    throw new Error("network was called");
+  }) as typeof fetch;
+  const cases: Array<{ name: string; args: string[]; env: NodeJS.ProcessEnv; expect: RegExp }> = [
+    { name: "Serper, no URL", args: ["--max-response-bytes", "0"], env: {}, expect: /requires a URL/ },
+    {
+      name: "bad provider",
+      args: ["https://example.com", "--provider", "bogus", "--max-response-bytes", "abc"],
+      env: { SERPER_API_KEY: "k", BRIGHTDATA_API_KEY: "k" },
+      expect: /--provider must be one of/,
+    },
+    {
+      name: "axis flag without --ladder",
+      args: ["https://example.com", "--tab-state", "same", "--max-response-bytes", "0"],
+      env: { SERPER_API_KEY: "k" },
+      expect: /only applies with --ladder/,
+    },
+    {
+      name: "ladder with --provider",
+      args: ["https://example.com", "--ladder", "--provider", "serper", "--max-response-bytes", "0"],
+      env: {},
+      expect: /--provider does not apply with --ladder/,
+    },
+    {
+      name: "bad URL",
+      args: ["not a url", "--max-response-bytes", "0"],
+      env: { SERPER_API_KEY: "k" },
+      expect: /is not a valid URL/,
+    },
+    {
+      name: "Bright Data, no URL",
+      args: ["--provider", "brightdata", "--max-response-bytes", "0"],
+      env: { BRIGHTDATA_API_KEY: "k" },
+      expect: /at least one URL/,
+    },
+  ];
+  for (const { name, args, env, expect } of cases) {
+    await assert.rejects(() => runScrape(args, noFetch, env, {}), expect, name);
+  }
+
+  // Positive trigger: valid input still reports the malformed cap.
+  await assert.rejects(
+    () => runScrape(["https://example.com", "--max-response-bytes", "0"], noFetch, { SERPER_API_KEY: "k" }, {}),
+    /--max-response-bytes/,
+  );
+});
+
 test("runScrape --ladder maps a blocked verdict to a typed runtime error", async () => {
   const env = ladderStubEnv("blocked");
   await assert.rejects(

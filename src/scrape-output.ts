@@ -1,10 +1,10 @@
 import { SerpAxiError, describeValue } from "./errors.ts";
 import {
-  parseIntegerSetting,
-  pickOption,
+  nonEmpty,
+  requestIntegerSetting,
+  resolveIntegerSetting,
   settingExamples,
   type IntegerSettingShape,
-  type OptionSource,
   type SettingNames,
 } from "./option-sources.ts";
 import { truncate, type AxiOutput } from "./output.ts";
@@ -210,22 +210,8 @@ const FULL_MAX_CHARS_SHAPE = charLimitShape({
 });
 
 /**
- * One cap, from one source. The shared parser checks the type and names the
- * setting the bad value came from; the range is this cap's own. The only upper
- * bound is the largest integer a number holds exactly.
+ * The caps the flags and env vars set. A cap neither speaks for is left for the config file.
  */
-function validateCharLimit(raw: unknown, source: OptionSource, shape: IntegerSettingShape): number {
-  const value = parseIntegerSetting(raw, source, shape);
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new SerpAxiError(
-      `${shape.names[source]} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
-      "usage",
-      `example: ${shape.examples[source]}`,
-    );
-  }
-  return value;
-}
-
 export interface CharLimitSources {
   /** Whether `--full` was given. Decides which of the two flags may appear. */
   full: boolean;
@@ -278,12 +264,14 @@ export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
     );
   }
   // The config is not open yet, so this picks between the flag and the env var only.
-  const pick = (flag: string | undefined, env: string | undefined, shape: IntegerSettingShape): number | undefined => {
-    const picked = pickOption(flag, env, undefined);
-    return picked === undefined ? undefined : validateCharLimit(picked.value, picked.source, shape);
-  };
-  const maxChars = sources.full ? undefined : pick(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_SHAPE);
-  const fullMaxChars = pick(sources.flagFullMaxChars, sources.envFullMaxChars, FULL_MAX_CHARS_SHAPE);
+  const maxChars = sources.full
+    ? undefined
+    : requestIntegerSetting(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_SHAPE);
+  const fullMaxChars = requestIntegerSetting(
+    sources.flagFullMaxChars,
+    sources.envFullMaxChars,
+    FULL_MAX_CHARS_SHAPE,
+  );
   // Built after the picks, so a flag value that reaches the rerun text has passed
   // validation and is all digits: nothing in it needs shell quoting.
   let capFlags = "";
@@ -295,13 +283,6 @@ export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
   return { full: sources.full, maxChars, fullMaxChars, capFlags };
 }
 
-function charLimitFromConfig(raw: unknown, shape: IntegerSettingShape): number | undefined {
-  // Null and absent both mean "not set", as they do for the ladder's config keys
-  // and `includeMarkup`. The SearXNG keys differ: they reject null.
-  if (raw === undefined || raw === null) return undefined;
-  return validateCharLimit(raw, "config", shape);
-}
-
 /**
  * Fills each cap the flags and env left open: `maxChars` / `fullMaxChars` in the
  * config, then the built-in default. On a `--full` run `maxChars` is not wanted,
@@ -310,11 +291,15 @@ function charLimitFromConfig(raw: unknown, shape: IntegerSettingShape): number |
 export function resolveCharLimits(request: CharLimitRequest, config: StoredConfig): CharLimits {
   const maxChars = request.full
     ? DEFAULT_MAX_CHARS
-    : (request.maxChars ?? charLimitFromConfig(config.maxChars, MAX_CHARS_SHAPE) ?? DEFAULT_MAX_CHARS);
+    : resolveIntegerSetting(request.maxChars, config.maxChars, MAX_CHARS_SHAPE, DEFAULT_MAX_CHARS);
   return {
     maxChars,
-    fullMaxChars:
-      request.fullMaxChars ?? charLimitFromConfig(config.fullMaxChars, FULL_MAX_CHARS_SHAPE) ?? DEFAULT_FULL_MAX_CHARS,
+    fullMaxChars: resolveIntegerSetting(
+      request.fullMaxChars,
+      config.fullMaxChars,
+      FULL_MAX_CHARS_SHAPE,
+      DEFAULT_FULL_MAX_CHARS,
+    ),
   };
 }
 
@@ -328,8 +313,9 @@ export interface IncludeMarkupSources {
 export function resolveIncludeMarkup(sources: IncludeMarkupSources): boolean {
   if (sources.flag === true) return true;
 
-  if (sources.env !== undefined && sources.env !== "") {
-    const normalized = sources.env.toLowerCase();
+  const fromEnv = nonEmpty(sources.env);
+  if (fromEnv !== undefined) {
+    const normalized = fromEnv.toLowerCase();
     if (normalized === "1" || normalized === "true") return true;
     if (normalized === "0" || normalized === "false") return false;
     throw new SerpAxiError(

@@ -392,7 +392,9 @@ the usage error above, or if a conflicting pair reaches the network.
 (it used to be read only by `--ladder`, and by Bright Data when the flag and env
 var had not settled `includeMarkup`). A Bright Data run with `--include-markup`
 fails on it too. A bad URL, a missing API key, or a bad cap flag is still
-reported as itself, ahead of the file error.
+reported as itself, ahead of the file error. A malformed cap is checked after
+the URL, provider, axis and ladder checks, so it cannot mask one of those; it is
+still checked before the file is opened.
 
 **Why:** `maxChars` and `fullMaxChars` apply to every path, so every path needs
 the file. It is read once, after the URL and key checks, so a broken file never
@@ -534,15 +536,18 @@ to type the bypass. Or if a provider reads a body without a hit from any rule, o
 
 **What you see:** a response larger than `--max-response-bytes` (default 64 MiB)
 stops the run with `<provider> response is larger than the <n> bytes serp-axi
-will read`, naming the flag, the env var and the config key. No results are
+will read`, naming the flag, the env var and the config key, and saying that the
+key is read by `scrape` and `search --provider searxng`. No results are
 printed, even when the first megabyte of the body held a whole valid answer.
 
 **Why:** a JSON document cut off at a byte boundary does not parse, and a cut-off
 page of text looks complete and is wrong. The character caps (`--max-chars`)
 shorten text on purpose and mark each cut with a `<field>TruncatedFrom` count;
 the byte cap protects memory and has no such marker, so it refuses instead. A
-`content-length` over the cap is refused before a byte is read, and without one
-the read stops the moment the running count passes the cap.
+`content-length` over the cap is refused before a byte is read, unless the
+response is compressed: then the header counts wire bytes rather than the
+decoded ones the cap measures, so only the read can decide. Without a usable
+header the read stops the moment the running count passes the cap.
 
 **When this becomes a real bug:** if an over-cap body ever produces output from
 part of it, or if the error does not say how to raise the cap.
@@ -554,20 +559,24 @@ default cap, though only 1 MiB crossed the network (`src/body.socket.test.ts`
 serves exactly that over a real socket). Separately, an error response longer
 than 64 KiB is not an error of its own: only its first 64 KiB is read. Kagi and
 Bright Data put the start of that text in the failure message, shortened again
-by `boundedDetail`. Serper parses the error body as JSON to find a `message`, and
-a body cut at 64 KiB no longer parses, so a Serper error with an unmapped status
-that long reports `no details`. If an error body cannot be read at all, the message says `(the
-response body could not be read: <reason>)` where the server's text would have
-gone, and Serper's JSON parse of that sentence fails the same way.
+by `boundedDetail`. Serper reads an error body only for a status it does not map:
+the mapped 403, 429, 404 and 5xx branches decide from the status alone and hang
+up on the body unread. An unmapped body cut at 64 KiB no longer parses, so that
+status reports `no details`. If an error body cannot be read at all, the message
+says `(the response body could not be read: <reason>)` where the server's text
+would have gone, and Serper's JSON parse of that sentence fails the same way.
 
 **Why:** `fetch` undoes gzip and brotli before the stream hands over any bytes,
 so the count sees the expanded size, which is what costs memory and what a
-compression bomb attacks. An error body only explains a status code the run has
-already failed on, so cutting it loses little and refusing it would replace a
-useful failure with a less useful one. A 64 KiB Serper error page is not a
-realistic case, so its parse is left as it was. The marker keeps a failed read from
-looking like a server that said nothing. SearXNG reads no error body at all; its
-errors come from the status code.
+compression bomb attacks. A compressed response's `content-length` counts wire
+bytes, so it is not compared with the decoded cap; the read still enforces the
+cap. An error body only explains a status code the run has already failed on, so
+cutting it loses little and refusing it would replace a useful failure with a
+less useful one. A mapped Serper status does not need the body at all, so reading
+it would delay the error and do I/O for nothing. The marker keeps a failed read
+from looking like a server that said nothing. SearXNG reads no error body at all;
+its errors come from the status code, and it hangs up on the body before
+throwing.
 
 **When this becomes a real bug:** if the count uses compressed bytes, if an error
 body read can throw past the status-code failure it was explaining, or if the
@@ -580,6 +589,9 @@ failed-read marker is empty.
 serper`, `kagi` or `brightdata` run ignores it, and a malformed value
 (`"maxResponseBytes": "big"`) fails the paths that read it and passes the rest.
 `--max-response-bytes` and `SERP_AXI_MAX_RESPONSE_BYTES` apply to all of them.
+The overflow error names the config key only for the paths that read it, so a
+Serper search's advice does not send its reader to a key that cannot affect the
+run.
 
 **Why:** searxng is the one search path that opens the config file, for its URL,
 engines and timeout. The other search providers are configured by flag and env
@@ -609,10 +621,12 @@ the ladder CLI writes with `ensure_ascii=False` (`ladder-cli/ladder_cli/cli.py:2
 The cap is the
 shared `--max-response-bytes` / `SERP_AXI_MAX_RESPONSE_BYTES` / `maxResponseBytes`
 setting, so one number bounds every provider and a user who needs a larger page
-has one knob. The check runs on each chunk before it is appended, against the
-bytes of the line that chunk ends or extends, and a child over the cap is killed
-and respawned by the next fetch, because a cut-off line cannot be parsed. Another
-line in the same chunk can be at most one pipe read (64 KiB) long. The same cap
+has one knob. Every line in a chunk is measured before the chunk is appended,
+against the bytes already pending for the line it extends, and a child over the
+cap is killed and respawned by the next fetch, because a cut-off line cannot be
+parsed. Measuring every line matters when a chunk begins with a newline (a blank
+startup line, or the end of the previous reply): checking only the first line
+would count zero bytes and let the reply after it through. The same cap
 bounds the startup output before the ready line, so a child that prints without
 ever ending a line is stopped too. This is a different thing from `--max-chars`,
 which trims text after it has been read.

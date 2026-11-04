@@ -1,4 +1,3 @@
-import { DEFAULT_MAX_RESPONSE_BYTES } from "./body.ts";
 import { SerpAxiError } from "./errors.ts";
 import { searchSerper, type SearchParams, type SearchResponse } from "./serper.ts";
 import { searchBrightData, BRIGHT_DATA_DEFAULT_ZONE } from "./brightdata.ts";
@@ -20,7 +19,7 @@ export interface SearchStrategyContext {
   searxng?: SearxngOptions;
   // The most bytes any one provider response may carry before the read stops. The
   // command resolves it (flag > env > config > default); a strategy only passes it on.
-  maxResponseBytes?: number;
+  maxResponseBytes: number;
 }
 
 export interface SearchStrategy {
@@ -40,7 +39,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         requireEnv(context.env, "SERPER_API_KEY", "export SERPER_API_KEY=<your key> and re-run"),
         context.params,
         context.fetchImpl,
-        context.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+        context.maxResponseBytes,
       );
     },
   },
@@ -57,7 +56,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         context.params,
         context.fetchImpl,
         zone,
-        context.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+        context.maxResponseBytes,
       );
     },
   },
@@ -71,7 +70,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         ),
         context.params,
         context.fetchImpl,
-        context.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+        context.maxResponseBytes,
       );
     },
   },
@@ -84,7 +83,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         context.searxng,
         context.params,
         context.fetchImpl,
-        context.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+        context.maxResponseBytes,
       );
     },
   },

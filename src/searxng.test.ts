@@ -11,7 +11,7 @@ import { runCli } from "./cli.ts";
 import { createAppOptions } from "./app.ts";
 import { SerpAxiError } from "./errors.ts";
 import { kagiSearchHtml } from "./fixtures.ts";
-import { resolveSearxngOptions, type SearxngOptionSources } from "./searxng.ts";
+import { resolveSearxngOptions, searchSearxng, type SearxngOptionSources } from "./searxng.ts";
 import { decode } from "@toon-format/toon";
 
 const KAGI_FIXTURE = kagiSearchHtml();
@@ -383,6 +383,29 @@ test("runSearch maps searxng HTTP 403/429 to typed blocked output", async (t) =>
       assert.equal(details?.count, 0);
     }
   });
+});
+
+test("a non-OK SearXNG response body is cancelled before the status error is thrown", async () => {
+  for (const status of [403, 429, 401, 500, 418]) {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("challenge page"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = (async () => new Response(body, { status })) as typeof fetch;
+    await assert.rejects(() =>
+      searchSearxng(
+        { url: "http://searx.invalid", timeoutMs: 30_000 },
+        { q: "x", gl: "us", hl: "en", num: 1 },
+        fetchImpl,
+      ),
+    );
+    assert.equal(cancelled, true, `status ${status} left its body open`);
+  }
 });
 
 test("runSearch maps 401 without leaking details", async (t) => {
@@ -1053,6 +1076,14 @@ test("a bad endpoint's help line shows the example for the source the value came
   assert.equal(helpFor({ flagUrl: "not a url", config: {} }), flagExample);
   assert.equal(helpFor({ envUrl: "not a url", config: {} }), envExample);
   assert.equal(helpFor({ config: { searxngUrl: "not a url" } }), configExample);
+
+  // Right shape, wrong protocol, query or fragment: the example must still be
+  // written the way the home that supplied the value writes it.
+  for (const bad of ["ftp://searx.lan", "http://searx.lan/?a=1", "http://searx.lan/#frag"]) {
+    assert.equal(helpFor({ flagUrl: bad, config: {} }), flagExample, bad);
+    assert.equal(helpFor({ envUrl: bad, config: {} }), envExample, bad);
+    assert.equal(helpFor({ config: { searxngUrl: bad } }), configExample, bad);
+  }
 });
 
 test("a bad engine list's help line shows the example for the source the value came from", () => {

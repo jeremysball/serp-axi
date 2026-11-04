@@ -5,13 +5,11 @@ import {
   MAX_RESPONSE_BYTES_FLAG,
 } from "./body.ts";
 import type { StoredConfig } from "./config.ts";
-import { SerpAxiError } from "./errors.ts";
 import {
-  parseIntegerSetting,
-  pickOption,
+  requestIntegerSetting,
+  resolveIntegerSetting,
   settingExamples,
   type IntegerSettingShape,
-  type OptionSource,
   type SettingNames,
 } from "./option-sources.ts";
 
@@ -34,18 +32,6 @@ const SHAPE: IntegerSettingShape = {
   configShape: "a JSON integer number of bytes",
 };
 
-function validate(raw: unknown, source: OptionSource): number {
-  const value = parseIntegerSetting(raw, source, SHAPE);
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new SerpAxiError(
-      `${NAMES[source]} must be a whole number of bytes from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
-      "usage",
-      `example: ${SHAPE.examples[source]}`,
-    );
-  }
-  return value;
-}
-
 /**
  * Flag > env, checked before any network call and before any config file is
  * opened. Only the source that wins is checked, so a bad env var does not fail a
@@ -56,8 +42,7 @@ function validate(raw: unknown, source: OptionSource): number {
  * does not stop every run. An empty flag value is an error: it was typed here.
  */
 export function requestMaxResponseBytes(flag: string | undefined, env: string | undefined): number | undefined {
-  const picked = pickOption(flag, env === "" ? undefined : env, undefined);
-  return picked === undefined ? undefined : validate(picked.value, picked.source);
+  return requestIntegerSetting(flag, env, SHAPE);
 }
 
 /**
@@ -66,9 +51,5 @@ export function requestMaxResponseBytes(flag: string | undefined, env: string | 
  * why is in docs/things-that-look-like-bugs.md.
  */
 export function resolveMaxResponseBytes(request: number | undefined, config: StoredConfig | undefined): number {
-  if (request !== undefined) return request;
-  const fromConfig = config?.maxResponseBytes;
-  // Null and absent both mean "not set", as they do for maxChars.
-  if (fromConfig === undefined || fromConfig === null) return DEFAULT_MAX_RESPONSE_BYTES;
-  return validate(fromConfig, "config");
+  return resolveIntegerSetting(request, config?.maxResponseBytes, SHAPE, DEFAULT_MAX_RESPONSE_BYTES);
 }

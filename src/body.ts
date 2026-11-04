@@ -33,12 +33,24 @@ export interface BodyLimit {
   source: string;
 }
 
+/**
+ * The advice every path that can overflow the cap gives, worded once. The config
+ * key is named only for the runs that read the config file: a Serper search never
+ * opens it, so telling that reader to edit the json would send them in a circle.
+ */
+export function raiseCapHelp(): string {
+  return (
+    `raise the cap with ${MAX_RESPONSE_BYTES_FLAG} <n>, ${MAX_RESPONSE_BYTES_ENV}=<n>, or ` +
+    `"${MAX_RESPONSE_BYTES_CONFIG_KEY}": <n> in the config file ` +
+    "(read by scrape and search --provider searxng)"
+  );
+}
+
 function overflow(limit: BodyLimit, how: string): SerpAxiError {
   return new SerpAxiError(
     `${limit.source} response is larger than the ${limit.maxBytes} bytes serp-axi will read (${how})`,
     "runtime",
-    `raise the cap with ${MAX_RESPONSE_BYTES_FLAG} <n>, ${MAX_RESPONSE_BYTES_ENV}=<n>, or "${MAX_RESPONSE_BYTES_CONFIG_KEY}": <n> in the config file; ` +
-      "a body that is cut off cannot be parsed, so serp-axi stops instead of using part of it",
+    `${raiseCapHelp()}; a body that is cut off cannot be parsed, so serp-axi stops instead of using part of it`,
   );
 }
 
@@ -69,28 +81,44 @@ export class BodyReadError extends SerpAxiError {
 }
 
 /**
- * Reads a whole response body as UTF-8, or throws a `SerpAxiError` naming the cap
- * when the body is bigger than `limit.maxBytes`. There is no partial result: a
- * cut-off JSON document does not parse, and a cut-off page would look complete.
- *
- * A declared `content-length` over the cap is refused before a byte is read. The
- * header is only a hint, so the read counts bytes either way and hangs up the
- * moment the count passes the cap.
- *
- * A stream failure (a reset connection, an abort) throws a `BodyReadError`, which
- * carries the stream's own error as `cause` and says whether it was a timeout.
- * What was read before the failure is dropped: half a document is not a result.
+ * True when `content-length` counts encoded bytes rather than the decoded ones
+ * the cap is about. `fetch` decompresses the stream, but it keeps the header the
+ * server sent, so a compressed response's declared length is the smaller wire
+ * size (or, for incompressible data, the larger one). Comparing it with the
+ * decoded cap would refuse a body that fits or permit one that does not.
  */
-export async function readBodyText(response: Response, limit: BodyLimit): Promise<string> {
-  const declared = Number(response.headers.get("content-length"));
+function hasContentEncoding(response: Response): boolean {
+  const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+  return encoding !== undefined && encoding !== "" && encoding !== "identity";
+}
+
+type OverflowPolicy = "throw" | "truncate";
+
+/**
+ * The one reader: pulls the body a chunk at a time, decodes UTF-8 across chunk
+ * boundaries, and hangs up when the cap is reached. `throw` refuses an over-cap
+ * body (the success path); `truncate` keeps the prefix that fit (the error path).
+ * Stream failures surface as `BodyReadError`; a prefix reader catches that to
+ * keep its never-throws promise.
+ */
+async function readBounded(
+  response: Response,
+  maxBytes: number,
+  limit: BodyLimit,
+  overflowPolicy: OverflowPolicy,
+): Promise<string> {
   const body = response.body;
-  if (Number.isFinite(declared) && declared > limit.maxBytes) {
-    await body?.cancel().catch(ignoreCancelFailure);
-    throw overflow(limit, `the server declared ${declared}`);
-  }
   if (body === null) return "";
 
-  const reader = body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = body.getReader();
+  } catch (cause) {
+    // A locked or disturbed body cannot be read; readErrorBody turns this into
+    // its explanatory sentence instead of a raw TypeError.
+    throw new BodyReadError(limit, cause);
+  }
+
   const decoder = new TextDecoder("utf-8");
   const parts: string[] = [];
   let total = 0;
@@ -103,15 +131,56 @@ export async function readBodyText(response: Response, limit: BodyLimit): Promis
     }
     const { done, value } = chunk;
     if (done) break;
-    total += value.byteLength;
-    if (total > limit.maxBytes) {
-      await reader.cancel().catch(ignoreCancelFailure);
-      throw overflow(limit, "the body kept going");
+
+    if (overflowPolicy === "throw") {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(ignoreCancelFailure);
+        throw overflow(limit, "the body kept going");
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+      continue;
     }
-    parts.push(decoder.decode(value, { stream: true }));
+
+    const room = maxBytes - total;
+    if (room <= 0) {
+      await reader.cancel().catch(ignoreCancelFailure);
+      break;
+    }
+    const slice = value.byteLength > room ? value.subarray(0, room) : value;
+    total += slice.byteLength;
+    parts.push(decoder.decode(slice, { stream: true }));
+    if (slice.byteLength < value.byteLength || total >= maxBytes) {
+      await reader.cancel().catch(ignoreCancelFailure);
+      break;
+    }
   }
   parts.push(decoder.decode());
   return parts.join("");
+}
+
+/**
+ * Reads a whole response body as UTF-8, or throws a `SerpAxiError` naming the cap
+ * when the body is bigger than `limit.maxBytes`. There is no partial result: a
+ * cut-off JSON document does not parse, and a cut-off page would look complete.
+ *
+ * A declared `content-length` over the cap is refused before a byte is read,
+ * unless the response says it is encoded: then the header counts compressed
+ * bytes while the cap counts decoded ones. Without a usable header the read
+ * counts bytes either way and hangs up the moment the count passes the cap.
+ *
+ * A stream failure (a reset connection, an abort) throws a `BodyReadError`, which
+ * carries the stream's own error as `cause` and says whether it was a timeout.
+ * What was read before the failure is dropped: half a document is not a result.
+ */
+export async function readBodyText(response: Response, limit: BodyLimit): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  const body = response.body;
+  if (!hasContentEncoding(response) && Number.isFinite(declared) && declared > limit.maxBytes) {
+    await body?.cancel().catch(ignoreCancelFailure);
+    throw overflow(limit, `the server declared ${declared}`);
+  }
+  return readBounded(response, limit.maxBytes, limit, "throw");
 }
 
 /**
@@ -124,28 +193,22 @@ export async function readBodyText(response: Response, limit: BodyLimit): Promis
  * nothing".
  */
 export async function readErrorBody(response: Response, maxBytes: number = ERROR_BODY_MAX_BYTES): Promise<string> {
-  const body = response.body;
-  if (body === null) return "";
-  const reader = body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let text = "";
-  let kept = 0;
   try {
-    while (kept < maxBytes) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const room = maxBytes - kept;
-      const slice = value.byteLength > room ? value.subarray(0, room) : value;
-      kept += slice.byteLength;
-      text += decoder.decode(slice, { stream: true });
-    }
-    text += decoder.decode();
-    await reader.cancel().catch(ignoreCancelFailure);
-    return text;
+    return await readBounded(response, maxBytes, { maxBytes, source: "error" }, "truncate");
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     return `(the response body could not be read: ${reason})`;
   }
+}
+
+/**
+ * Hangs up on a response body without reading it. A caller that decides from the
+ * status alone does not need the body, but leaving the stream open keeps the
+ * connection until the process exits or the collector catches up. Best effort,
+ * like every other cancel here: the status error is the report that matters.
+ */
+export async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(ignoreCancelFailure);
 }
 
 // Hanging up on a body is best effort. The caller is already reporting why it

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "./body.ts";
 import type { StoredConfig } from "./config.ts";
 import { boundedDetail, SerpAxiError } from "./errors.ts";
-import { firstDefined } from "./option-sources.ts";
+import { firstDefined, nonEmpty } from "./option-sources.ts";
 
 export type LadderVerdict = "ok" | "dead" | "blocked" | "error";
 
@@ -91,12 +91,9 @@ export class SerpAxiLadderError extends Error {
  * can tell the user how to raise the cap, which a hung or crashed child has no use for.
  */
 export class LadderLineTooLongError extends SerpAxiLadderError {
-  readonly maxBytes: number;
-
   constructor(maxBytes: number) {
     super(`ladder-cli printed a line longer than ${maxBytes} bytes, which serp-axi will not read`);
     this.name = "LadderLineTooLongError";
-    this.maxBytes = maxBytes;
   }
 }
 
@@ -188,8 +185,8 @@ function readRaw(sources: LadderAxisSources, key: AxisKey): { value: string | un
   if (flagValue !== undefined && flagValue !== true && flagValue !== false) {
     return { value: String(flagValue), source: { kind: "flag", field: entry.flag } };
   }
-  const envValue = sources.env?.[entry.env];
-  if (envValue !== undefined && envValue.length > 0) {
+  const envValue = nonEmpty(sources.env?.[entry.env]);
+  if (envValue !== undefined) {
     return { value: envValue, source: { kind: "env", field: entry.env } };
   }
   return { value: undefined, source: null };
@@ -339,8 +336,8 @@ export function resolveLadderBin(
   env: NodeJS.ProcessEnv = process.env,
   candidates: string[] | null = defaultLadderBinCandidates(),
 ): string {
-  const explicit = env.SERP_AXI_LADDER_BIN;
-  if (explicit !== undefined && explicit.length > 0) return explicit;
+  const explicit = nonEmpty(env.SERP_AXI_LADDER_BIN);
+  if (explicit !== undefined) return explicit;
   for (const candidate of candidates ?? []) {
     if (isRegularFile(candidate)) return candidate;
   }
@@ -692,12 +689,22 @@ export class LadderClient {
       // Every reply is one line, and a line with no newline yet sits in
       // `this.buffer` until it ends. Count its bytes before appending, so a
       // child that never prints a newline cannot grow the buffer without end.
-      // Only the line this chunk finishes (or extends) is checked: other lines
-      // inside one chunk are at most one pipe read (64 KiB) long.
+      // Every line in the chunk is measured, not only the first: a chunk that
+      // starts with a newline (a blank startup line, or the end of the previous
+      // reply) would otherwise count zero bytes and let the line after it through.
       const maxLineBytes = this.options.maxLineBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
       const firstNewline = chunk.indexOf(0x0a);
       const lastNewline = chunk.lastIndexOf(0x0a);
-      if (this.lineBytes + (firstNewline < 0 ? chunk.length : firstNewline) > maxLineBytes) {
+      let longest = this.lineBytes + (firstNewline < 0 ? chunk.length : firstNewline);
+      for (let start = firstNewline + 1; start > 0 && start <= lastNewline; ) {
+        const next = chunk.indexOf(0x0a, start);
+        const length = next - start;
+        if (length > longest) longest = length;
+        start = next + 1;
+      }
+      const trailing = firstNewline < 0 ? 0 : chunk.length - lastNewline - 1;
+      if (trailing > longest) longest = trailing;
+      if (longest > maxLineBytes) {
         const error = new LadderLineTooLongError(maxLineBytes);
         this.settleReady(error);
         this.failAll(error);
@@ -705,9 +712,12 @@ export class LadderClient {
         this.armIdleTimer();
         return;
       }
-      this.lineBytes = firstNewline < 0 ? this.lineBytes + chunk.length : chunk.length - lastNewline - 1;
+      this.lineBytes = firstNewline < 0 ? this.lineBytes + chunk.length : trailing;
       this.buffer += this.stdoutDecoder.write(chunk);
-      this.drainLines();
+      // A chunk with no newline cannot finish a line, and the buffer never holds
+      // one then: draining would rescan the whole accumulated reply per chunk,
+      // which makes a large single-line page quadratic to read.
+      if (firstNewline >= 0) this.drainLines();
     };
     child.stdout?.on("data", onStdout);
     this.stdoutListener = onStdout;

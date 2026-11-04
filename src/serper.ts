@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_RESPONSE_BYTES, readBodyText, readErrorBody } from "./body.ts";
+import { DEFAULT_MAX_RESPONSE_BYTES, discardBody, readBodyText, readErrorBody } from "./body.ts";
 import { SerpAxiError, boundedDetail } from "./errors.ts";
 
 export interface SearchParams {
@@ -71,14 +71,8 @@ async function serperRequest(
     }
   }
 
-  let parsed: SerperErrorBody = {};
-  try {
-    parsed = JSON.parse(await readErrorBody(response)) as SerperErrorBody;
-  } catch {
-    // body wasn't JSON; fall through with an empty parsed body
-  }
-
   if (response.status === 403) {
+    await discardBody(response);
     throw new SerpAxiError(
       "Serper rejected the API key (403)",
       "runtime",
@@ -86,9 +80,11 @@ async function serperRequest(
     );
   }
   if (response.status === 429) {
+    await discardBody(response);
     throw new SerpAxiError("Serper rate-limited this request (429)", "runtime", "wait and retry later");
   }
   if (response.status === 404) {
+    await discardBody(response);
     throw new SerpAxiError(
       "Serper could not find the requested page (404)",
       "runtime",
@@ -96,7 +92,16 @@ async function serperRequest(
     );
   }
   if (response.status >= 500) {
+    await discardBody(response);
     throw new SerpAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
+  }
+
+  // Only the unmapped status uses the body, so only this branch pays to read it.
+  let parsed: SerperErrorBody = {};
+  try {
+    parsed = JSON.parse(await readErrorBody(response)) as SerperErrorBody;
+  } catch {
+    // body wasn't JSON; fall through with an empty parsed body
   }
 
   throw new SerpAxiError(

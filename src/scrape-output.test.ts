@@ -445,6 +445,18 @@ test("requestCharLimits lets the flag beat the env, for each cap on its own", ()
   );
 });
 
+test("requestCharLimits treats an empty env var as unset, as the byte cap does", () => {
+  // Positive trigger first: the same fields with a value are read, so the
+  // assertions below are about emptiness rather than about the fields being ignored.
+  const set = requestCharLimits(sources({ envMaxChars: "300", envFullMaxChars: "9000" }));
+  assert.equal(set.maxChars, 300);
+  assert.equal(set.fullMaxChars, 9000);
+
+  const empty = requestCharLimits(sources({ envMaxChars: "", envFullMaxChars: "" }));
+  assert.equal(empty.maxChars, undefined);
+  assert.equal(empty.fullMaxChars, undefined);
+});
+
 test("requestCharLimits checks only the source that wins", () => {
   // Positive trigger: the same bad env value is an error when nothing beats it.
   assert.throws(() => requestCharLimits(sources({ envMaxChars: "abc" })), usageError(/SERP_AXI_MAX_CHARS/));

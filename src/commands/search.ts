@@ -199,21 +199,22 @@ export async function runSearch(
     env[MAX_RESPONSE_BYTES_ENV],
   );
 
-  let searxng;
-  let maxResponseBytes = resolveMaxResponseBytes(requestedMaxBytes, undefined);
-  if (provider === "searxng") {
-    const stored = config ?? loadStoredConfig(os.homedir(), env);
-    searxng = resolveSearxngOptions({
-      flagUrl: flags["searxng-url"] as string | undefined,
-      flagEngines: flags.engines as string | undefined,
-      flagTimeoutMs: flags["search-timeout-ms"] as string | undefined,
-      envUrl: env.SERP_AXI_SEARXNG_URL,
-      envEngines: env.SERP_AXI_SEARXNG_ENGINES,
-      envTimeoutMs: env.SERP_AXI_SEARCH_TIMEOUT_MS,
-      config: stored,
-    });
-    maxResponseBytes = resolveMaxResponseBytes(requestedMaxBytes, stored);
-  }
+  // The config is read once, for the one search path that opens it. Both the
+  // cap and the searxng settings come from that same object.
+  const stored = provider === "searxng" ? (config ?? loadStoredConfig(os.homedir(), env)) : undefined;
+  const maxResponseBytes = resolveMaxResponseBytes(requestedMaxBytes, stored);
+  const searxng =
+    stored === undefined
+      ? undefined
+      : resolveSearxngOptions({
+          flagUrl: flags["searxng-url"] as string | undefined,
+          flagEngines: flags.engines as string | undefined,
+          flagTimeoutMs: flags["search-timeout-ms"] as string | undefined,
+          envUrl: env.SERP_AXI_SEARXNG_URL,
+          envEngines: env.SERP_AXI_SEARXNG_ENGINES,
+          envTimeoutMs: env.SERP_AXI_SEARCH_TIMEOUT_MS,
+          config: stored,
+        });
 
   const response = await searchStrategies[provider].run({
     params,

@@ -146,6 +146,30 @@ test("runSearch reports a definitive zero-result state", async () => {
   assert.match(output.results as string, /0 results found for query "nothing here"/);
 });
 
+test("runSearch reports a provider-conflict flag before a malformed cap", async () => {
+  // Positive trigger first: the same search with no conflict reaches the network.
+  let reached = 0;
+  const okFetch = (async () => {
+    reached += 1;
+    return new Response(JSON.stringify({ organic: [] }), { status: 200 });
+  }) as typeof fetch;
+  await runSearch(["q", "--provider", "serper"], okFetch, SERPER_ENV, NO_CONFIG);
+  assert.equal(reached, 1);
+
+  const { fetchImpl, calls } = countingFetch();
+  await assert.rejects(
+    () =>
+      runSearch(
+        ["q", "--provider", "serper", "--searxng-url", "http://127.0.0.1:8888", "--max-response-bytes", "0"],
+        fetchImpl,
+        SERPER_ENV,
+        NO_CONFIG,
+      ),
+    /--searxng-url is only supported with --provider searxng/,
+  );
+  assert.equal(calls(), 0);
+});
+
 test("runSearch rejects an unknown --provider value", async () => {
   const { fetchImpl, calls } = countingFetch();
   await assert.rejects(() => runSearch(["q", "--provider", "bogus"], fetchImpl, {}, NO_CONFIG), isUsageError);

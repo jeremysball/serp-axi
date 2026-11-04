@@ -91,6 +91,22 @@ test("readBodyText refuses a declared content-length over the cap without readin
   assert.equal(tracked.pulls(), 0);
 });
 
+test("readBodyText does not compare a compressed content-length with the decoded cap", async () => {
+  // content-length on an encoded response counts encoded bytes. For incompressible
+  // data that is larger than the decoded body the cap is about.
+  const encoded = trackedResponse([bytes("0123456789")], {
+    "content-encoding": "gzip",
+    "content-length": "1000",
+  });
+  assert.equal(await readBodyText(encoded.response, LIMIT), "0123456789");
+  assert.ok(encoded.pulls() > 0, "the encoded body was read, so the no-read assertion below is about the header");
+
+  // Control: the same declared length on a plain response is still refused before reading.
+  const plain = trackedResponse([bytes("abc")], { "content-length": "1000" });
+  await assert.rejects(() => readBodyText(plain.response, LIMIT), SerpAxiError);
+  assert.equal(plain.pulls(), 0);
+});
+
 test("readBodyText still bounds a body that outgrows its declared content-length", async () => {
   const chunks = Array.from({ length: 50 }, () => bytes("abcdef"));
   const tracked = trackedResponse(chunks, { "content-length": "5" });
@@ -168,11 +184,43 @@ test("readErrorBody keeps a prefix of a huge body and hangs up on the rest", asy
   assert.ok(tracked.pulls() < 10, `read ${tracked.pulls()} of 200 chunks`);
 });
 
-test("readErrorBody says the body could not be read instead of returning nothing", async () => {
+test("readErrorBody decodes a character split across two chunks", async () => {
+  const encoded = bytes("é");
+  const { response } = trackedResponse([encoded.slice(0, 1), encoded.slice(1)]);
+  assert.equal(await readErrorBody(response), "é");
+});
+
+test("readErrorBody says the body could not be read instead of throwing", async () => {
   const tracked = trackedResponse([bytes("part")], {}, new Error("socket hung up"));
 
   const text = await readErrorBody(tracked.response);
 
   assert.match(text, /could not be read/);
   assert.match(text, /socket hung up/);
+});
+
+test("readErrorBody reports a locked body as unreadable instead of throwing its TypeError", async () => {
+  const response = new Response("part", { status: 500 });
+  const lock = response.body!.getReader();
+  try {
+    const text = await readErrorBody(response);
+    assert.match(text, /could not be read/);
+    assert.match(text, /locked/i);
+  } finally {
+    lock.releaseLock();
+  }
+});
+
+test("the overflow help says which runs read the config key", async () => {
+  const over = trackedResponse([bytes("0123456789A")]);
+  await assert.rejects(
+    () => readBodyText(over.response, LIMIT),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      // A Serper search never opens the config file, so the advice must not send
+      // its reader to a key that cannot affect the run.
+      assert.match(error.help ?? "", /read by scrape and search --provider searxng/);
+      return true;
+    },
+  );
 });

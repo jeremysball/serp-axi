@@ -1,4 +1,4 @@
-import { BodyReadError, DEFAULT_MAX_RESPONSE_BYTES, readBodyText } from "./body.ts";
+import { BodyReadError, DEFAULT_MAX_RESPONSE_BYTES, discardBody, readBodyText } from "./body.ts";
 import { SerpAxiError, boundedDetail, describeValue } from "./errors.ts";
 import {
   parseIntegerSetting,
@@ -60,13 +60,13 @@ function validateEndpoint(raw: unknown, source: OptionSource): string {
     throw new SerpAxiError(`${field} is not a valid URL: "${raw}"`, "usage", `example: ${URL_EXAMPLES[source]}`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new SerpAxiError(`${field} must use http or https, got "${url.protocol}"`, "usage", "example: http://127.0.0.1:8888");
+    throw new SerpAxiError(`${field} must use http or https, got "${url.protocol}"`, "usage", `example: ${URL_EXAMPLES[source]}`);
   }
   if (url.username !== "" || url.password !== "") {
     throw new SerpAxiError(`${field} must not contain credentials`, "usage", "pass the endpoint directly, without user:password@");
   }
   if (url.search !== "" || url.hash !== "") {
-    throw new SerpAxiError(`${field} must not contain a query or fragment`, "usage", "example: http://127.0.0.1:8888");
+    throw new SerpAxiError(`${field} must not contain a query or fragment`, "usage", `example: ${URL_EXAMPLES[source]}`);
   }
   return url.toString();
 }
@@ -343,6 +343,7 @@ export async function searchSearxng(
   }
 
   if (response.status === 403 || response.status === 429) {
+    await discardBody(response);
     throw new SerpAxiError(
       `SearXNG blocked this request (${response.status})`,
       "runtime",
@@ -351,12 +352,15 @@ export async function searchSearxng(
     );
   }
   if (response.status === 401) {
+    await discardBody(response);
     throw new SerpAxiError("SearXNG rejected the request (401)", "runtime", "check the SearXNG endpoint configuration");
   }
   if (response.status >= 500) {
+    await discardBody(response);
     throw new SerpAxiError(`SearXNG had an upstream failure (${response.status})`, "runtime", "retry later");
   }
   if (!response.ok) {
+    await discardBody(response);
     throw new SerpAxiError(`SearXNG returned an unexpected status ${response.status}`, "runtime", "report it if it persists");
   }
 

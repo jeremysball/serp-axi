@@ -1,5 +1,5 @@
 // Test double for ladder-cli: speaks the NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title|split-multibyte|big-page|endless-line|endless-banner
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title|split-multibyte|big-page|blank-then-long|endless-line|endless-banner
 import readline from "node:readline";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -103,6 +103,17 @@ input.on("line", async (line) => {
   if (mode === "big-page") {
     process.stdout.write(
       JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "y".repeat(200000), engines: [], elapsedMs: 1, links: [], warning: null }) + "\n",
+    );
+    return;
+  }
+  // A blank startup line and a reply in one write. The reply is small enough for
+  // one pipe read, so a cap check that measures only the first line of a chunk
+  // sees a zero-byte line and lets it through.
+  if (mode === "blank-then-long") {
+    process.stdout.write(
+      "\n" +
+        JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "y".repeat(5000), engines: [], elapsedMs: 1, links: [], warning: null }) +
+        "\n",
     );
     return;
   }

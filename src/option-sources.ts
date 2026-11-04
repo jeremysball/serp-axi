@@ -27,6 +27,15 @@ export function settingExamples(names: SettingNames, text: string, json: string 
   return { flag: `${names.flag} ${text}`, env: `${names.env}=${text}`, config: `"${names.config}": ${json}` };
 }
 
+/**
+ * An empty string is unset. Only env vars use this: a flag typed with an empty
+ * value is a mistake the caller should see, while `SERP_AXI_FOO=` in a shell
+ * profile means the variable is not configured.
+ */
+export function nonEmpty(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > 0 ? value : undefined;
+}
+
 /** One place a setting may come from: the value it holds, if any, and a label for where that is. */
 export interface Layer<T, S> {
   value: T | undefined;
@@ -89,4 +98,61 @@ export function parseIntegerSetting(raw: unknown, source: OptionSource, shape: I
     throw new SerpAxiError(`${field} must be ${shape.textShape}, got ${describeValue(raw)}`, "usage", `example: ${shape.examples[source]}`);
   }
   return Number(raw);
+}
+
+/**
+ * Reads one integer setting and applies the range every such setting shares: a
+ * whole number from 1 to `max`. `parseIntegerSetting` checks the type and names
+ * the home; this adds the range and says what it is, so each cap does not spell
+ * the same sentence again.
+ */
+export function validateIntegerSetting(
+  raw: unknown,
+  source: OptionSource,
+  shape: IntegerSettingShape,
+  max: number = Number.MAX_SAFE_INTEGER,
+): number {
+  const value = parseIntegerSetting(raw, source, shape);
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new SerpAxiError(
+      `${shape.names[source]} must be ${shape.textShape} from 1 to ${max}, got ${String(raw)}`,
+      "usage",
+      `example: ${shape.examples[source]}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The request phase of an integer setting: flag > env, checked before any config
+ * file is opened. Only the source that wins is checked, so a bad env var does
+ * not fail a run that passes the flag. An empty env var is unset; an empty flag
+ * value is an error because it was typed on purpose.
+ */
+export function requestIntegerSetting(
+  flag: string | undefined,
+  env: string | undefined,
+  shape: IntegerSettingShape,
+  max: number = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  const picked = pickOption(flag, nonEmpty(env), undefined);
+  return picked === undefined ? undefined : validateIntegerSetting(picked.value, picked.source, shape, max);
+}
+
+/**
+ * The config phase of an integer setting: the request wins, then the config
+ * key, then the built-in default. Null and absent both mean "not set", as they
+ * do for the ladder's config keys; a value the request overrides is not read,
+ * so a bad key does not fail a run that already said what it wants.
+ */
+export function resolveIntegerSetting(
+  request: number | undefined,
+  configValue: unknown,
+  shape: IntegerSettingShape,
+  fallback: number,
+  max: number = Number.MAX_SAFE_INTEGER,
+): number {
+  if (request !== undefined) return request;
+  if (configValue === undefined || configValue === null) return fallback;
+  return validateIntegerSetting(configValue, "config", shape, max);
 }
