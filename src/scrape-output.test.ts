@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { usageError } from "./error-assertions.ts";
 import { SerpAxiError } from "./errors.ts";
 import { brightDataScrapeRecord } from "./fixtures.ts";
 import {
@@ -338,15 +339,6 @@ test("resolveIncludeMarkup rejects a non-boolean config value by name", () => {
 
 function sources(overrides: Partial<CharLimitSources> = {}): CharLimitSources {
   return { full: false, ...overrides };
-}
-
-function usageError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
 }
 
 test("shapeScrapeRecord's hint offers --full with the real --full cap, not a fixed 50000", () => {

@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runScrape } from "./scrape.ts";
+import { runScrape, scrapeCommand, shellQuote } from "./scrape.ts";
+import { usageError } from "../error-assertions.ts";
 import { SerpAxiError } from "../errors.ts";
 import { brightDataScrapeRecord } from "../fixtures.ts";
 import { MAX_RESPONSE_BYTES_ENV } from "../body.ts";
@@ -25,7 +26,7 @@ after(() => rmSync(ladderStubDir, { recursive: true, force: true }));
 
 function ladderStubEnv(mode: string): NodeJS.ProcessEnv {
   const script = path.join(ladderStubDir, `ladder-${mode}.sh`);
-  const stub = `'${LADDER_STUB.replaceAll("'", "'\\''")}'`;
+  const stub = shellQuote(LADDER_STUB);
   writeFileSync(script, `#!/bin/sh\nexec node ${stub} --mode ${mode} "$@"\n`, { mode: 0o755 });
   return { SERP_AXI_LADDER_BIN: script };
 }
@@ -472,23 +473,23 @@ test("runScrape --ladder rejects a malformed cap before it starts the ladder", a
   // with a different message than the one asserted here.
   const env = { SERP_AXI_LADDER_BIN: "/nonexistent/ladder-cli" };
   const noFetch = (async () => new Response("{}")) as typeof fetch;
-  const usage = (pattern: RegExp) => (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
-  await assert.rejects(() => runScrape([LADDER_URL, "--ladder", "--max-response-bytes", "lots"], noFetch, env, {}), usage(/--max-response-bytes/));
+  await assert.rejects(() => runScrape([LADDER_URL, "--ladder", "--max-response-bytes", "lots"], noFetch, env, {}), usageError(/--max-response-bytes/));
   await assert.rejects(
     () => runScrape([LADDER_URL, "--ladder"], noFetch, { ...env, [MAX_RESPONSE_BYTES_ENV]: "lots" }, {}),
-    usage(/SERP_AXI_MAX_RESPONSE_BYTES/),
+    usageError(/SERP_AXI_MAX_RESPONSE_BYTES/),
   );
   // The config key is read later, once the binary is resolved, so it is checked against a
   // real stub; it must still be a usage error and not a "ladder scrape failed" one.
   await assert.rejects(
     () => runScrape([LADDER_URL, "--ladder"], noFetch, ladderStubEnv("ok"), { maxResponseBytes: "lots" }),
-    usage(/maxResponseBytes/),
+    usageError(/maxResponseBytes/),
   );
+});
+
+test("scrape help lists the byte cap on the ladder usage line", () => {
+  const ladderLine = scrapeCommand.help.split("\n").find((line) => line.includes("--ladder"));
+  assert.ok(ladderLine !== undefined, "the help has a ladder usage line");
+  assert.match(ladderLine, /\[--max-response-bytes <n>\]/);
 });
 
 test("a malformed cap does not mask a more actionable usage error", async () => {

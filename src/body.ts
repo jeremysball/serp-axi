@@ -19,6 +19,12 @@ import { SerpAxiError, boundedDetail } from "./errors.ts";
  */
 export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
+/** The default cap as the help text prints it: `67108864 (64 MiB)`. */
+export function byteSizeLabel(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return Number.isInteger(mib) ? `${bytes} (${mib} MiB)` : `${bytes} bytes`;
+}
+
 /** The three homes of the cap. `response-limit.ts` parses them; the overflow error names them. */
 export const MAX_RESPONSE_BYTES_FLAG = "--max-response-bytes";
 export const MAX_RESPONSE_BYTES_ENV = "SERP_AXI_MAX_RESPONSE_BYTES";

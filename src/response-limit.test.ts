@@ -1,17 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "./body.ts";
+import { usageError } from "./error-assertions.ts";
 import { SerpAxiError } from "./errors.ts";
 import { requestMaxResponseBytes, resolveMaxResponseBytes } from "./response-limit.ts";
-
-function usageError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
-}
 
 test("requestMaxResponseBytes takes the flag over the env var", () => {
   assert.equal(requestMaxResponseBytes("2048", "4096"), 2048);

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { MAX_RESPONSE_BYTES_ENV } from "../body.ts";
-import { SerpAxiError } from "../errors.ts";
+import { runtimeError as capError, usageError } from "../error-assertions.ts";
 import { kagiSearchHtml } from "../fixtures.ts";
 import { runScrape } from "./scrape.ts";
 import { runSearch } from "./search.ts";
@@ -49,24 +49,6 @@ const KEYS: NodeJS.ProcessEnv = {
   BRIGHTDATA_API_KEY: "k",
   KAGI_SESSION_TOKEN: "k",
 };
-
-function capError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
-    assert.equal(error.kind, "runtime");
-    assert.match(error.message, pattern);
-    return true;
-  };
-}
-
-function usageError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
-}
 
 type Run = (extraArgs: string[], env: NodeJS.ProcessEnv, config: Record<string, unknown>) => Promise<unknown>;
 

@@ -1,7 +1,7 @@
 import os from "node:os";
 import { isIP } from "node:net";
 import { parseFlags, type CliCommand, type FlagSpec } from "../cli.ts";
-import { MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG, raiseCapHelp } from "../body.ts";
+import { byteSizeLabel, DEFAULT_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG, raiseCapHelp } from "../body.ts";
 import { SerpAxiError } from "../errors.ts";
 import type { AxiOutput } from "../output.ts";
 import { scrapeBrightData, BRIGHT_DATA_DEFAULT_DATASET_ID, type BrightDataRecord } from "../brightdata.ts";
@@ -64,13 +64,13 @@ function preferredUrlString(raw: string, normalized: URL): string {
   return normalizedStr;
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 const SCRAPE_HELP = `serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--max-response-bytes <n>]
 serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>] [--max-response-bytes <n>]
-serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] --ladder
+serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] --ladder [--max-response-bytes <n>]
 
 Fetch and extract readable text from one or more web pages.
 
@@ -110,7 +110,7 @@ Flags:
   ${MAX_RESPONSE_BYTES_FLAG} <n>
                          Most bytes one provider response may carry, before any character cap.
                          A longer body stops the run with an error, because a cut-off body
-                         cannot be parsed. Default: 67108864 (64 MiB). With --ladder it bounds
+                         cannot be parsed. Default: ${byteSizeLabel(DEFAULT_MAX_RESPONSE_BYTES)}. With --ladder it bounds
                          the one line the ladder CLI prints back, the page as JSON.
                          Also: ${MAX_RESPONSE_BYTES_ENV}=<n>, or "maxResponseBytes": <n> in the
                          config file. Precedence: flag > env > config > built-in default.

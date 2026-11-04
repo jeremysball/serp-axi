@@ -23,6 +23,7 @@
   "files": [
     "dist",
     "!dist/**/*.test.js",
+    "!dist/error-assertions.js",
     "!dist/fixtures.js",
     "!dist/live.js"
   ],

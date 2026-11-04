@@ -27,7 +27,7 @@ const NAMES: SettingNames = {
 
 const SHAPE: IntegerSettingShape = {
   names: NAMES,
-  examples: settingExamples(NAMES, "67108864"),
+  examples: settingExamples(NAMES, String(DEFAULT_MAX_RESPONSE_BYTES)),
   textShape: "a whole number of bytes",
   configShape: "a JSON integer number of bytes",
 };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { usageError } from "./error-assertions.ts";
 import { SerpAxiError } from "./errors.ts";
 import { firstDefined, parseIntegerSetting, pickOption, settingExamples, type IntegerSettingShape } from "./option-sources.ts";
 
@@ -9,15 +10,6 @@ const shape: IntegerSettingShape = {
   textShape: "an integer number of milliseconds",
   configShape: "a JSON number of milliseconds",
 };
-
-function usageError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError, `expected a SerpAxiError, got ${String(error)}`);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
-}
 
 test("pickOption returns the flag first, then env, then config, and says which", () => {
   assert.deepEqual(pickOption("f", "e", "c"), { value: "f", source: "flag" });

@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BodyReadError, ERROR_BODY_MAX_BYTES, readBodyText, readErrorBody } from "./body.ts";
+import { readFileSync } from "node:fs";
+import { BodyReadError, DEFAULT_MAX_RESPONSE_BYTES, ERROR_BODY_MAX_BYTES, readBodyText, readErrorBody } from "./body.ts";
+import { searchCommand } from "./commands/search.ts";
+import { scrapeCommand } from "./commands/scrape.ts";
 import { SerpAxiError } from "./errors.ts";
 
 const LIMIT = { maxBytes: 10, source: "Example" };
@@ -223,4 +226,32 @@ test("the overflow help says which runs read the config key", async () => {
       return true;
     },
   );
+});
+
+test("the default cap is written once, and help and docs restate it from DEFAULT_MAX_RESPONSE_BYTES", () => {
+  const bytes = String(DEFAULT_MAX_RESPONSE_BYTES);
+  const mib = String(DEFAULT_MAX_RESPONSE_BYTES / (1024 * 1024));
+
+  // Both commands build their help from the constant, so a change reaches them.
+  for (const command of [searchCommand, scrapeCommand]) {
+    assert.match(command.help, new RegExp(`Default: ${bytes}\\s*\\(${mib} MiB\\)`), command.name);
+  }
+  // No command or error example keeps a typed-in copy beside the constant.
+  for (const file of ["commands/search.ts", "commands/scrape.ts", "response-limit.ts"]) {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(
+      source,
+      new RegExp(`\\b${bytes}\\b|\\b${mib} MiB\\b`),
+      `${file} restates the default cap instead of deriving it`,
+    );
+  }
+
+  // Prose cannot interpolate, so each hand-written copy stays pinned to the constant.
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const doc = readFileSync(new URL("../docs/things-that-look-like-bugs.md", import.meta.url), "utf8");
+  assert.match(readme, new RegExp(`\\| \`--max-response-bytes <n>\` \\| \`${bytes}\` \\|`), "search flag table");
+  assert.match(readme, new RegExp(`\\| Response size \\|.*\\| ${bytes} \\(${mib} MiB\\) \\|`), "response size table");
+  assert.match(readme, new RegExp(`default ${bytes} `), "environment variable table");
+  assert.match(doc, new RegExp(`\`DEFAULT_MAX_RESPONSE_BYTES\`, ${mib} MiB`), "Bright Data cap entry");
+  assert.match(doc, new RegExp(`\\(default ${mib} MiB\\)`), "over-cap entry");
 });

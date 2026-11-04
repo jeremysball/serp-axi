@@ -8,7 +8,13 @@ import { searchStrategies, PROVIDERS, type Provider } from "../providers.ts";
 import type { StoredConfig } from "../config.ts";
 import { loadStoredConfig } from "../config.ts";
 import { resolveSearxngOptions, type EngineStatus } from "../searxng.ts";
-import { MAX_RESPONSE_BYTES_CONFIG_KEY, MAX_RESPONSE_BYTES_ENV, MAX_RESPONSE_BYTES_FLAG } from "../body.ts";
+import {
+  byteSizeLabel,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  MAX_RESPONSE_BYTES_CONFIG_KEY,
+  MAX_RESPONSE_BYTES_ENV,
+  MAX_RESPONSE_BYTES_FLAG,
+} from "../body.ts";
 import { requestMaxResponseBytes, resolveMaxResponseBytes } from "../response-limit.ts";
 
 const SEARCH_FLAGS: FlagSpec = {
@@ -51,8 +57,8 @@ Flags:
   --search-timeout-ms <ms>  Request timeout in milliseconds. Only applies with --provider searxng.
                            Default: 30000 (env SERP_AXI_SEARCH_TIMEOUT_MS, config searchTimeoutMs).
   ${MAX_RESPONSE_BYTES_FLAG} <n>  Most bytes one provider response may carry. A longer body stops the
-                           run with an error; serp-axi never uses a cut-off body. Default: 67108864
-                           (64 MiB). Also: ${MAX_RESPONSE_BYTES_ENV}=<n>. The "${MAX_RESPONSE_BYTES_CONFIG_KEY}"
+                           run with an error; serp-axi never uses a cut-off body. Default: ${byteSizeLabel(DEFAULT_MAX_RESPONSE_BYTES)}.
+                           Also: ${MAX_RESPONSE_BYTES_ENV}=<n>. The "${MAX_RESPONSE_BYTES_CONFIG_KEY}"
                            config key counts only with --provider searxng, the one search that
                            reads the config file.
 

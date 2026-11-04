@@ -253,10 +253,11 @@ field that stays. A regex tag-stripper would delete the `<div>` a page is
 legitimately talking about, and ladder rung 1 decodes entities after it removes
 tags, so a tag in its text is content. Dropping
 `html2text` to save space would also be a guess about which field a caller reads.
-The two are not copies. A live scrape of `https://example.com` on 2026-11-03
+The two are not copies. A development scrape of `https://example.com` on 2026-11-03
 returned the same sentence in both, with `html2text` hard-wrapped at a line width
-(a `\n` mid-sentence), and the recorded fixture in `src/fixtures/` differs in
-markup style as well (`# Example Domain` against `EXAMPLE DOMAIN`).
+(a `\n` mid-sentence); that observation was not recorded in this repo, so treat the
+exact wrap as unverified. The recorded fixture in `src/fixtures/` differs in markup
+style (`# Example Domain` against `EXAMPLE DOMAIN`) and has no mid-sentence wrap.
 
 **When this becomes a real bug:** if a field whose name ends in `html`, or whose
 value is a whole HTML document, appears in the output without
@@ -560,12 +561,14 @@ part of it, or if the error does not say how to raise the cap.
 **What you see:** a gzip reply of 1 MiB that expands to 100 MiB is refused at the
 default cap, though only 1 MiB crossed the network (`src/body.socket.test.ts`
 serves exactly that over a real socket). Separately, an error response longer
-than 64 KiB is not an error of its own: only its first 64 KiB is read. Kagi and
-Bright Data put the start of that text in the failure message, shortened again
-by `boundedDetail`. Serper reads an error body only for a status it does not map:
-the mapped 403, 429, 404 and 5xx branches decide from the status alone and hang
-up on the body unread. An unmapped body cut at 64 KiB no longer parses, so that
-status reports `no details`. If an error body cannot be read at all, the message
+than 64 KiB is not an error of its own: only its first 64 KiB is read when the
+CLI quotes it. An unmapped Kagi or Serper status, a Bright Data 400 or unmapped
+status, and a Bright Data dataset-scrape 401/403 put the start of that text in
+the failure message, shortened again by `boundedDetail`. Kagi's mapped 401/403,
+429 and 5xx throw before reading the body at all. Serper reads an error body only
+for a status it does not map: the mapped 403, 429, 404 and 5xx branches decide
+from the status alone and hang up on the body unread. An unmapped body cut at
+64 KiB no longer parses, so that status reports `no details`. If an error body cannot be read at all, the message
 says `(the response body could not be read: <reason>)` where the server's text
 would have gone, and Serper's JSON parse of that sentence fails the same way.
 
@@ -658,10 +661,10 @@ cap fails a run before the URL, the binary or the other flags have been checked.
 
 ## Test-only modules are left out of the package by name
 
-**What you see:** `src/live.ts` and `src/fixtures.ts` are compiled into `dist/`,
-and `package.json` `files` lists `!dist/live.js` and `!dist/fixtures.js` so the
-published tarball has neither. A new test helper that is not added to that list
-ships.
+**What you see:** `src/live.ts`, `src/fixtures.ts` and `src/error-assertions.ts`
+are compiled into `dist/`, and `package.json` `files` lists `!dist/live.js`,
+`!dist/fixtures.js` and `!dist/error-assertions.js` so the published tarball has
+none of them. A new test helper that is not added to that list ships.
 
 **Why:** `files` takes `dist` minus `*.test.js`, and a helper that tests import is
 not named `*.test.ts`. `live.js` was shipping before this was noticed. A test in

@@ -206,11 +206,14 @@ empty flag value is an error. The config key is read for `scrape` and for
 `search --provider searxng`, the two paths that open the config file; the other
 search providers take the flag, the env var or the default. With `--ladder` the
 cap bounds the one JSON line the ladder CLI prints back, which is the page plus
-its title and links after escaping, so it is a little larger than the text. When Kagi or
-Bright Data fails a request, or Serper returns a status it does not map, the first 64 KiB
-of the error response is kept to explain it, and a longer one is cut, not refused.
-A Serper status the CLI maps is decided from the status alone, and SearXNG errors
-are reported from the status code alone; neither reads an error body.
+its title and links after escaping, so it is a little larger than the text. An error
+response the CLI quotes is read through the same 64 KiB bound: a longer body is cut,
+not refused. That covers an unmapped Kagi or Serper status, Bright Data's 400 and
+unmapped statuses, and a Bright Data dataset-scrape 401/403. Kagi's mapped
+401/403, 429 and 5xx throw before reading any body; a mapped Serper status is
+decided from the status alone and its body is discarded unread; Bright Data's
+other mapped statuses read the body but do not quote it. SearXNG errors are
+reported from the status code alone.
 
 ### `update`
 
