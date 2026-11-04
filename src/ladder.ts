@@ -26,7 +26,7 @@ export interface LadderResponse {
   links: LadderLink[];
 }
 
-export const LADDER_PROTOCOL = 3;
+export const LADDER_PROTOCOL = 4;
 
 export type LadderTabState = "fresh" | "same";
 export type LadderCookieState = "cold" | "jar";
@@ -50,6 +50,12 @@ export interface LadderAxes {
 export interface LadderRequest extends LadderAxes {
   protocol: typeof LADDER_PROTOCOL;
   url: string;
+  /**
+   * The same cap the client applies to the reply line. The child streams its
+   * own network read no further than this, so an oversized page is refused
+   * before it can be buffered rather than after it is serialized.
+   */
+  maxResponseBytes: number;
 }
 
 export interface LadderAxisSources {
@@ -71,10 +77,12 @@ export interface LadderClientOptions {
   handshakeMs?: number;
   /**
    * The longest line the child may print, in bytes. Every reply is one line, so
-   * this is the cap on a page. A child that passes it is killed and the fetch
-   * fails, because a cut-off line cannot be parsed. Defaults to the transport
-   * cap (64 MiB); `scrape --ladder` passes the same flag, env var or config key
-   * every other provider's cap comes from.
+   * this is the cap on a page. The same number travels in the request as
+   * `maxResponseBytes`, so the child stops its own network read at it instead
+   * of buffering a page the parent would refuse. A child that passes it is
+   * killed and the fetch fails, because a cut-off line cannot be parsed.
+   * Defaults to the transport cap (64 MiB); `scrape --ladder` passes the same
+   * flag, env var or config key every other provider's cap comes from.
    */
   maxLineBytes?: number;
 }
@@ -318,8 +326,12 @@ export function resolveLadderAxes(sources: LadderAxisSources = {}): LadderAxes {
   return axes;
 }
 
-export function buildLadderRequest(url: string, axes: LadderAxes): LadderRequest {
-  return { protocol: LADDER_PROTOCOL, url, ...axes };
+export function buildLadderRequest(
+  url: string,
+  axes: LadderAxes,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
+): LadderRequest {
+  return { protocol: LADDER_PROTOCOL, url, maxResponseBytes, ...axes };
 }
 
 /**
@@ -397,7 +409,7 @@ function parseResponse(line: string): LadderResponse {
       `ladder-cli returned verdict "ok" with empty text: schema violation, not a success (line: ${boundedDetail(line)})`,
     );
   }
-  // A protocol-3 child always sends links. Defaulting a missing field to []
+  // A protocol-4 child always sends links. Defaulting a missing field to []
   // would turn a stale half of the pair into an empty result the caller cannot
   // tell from a page with no anchors, so this is a schema violation instead.
   if (!Array.isArray(body.links)) {
@@ -475,7 +487,11 @@ export class LadderClient {
     if (this.closed) {
       throw new SerpAxiLadderError("ladder client is closed");
     }
-    const request = buildLadderRequest(url, axes ?? resolveLadderAxes({}));
+    const request = buildLadderRequest(
+      url,
+      axes ?? resolveLadderAxes({}),
+      this.options.maxLineBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+    );
     this.ensureSpawned();
     return new Promise<LadderResponse>((resolve, reject) => {
       // No timer here: the timeout covers the upstream call and arms at

@@ -58,7 +58,7 @@ def test_rung_one_is_still_the_only_free_rung() -> None:
 
 
 def test_reserved_axes_do_not_change_the_rung_context(make_request):
-    from ladder_cli.rungs import RungResult
+    from ladder_cli.rungs import RungContext, RungResult
 
     calls = []
 
@@ -70,7 +70,8 @@ def test_reserved_axes_do_not_change_the_rung_context(make_request):
     reserved = cli.dispatch(make_request(tabState="same", cacheState="warm", fingerprintState="stable"), runner=runner)
     assert defaults.verdict == reserved.verdict == "ok"
     assert defaults.text == reserved.text == "content"
-    assert calls == [("http", "https://example.com/article", None)] * 2
+    expected = RungContext(max_response_bytes=67108864)
+    assert calls == [("http", "https://example.com/article", expected)] * 2
 
 
 def test_every_python_file_ends_with_a_newline() -> None:

@@ -539,14 +539,21 @@ async function runLadderScrape(
     // says the climb never got to judge a page at all. Reporting the second as
     // the first tells the caller to retry a defence that never happened.
     const note = response.warning ? ` (${response.warning})` : "";
+    // The child stops at the same cap this run resolved, but its failure comes
+    // back as a verdict rather than an exception, so the raise-cap advice has
+    // to be attached here too, where a user who hit it will read it.
+    const childHitCap =
+      response.warning?.includes(`larger than the ${maxLineBytes} bytes serp-axi will read`) ?? false;
     throw new SerpAxiError(
       `"${url.toString()}" could not be fetched (ladder verdict: ${response.verdict}, rung ${response.rungReached})${note}`,
       "runtime",
       response.verdict === "blocked"
         ? "the page is defended; retry later or solve it interactively"
-        : response.verdict === "error"
-          ? `the ladder could not fetch the page: ${response.warning ?? "see the runtime error"}`
-          : "the page appears dead; check the URL",
+        : response.verdict === "error" && childHitCap
+          ? raiseCapHelp()
+          : response.verdict === "error"
+            ? `the ladder could not fetch the page: ${response.warning ?? "see the runtime error"}`
+            : "the page appears dead; check the URL",
       { verdict: response.verdict, rungReached: response.rungReached },
     );
   }

@@ -51,7 +51,7 @@ def read_lines(stdout: io.StringIO) -> list[dict]:
 def test_the_ready_line_precedes_every_response_and_declares_the_protocol() -> None:
     stdout = io.StringIO()
     cli.main([], stdin=io.StringIO(""), stdout=stdout)
-    assert read_lines(stdout) == [{"ready": True, "protocol": 3}]
+    assert read_lines(stdout) == [{"ready": True, "protocol": 4}]
 
 
 def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypatch) -> None:
@@ -65,7 +65,7 @@ def test_a_request_is_answered_with_a_versioned_response(make_request, monkeypat
     lines = read_lines(stdout)
     assert lines[0]["ready"] is True
     response = lines[1]
-    assert response["protocol"] == 3
+    assert response["protocol"] == 4
     assert response["verdict"] == "ok"
     assert response["rungReached"] == 1
     assert response["text"] == "clear enough to read"
@@ -336,6 +336,67 @@ def test_an_isolated_child_is_told_the_jars_on_its_command_line(monkeypatch) -> 
 
     assert commands[0][-4:] == ["--jar-in", "/j/in.json", "--jar-out", "/j/out.json"]
     assert "--jar-in" not in commands[1], "no jar, no flags: the child's argv stays what it was"
+
+
+def test_the_requests_byte_cap_reaches_the_http_rung_context(make_request, monkeypatch) -> None:
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake(rung: str, url: str, ctx=None) -> RungResult:
+        seen["ctx"] = ctx
+        return ok_result()
+
+    monkeypatch.setattr(cli, "RUNGS", ("http",))
+
+    cli.dispatch(make_request(maxResponseBytes=4096), runner=fake)
+
+    assert seen["ctx"] == RungContext(max_response_bytes=4096)
+
+
+def test_the_isolated_child_is_told_the_byte_cap_on_its_command_line(monkeypatch) -> None:
+    from ladder_cli.rungs import RungContext
+
+    commands: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            commands.append(command)
+            self.pid = 4242
+
+        def communicate(self, timeout: float | None = None):
+            return ('{"title": "T", "text": "body", "status": 200}\n', "")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", FakeProcess)
+
+    cli.run_rung_isolated(
+        "http",
+        "https://example.com/",
+        timeout_s=5,
+        ctx=RungContext(max_response_bytes=4096),
+    )
+
+    assert "--max-bytes" in commands[0]
+    assert commands[0][commands[0].index("--max-bytes") + 1] == "4096"
+
+
+def test_the_rung_child_reads_the_cap_flag_back(monkeypatch) -> None:
+    from ladder_cli.rungs import RungContext
+
+    seen: dict = {}
+
+    def fake_child(rung, url, stdout, stderr, ctx=None):
+        seen["call"] = (rung, url, ctx)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_rung_child", fake_child)
+
+    cli.main(
+        ["--rung", "http", "https://example.com/", "--max-bytes", "4096"],
+        stdout=io.StringIO(),
+    )
+
+    assert seen["call"] == ("http", "https://example.com/", RungContext(max_response_bytes=4096))
 
 
 def test_the_rung_child_reads_the_jar_flags_back_without_mistaking_them_for_the_url(monkeypatch) -> None:

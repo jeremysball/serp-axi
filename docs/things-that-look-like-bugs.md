@@ -519,8 +519,8 @@ deliberate evasion would flag ordinary code to do it.
 
 The guard covers HTTP responses only. `src/ladder.ts` reads a local child's
 stdout, not a `Response`, and bounds it by its own check: the pending line may not
-pass the same cap (see "The ladder cap bounds one line of the child's output"
-below). No ast-grep rule watches that read; `src/ladder.test.ts` does.
+pass the same cap (see "The ladder cap bounds the child's read and its reply
+line" below). No ast-grep rule watches that read; `src/ladder.test.ts` does.
 
 `src/guards.test.ts` runs each rule against code it must catch, code it must
 leave alone, and the bypass forms, and it fails if a rule file has no case that
@@ -604,38 +604,54 @@ as the `includeMarkup` key.
 file for another reason, since the key should then apply to it too, or if a path
 that does read the key lets a bad value through.
 
-## The ladder cap bounds one line of the child's output, not the page text
+## The ladder cap bounds the child's read and its reply line
 
-**What you see:** `serp-axi scrape <url> --ladder --max-response-bytes 100000`
-fails with `ladder scrape failed: ladder-cli printed a line longer than 100000
-bytes, which serp-axi will not read` on a page whose text is shorter than
-100000 characters. The same run with a larger cap succeeds. A malformed
-`SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` now stops a `--ladder` run
-too, as it stops every other scrape.
+**What you see:** two different failures share the one cap.
 
-**Why:** the ladder CLI prints each reply as one JSON line, so the length of that
-line is the size of the page as it crosses the pipe: the text after JSON
+A page whose HTTP body is over the cap stops inside the ladder child, which
+reports `ladder response is larger than the <n> bytes serp-axi will read`; the
+run fails with the ladder verdict `error` rather than printing part of the page.
+The child did not read the whole body into memory first.
+
+A reply line that is over the cap even though the page body was under it fails
+differently: `ladder scrape failed: ladder-cli printed a line longer than <n>
+bytes, which serp-axi will not read`. The same run with a larger cap succeeds.
+A malformed `SERP_AXI_MAX_RESPONSE_BYTES` or `maxResponseBytes` stops a
+`--ladder` run too, as it stops every other scrape.
+
+**Why:** the child reads the network itself, so it cannot rely on the parent's
+line check, which only runs after the page has been serialized. The parent sends
+its resolved cap as `maxResponseBytes` on the request (protocol 4), the rung
+hands it to the isolated child as `--max-bytes`, and the HTTP rung reads the
+body with primp's `iter_bytes` instead of `response.text` or `response.json`.
+The running byte count is checked before each chunk is kept, and the response is
+closed the moment it passes, so the child holds at most the cap plus one chunk
+of a runaway page.
+
+The parent keeps its own check because the two measurements are not the same
+size. The ladder CLI prints each reply as one JSON line: the text after JSON
 escaping, plus the title, the links and the rung metadata. A quote or a newline
 in the page costs two bytes; a non-ASCII character costs its UTF-8 width, because
-the ladder CLI writes with `ensure_ascii=False` (`ladder-cli/ladder_cli/cli.py:232`).
-The cap is the
-shared `--max-response-bytes` / `SERP_AXI_MAX_RESPONSE_BYTES` / `maxResponseBytes`
-setting, so one number bounds every provider and a user who needs a larger page
-has one knob. Every line in a chunk is measured before the chunk is appended,
-against the bytes already pending for the line it extends, and a child over the
-cap is killed and respawned by the next fetch, because a cut-off line cannot be
-parsed. Measuring every line matters when a chunk begins with a newline (a blank
-startup line, or the end of the previous reply): checking only the first line
-would count zero bytes and let the reply after it through. The same cap
-bounds the startup output before the ready line, so a child that prints without
-ever ending a line is stopped too. This is a different thing from `--max-chars`,
-which trims text after it has been read.
+the ladder CLI writes with `ensure_ascii=False` (`ladder-cli/ladder_cli/cli.py:256`).
+A page can therefore fit under the body cap and still produce a line over it.
+Every line in a chunk is measured before the chunk is appended, against the
+bytes already pending for the line it extends, and a child over the line cap is
+killed and respawned by the next fetch, because a cut-off line cannot be parsed.
+Measuring every line matters when a chunk begins with a newline (a blank startup
+line, or the end of the previous reply): checking only the first line would count
+zero bytes and let the reply after it through. The same cap bounds the startup
+output before the ready line, so a child that prints without ever ending a line
+is stopped too. This is a different thing from `--max-chars`, which trims text
+after it has been read.
 
-**When this becomes a real bug:** if a page that fits under the cap as plain text
-fails here and the line is not over the cap by this count (the byte count lives in
-`onStdout` in `src/ladder.ts`, and `src/ladder.test.ts` pins it at the cap and one
-byte under), or if a malformed cap fails a run before the URL, the binary or the
-other flags have been checked.
+**When this becomes a real bug:** if a body under the cap still fails with the
+child's `larger than` error, or if the child returns a page after reading more
+than the cap (the read lives in `_read_body` in
+`ladder-cli/ladder_cli/rungs/http.py`), or if a page that fits under the cap as
+plain text fails on the parent's line check and the line is not over the cap by
+that count (the byte count lives in `onStdout` in `src/ladder.ts`, and
+`src/ladder.test.ts` pins it at the cap and one byte under), or if a malformed
+cap fails a run before the URL, the binary or the other flags have been checked.
 
 ## Test-only modules are left out of the package by name
 

@@ -89,7 +89,7 @@ in one batched request and requires `BRIGHTDATA_API_KEY`.
 ```
 serp-axi scrape <url> [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--max-response-bytes <n>]
 serp-axi scrape <url> [<url2> ...] --provider brightdata [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--dataset-id <id>] [--max-response-bytes <n>]
-serp-axi scrape <url> --ladder [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup]
+serp-axi scrape <url> --ladder [--full [--full-max-chars <n>] | --max-chars <n>] [--include-markup] [--max-response-bytes <n>]
 ```
 
 Bright Data uses dataset `gd_m6gjtfmeh43we6cqc` by default. Override it with
@@ -183,7 +183,9 @@ The character caps above cut text after it has been parsed. Something has to
 bound the read before that, because a Bright Data record arrives with its raw
 `page_html` next to the text, and the HTML is dropped only after the whole reply
 is in memory. So every provider response, search and scrape alike, is read
-through one byte cap.
+through one byte cap. The `--ladder` child receives the same cap in its
+request and stops its own HTTP read at it, so a runaway page cannot fill the
+child's memory before the parent sees the reply.
 
 | Cap | Flag | Env var | Config key | Default |
 | --- | --- | --- | --- | --- |
@@ -336,7 +338,7 @@ HTTP replay checks domain, path, Secure and expiry attributes, captures cookies
 on redirect hops, and preserves unrelated stored cookies when saving. Netscape
 jars cannot retain SameSite. A blocked HTTP response gets one fresh-client retry;
 its random fingerprint can repeat and it does not change the source IP. The
-parent and child must both speak protocol 3; an older installed child fails at
+parent and child must both speak protocol 4; an older installed child fails at
 the ready handshake instead of ignoring the separate HTTP fields.
 
 Profile launches take an exclusive local lease. Cleanup removes Chromium locks

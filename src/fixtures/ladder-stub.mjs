@@ -1,5 +1,5 @@
 // Test double for ladder-cli: speaks the NDJSON contract.
-// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|tail-mid|html-title|split-multibyte|big-page|blank-then-long|endless-line|endless-banner
+// Usage: node ladder-stub.mjs --mode ok|blocked|dead|malformed|die-before-ready|die-mid|slow|empty-ok|bad-protocol|echo-request|banner-then-ready|silent|error|over-cap|tail-mid|html-title|split-multibyte|big-page|blank-then-long|endless-line|endless-banner
 import readline from "node:readline";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -47,7 +47,7 @@ if (mode === "silent") {
 
   // A mismatched protocol must fail at the handshake, so this mode announces a
   // protocol the parent does not speak before any request is read.
-  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 3 }) + "\n");
+  process.stdout.write(JSON.stringify({ ready: true, protocol: mode === "bad-protocol" ? 2 : 4 }) + "\n");
 }
 
 // A silent child never reaches the read loop, so it cannot be woken by stdin
@@ -137,11 +137,19 @@ input.on("line", async (line) => {
     );
     return;
   }
-  // A protocol-3 response without links is a schema violation, not an empty
+  // A protocol-4 response without links is a schema violation, not an empty
   // result: the caller must be told the pair is stale, not handed [].
   if (mode === "missing-links") {
     process.stdout.write(
       JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: "body", engines: [], elapsedMs: 1, warning: null }) + "\n",
+    );
+    return;
+  }
+  // The child stopped its own read at the cap the parent sent. The warning is
+  // the real child's wording, so the parent's help path is what is exercised.
+  if (mode === "over-cap") {
+    process.stdout.write(
+      JSON.stringify({ verdict: "error", rungReached: 1, title: "", text: "", engines: [], elapsedMs: 1, links: [], warning: `ladder response is larger than the ${request.maxResponseBytes} bytes serp-axi will read` }) + "\n",
     );
     return;
   }

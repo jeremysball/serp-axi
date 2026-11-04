@@ -11,7 +11,7 @@ from ladder_cli.protocol import LadderRequest, LadderResponse, ProtocolError
 
 def valid_payload() -> dict[str, object]:
     return {
-        "protocol": 3,
+        "protocol": 4,
         "url": "https://example.com/article",
         "tabState": "fresh",
         "cookieState": "cold",
@@ -23,6 +23,7 @@ def valid_payload() -> dict[str, object]:
         "jarOut": None,
         "httpJarIn": None,
         "httpJarOut": None,
+        "maxResponseBytes": 4096,
     }
 
 
@@ -58,10 +59,24 @@ def test_a_missing_field_is_rejected() -> None:
         LadderRequest.parse(payload)
 
 
+def test_the_request_carries_the_byte_cap_the_child_must_read_under() -> None:
+    payload = valid_payload()
+    payload["maxResponseBytes"] = 123456
+    assert LadderRequest.parse(payload).maxResponseBytes == 123456
+
+
+@pytest.mark.parametrize("cap", [0, -1, 1.5, "1", True])
+def test_a_response_cap_must_be_a_positive_whole_number(cap: object) -> None:
+    payload = valid_payload()
+    payload["maxResponseBytes"] = cap
+    with pytest.raises(ProtocolError, match=r"maxResponseBytes .* must be a positive whole number"):
+        LadderRequest.parse(payload)
+
+
 def test_a_protocol_mismatch_names_both_sides() -> None:
     payload = valid_payload()
     payload["protocol"] = 1
-    with pytest.raises(ProtocolError, match=r"speaks protocol 3.*declares 1"):
+    with pytest.raises(ProtocolError, match=r"speaks protocol 4.*declares 1"):
         LadderRequest.parse(payload)
 
 
@@ -118,7 +133,7 @@ def test_a_refusal_may_carry_empty_text() -> None:
         warning="status 403",
     )
     decoded = json.loads(response.encode())
-    assert decoded["protocol"] == 3
+    assert decoded["protocol"] == 4
     assert decoded["verdict"] == "blocked"
     assert decoded["warning"] == "status 403"
 

@@ -169,7 +169,7 @@ test("a protocol mismatch fails at the handshake and names both sides", async ()
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
       assert.ok(error instanceof SerpAxiLadderError);
       assert.match(error.message, /protocol mismatch/);
-      assert.match(error.message, /speaks protocol 3/);
+      assert.match(error.message, /speaks protocol 4/);
       assert.match(error.message, /reported protocol 2/);
       return true;
     });
@@ -188,7 +188,7 @@ test("links survive the response parse", async () => {
   }
 });
 
-test("a protocol-3 response without links is a schema violation", async () => {
+test("a protocol-4 response without links is a schema violation", async () => {
   const ladder = client("missing-links");
   try {
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
@@ -232,6 +232,7 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
         "httpJarOut",
         "jarIn",
         "jarOut",
+        "maxResponseBytes",
         "profile",
         "protocol",
         "rungCeiling",
@@ -240,6 +241,7 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
       ],
     );
     assert.equal(sent.protocol, LADDER_PROTOCOL);
+    assert.equal(sent.maxResponseBytes, 64 * 1024 * 1024);
     assert.equal(sent.tabState, "fresh");
     assert.equal(sent.cookieState, "cold");
     assert.equal(sent.cacheState, "cold");
@@ -250,6 +252,17 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
     assert.equal(sent.jarOut, null);
     assert.equal(sent.httpJarIn, null);
     assert.equal(sent.httpJarOut, null);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("the request carries the resolved byte cap so the child can bound its own read", async () => {
+  const ladder = client("echo-request", { maxLineBytes: 4096 });
+  try {
+    const res = await ladder.fetch("https://a.example/x", resolveLadderAxes({}));
+    const sent = JSON.parse(res.text) as Record<string, unknown>;
+    assert.equal(sent.maxResponseBytes, 4096);
   } finally {
     await ladder.close();
   }

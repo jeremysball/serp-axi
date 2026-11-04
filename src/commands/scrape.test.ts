@@ -428,6 +428,23 @@ test("runScrape --ladder stops a page over the cap from the flag, the env var an
   await assert.rejects(() => runScrape([LADDER_URL, "--ladder"], noFetch, env, { maxResponseBytes: Number(UNDER_PAGE) }), ladderCapError);
 });
 
+test("runScrape --ladder gives raise-cap help when the child stopped at the byte cap", async () => {
+  const env = ladderStubEnv("over-cap");
+  const noFetch = (async () => new Response("{}")) as typeof fetch;
+  await assert.rejects(
+    () => runScrape([LADDER_URL, "--ladder", "--max-response-bytes", UNDER_PAGE], noFetch, env, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.equal(error.kind, "runtime");
+      assert.match(error.message, new RegExp(`larger than the ${UNDER_PAGE} bytes`));
+      assert.match(error.help ?? "", /--max-response-bytes/);
+      assert.match(error.help ?? "", /SERP_AXI_MAX_RESPONSE_BYTES/);
+      assert.match(error.help ?? "", /maxResponseBytes/);
+      return true;
+    },
+  );
+});
+
 test("runScrape --ladder reads the same page when the cap is above it, which is what makes the stop above the cap's doing", async () => {
   const env = ladderStubEnv("big-page");
   const noFetch = (async () => new Response("{}")) as typeof fetch;
@@ -585,13 +602,25 @@ test("runScrape --ladder forwards the resolved axes onto the wire", async () => 
   );
   const sent = JSON.parse(output.text as string) as Record<string, unknown>;
   assert.equal(sent.url, "https://example.com/article");
-  assert.equal(sent.protocol, 3);
+  assert.equal(sent.protocol, 4);
   assert.equal(sent.tabState, "same");
   assert.equal(sent.rungCeiling, 2);
   assert.equal(sent.jarIn, "browser.json");
   assert.equal(sent.jarOut, null);
   assert.equal(sent.httpJarIn, "session.in");
   assert.equal(sent.httpJarOut, "session.out");
+});
+
+test("runScrape --ladder forwards the byte cap so the child can bound its own read", async () => {
+  const env = ladderStubEnv("echo-request");
+  const output = await runScrape(
+    ["https://example.com/article", "--ladder", "--max-response-bytes", "4096"],
+    (async () => new Response("{}")) as typeof fetch,
+    env,
+    {},
+  );
+  const sent = JSON.parse(output.text as string) as Record<string, unknown>;
+  assert.equal(sent.maxResponseBytes, 4096);
 });
 
 test("runScrape --ladder rejects an invalid axis value as a usage error", async () => {
