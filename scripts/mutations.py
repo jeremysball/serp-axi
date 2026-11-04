@@ -839,6 +839,14 @@ BELIEFS: list[Belief] = [
         tests=("tests/test_jars.py::test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner",),
         why="A zombie exists to signal 0 but is gone; refusing its lock strands the profile until something reaps it.",
     ),
+    Belief(
+        name="pytest moves its temp tree off a TMPDIR too long for a test's socket",
+        path=LADDER / "tests/conftest.py",
+        old='"/.X11-unix/X301") <= 107:',
+        new='"/.X11-unix/X301") <= 108:',
+        tests=("tests/test_socket_budget.py::test_conftest_moves_pytest_exactly_when_the_socket_would_not_fit",),
+        why="A socket path is capped at 107 bytes; one byte of slack in either direction either breaks the display tests on a long XDG TMPDIR or moves every run off a TMPDIR that fits.",
+    ),
 ]
 
 
@@ -857,13 +865,35 @@ def _forget_imports(project: Path) -> None:
             shutil.rmtree(cache)
 
 
+def _short_temp_root() -> str:
+    """A temp root that leaves room for a test's unix socket.
+
+    AF_UNIX caps a whole socket path at 107 bytes. A scratch project is
+    `<root>/serp-axi-mutation-XXXXXXXX/ladder-cli`, and the tests run with
+    `--basetemp=<that>/bt` + a 30-character test name with its numeric suffix
+    (31) + `.X11-unix/X301`, which leaves the root 30 bytes. Pytest resolves its
+    base directory through symlinks, so the root is measured where it leads. An
+    inherited TMPDIR (an XDG state directory, for instance) can spend more than
+    that before pytest's own layout is even added; /tmp is the conventional short
+    root for those, and stays the fallback.
+    """
+    inherited = tempfile.gettempdir()
+    layout = len("/serp-axi-mutation-XXXXXXXX") + len("/bt") + len("/") + 31 + len("/.X11-unix/X301")
+    if len(os.fspath(Path(inherited).resolve())) + layout <= 107:
+        return inherited
+    tmp = Path("/tmp")
+    if tmp.is_dir() and os.access(tmp, os.W_OK):
+        return os.fspath(tmp)
+    return inherited
+
+
 @contextmanager
 def _scratch_project():
     # Callers give pytest a short base directory (`run_tests` passes --basetemp):
     # a test that binds a unix socket under its tmp_path has 107 bytes for the
     # whole path, and this directory's name plus pytest's default layout under
     # TMPDIR used up all of them for the longest test names.
-    with tempfile.TemporaryDirectory(prefix="serp-axi-mutation-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="serp-axi-mutation-", dir=_short_temp_root()) as temporary:
         project = Path(temporary) / "ladder-cli"
         shutil.copytree(
             LADDER, project,
@@ -958,7 +988,9 @@ def _table_problems(beliefs: list[Belief]) -> list[str]:
     A belief with no test can never be killed or survive, so it would be counted
     as nothing at all. Two beliefs with the same edit are one claim written twice
     under different names: both would be "killed" by whichever tests exist, and
-    the gate's count would say two things were held where one was.
+    the gate's count would say two things were held where one was. A test listed
+    twice in one belief collapses to one entry in the outcomes and would be
+    reported as if both sides had been run.
     """
     problems = []
     seen: dict[tuple[Path, str, str], str] = {}
@@ -966,6 +998,8 @@ def _table_problems(beliefs: list[Belief]) -> list[str]:
     for belief in beliefs:
         if not belief.tests:
             problems.append(f"[{belief.name}] lists no tests")
+        if len(set(belief.tests)) != len(belief.tests):
+            problems.append(f"[{belief.name}] lists the same test twice")
         if belief.name in names:
             problems.append(f"[{belief.name}] is named twice")
         names.add(belief.name)
@@ -1027,10 +1061,10 @@ def main() -> int:
             continue
 
         outcomes: dict[str, tuple[str, str]] = {}
-        for test in belief.tests:
-            with _scratch_project() as project:
-                target = project / belief.path.relative_to(LADDER)
-                target.write_text(original.replace(belief.old, belief.new, 1))
+        with _scratch_project() as project:
+            target = project / belief.path.relative_to(LADDER)
+            target.write_text(original.replace(belief.old, belief.new, 1))
+            for test in belief.tests:
                 outcomes[test] = run_tests(test, project)
 
         errored = [(t, last) for t, (outcome, last) in outcomes.items() if outcome == "error"]

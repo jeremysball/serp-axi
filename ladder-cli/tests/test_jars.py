@@ -17,6 +17,8 @@ import sys
 
 import pytest
 
+from conftest import unreaped_child
+from ladder_cli import procfs
 from ladder_cli.state import jars
 
 
@@ -218,11 +220,10 @@ def test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock(tmp_
 
 
 def test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner(tmp_path: Path) -> None:
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child = unreaped_child(own_group=False)
     lock = tmp_path / "SingletonLock"
     try:
-        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
-        assert Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        assert procfs.read_stat(child.pid).state == "Z"
         os.kill(child.pid, 0)
         lock.symlink_to(f"{socket.gethostname()}-{child.pid}")
         assert jars.clear_locks(tmp_path) == 1

@@ -149,7 +149,6 @@ def test_the_slot_search_classifies_each_candidate_once(monkeypatch, tmp_path) -
 
 def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypatch) -> None:
     number = headed.free_display(headed.display_for_pid(os.getpid()))
-    owner = subprocess.Popen(headed.xvfb_command(number), stderr=subprocess.PIPE)
     popen = subprocess.Popen
     attempts = []
 
@@ -158,7 +157,8 @@ def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypa
         attempts.append(process)
         return process
 
-    try:
+    with _real_servers(number) as start:
+        owner = start()
         headed._await_display(number, owner)
         monkeypatch.setattr(headed.subprocess, "Popen", record_process)
         monkeypatch.setattr(headed, "display_for_pid", lambda pid: f":{number}")
@@ -175,15 +175,10 @@ def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypa
 
         with headed.display("https://example.com/", headed.launch_options()) as page:
             assert page["display"] != f":{number}"
-            assert Path(f"/tmp/.X{page['display'][1:]}-lock").exists()
+            assert headed.lock_path(int(page["display"].lstrip(":"))).exists()
             assert owner.poll() is None
         assert len(attempts) >= 2
         assert all(process.poll() is not None and process.stderr.closed for process in attempts)
-    finally:
-        # SIGTERM, not kill: the server removes its own lock, which a kill would leave behind
-        owner.terminate()
-        owner.wait(timeout=10)
-        owner.stderr.close()
 
 
 def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monkeypatch, tmp_path) -> None:
@@ -1042,7 +1037,7 @@ def test_readiness_accepts_a_display_that_only_listens_on_the_abstract_socket(mo
         headed._await_display(315, process)
 
 
-def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp")) -> None:
+def _remove_own_leftovers(number: int, server_pid: int, root: Path | None = None) -> None:
     """Delete what a test server left on its slot, unless the lock says it is not ours.
 
     The slot came from `free_display`, but another process can take it between
@@ -1059,8 +1054,13 @@ def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp"
     one step, which a file system does not offer without renaming a file that
     is not ours; two syscalls on a slot `free_display` had just found free is the
     residue, and it is why this is test cleanup and not a library function.
+
+    `root` defaults to the production `headed.X11_ROOT`; a test that owns its
+    directory passes that instead.
     """
-    lock = root / f".X{number}-lock"
+    root = headed.X11_ROOT if root is None else root
+    lock = root / headed.lock_path(number).name
+    socket = root / headed.socket_path(number).relative_to(headed.X11_ROOT)
     try:
         owner = headed._read_lock(lock)[1]
     except (OSError, ValueError):
@@ -1068,7 +1068,7 @@ def _remove_own_leftovers(number: int, server_pid: int, root: Path = Path("/tmp"
     if owner != server_pid:
         return
     lock.unlink(missing_ok=True)
-    (root / ".X11-unix" / f"X{number}").unlink(missing_ok=True)
+    socket.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize(
@@ -1137,6 +1137,25 @@ def test_test_cleanup_does_not_follow_a_symlink_at_the_lock_path(tmp_path) -> No
     assert socket_path.exists(), "the socket beside a link that is not our lock was removed"
 
 
+def test_test_cleanup_follows_the_configured_x11_root(monkeypatch, tmp_path) -> None:
+    """The cleanup removes what the code wrote, wherever `X11_ROOT` points.
+
+    The real-server tests derive their paths through `headed.lock_path` and
+    `headed.socket_path`, and the cleanup has to use the same root or it looks at
+    `/tmp` while production looked at the scratch directory, finds nothing and
+    leaves exactly the leftover lock this cleanup exists to remove.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    lock, socket = headed.lock_path(317), headed.socket_path(317)
+    lock.write_text(f"{FAKE_SERVER_PID:>10}\n")
+    socket.write_text("")
+    assert lock.exists() and socket.exists(), "precondition: the slot has what our server left"
+
+    _remove_own_leftovers(317, FAKE_SERVER_PID)
+
+    assert not lock.exists() and not socket.exists()
+
+
 @contextlib.contextmanager
 def _real_servers(number: int):
     """Start real Xvfb servers on a slot the test found free, and clean up whatever they leave.
@@ -1173,7 +1192,7 @@ def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
     guess that sends the next fetch to a display that never comes up.
     """
     number = headed.free_display(headed.display_for_pid(os.getpid()))
-    lock, socket = Path(f"/tmp/.X{number}-lock"), Path(f"/tmp/.X11-unix/X{number}")
+    lock, socket = headed.lock_path(number), headed.socket_path(number)
     with _real_servers(number) as start:
         first = start()
         headed._await_display(number, first)
@@ -1185,7 +1204,7 @@ def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
 
         second = start()
         headed._await_display(number, second)
-        assert int(lock.read_text().strip()) == second.pid, "the replacement owns the lock it started over"
+        assert headed._read_lock(lock)[1] == second.pid, "the replacement owns the lock it started over"
         assert headed.display_is_free(number) is False
         headed._stop_display(second)
         assert not lock.exists(), "and removes it when stopped"
@@ -1193,8 +1212,8 @@ def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
 
 
 def _lock_naming(number: int, pid: int) -> Path:
-    """Write `/tmp/.X<n>-lock` the way Xvfb does, for a slot the test found free."""
-    lock = Path(f"/tmp/.X{number}-lock")
+    """Write the lock Xvfb writes for `number`, for a slot the test found free."""
+    lock = headed.lock_path(number)
     lock.write_text(f"{pid:>10}\n")
     return lock
 
@@ -1220,13 +1239,12 @@ def test_a_lock_naming_a_zombie_is_held_until_it_is_reclaimed_and_then_the_real_
 
             server = start()
             headed._await_display(number, server)
-            assert int(lock.read_text().strip()) == server.pid
+            assert headed._read_lock(lock)[1] == server.pid
             headed._stop_display(server)
             assert not lock.exists(), "and the server it started removes its own lock when stopped"
     finally:
+        _remove_own_leftovers(number, zombie.pid)
         zombie.wait()
-        if lock.exists() and lock.read_text().strip() == str(zombie.pid):
-            lock.unlink()
 
 
 def test_only_a_zombies_lock_is_reclaimed(monkeypatch, tmp_path) -> None:
@@ -1407,14 +1425,13 @@ def test_a_rung_killed_on_its_budget_leaves_no_display_lock_behind(tmp_path) -> 
     from ladder_cli import cli
 
     number = headed.free_display(headed.display_for_pid(os.getpid()))
-    lock, socket = Path(f"/tmp/.X{number}-lock"), Path(f"/tmp/.X11-unix/X{number}")
+    lock, socket = headed.lock_path(number), headed.socket_path(number)
     marker = tmp_path / "up"
     child = (
         "import subprocess, sys, time\n"
         "from pathlib import Path\n"
-        "marker, number = Path(sys.argv[1]), sys.argv[2]\n"
+        "marker, lock = Path(sys.argv[1]), Path(sys.argv[2])\n"
         "server = subprocess.Popen(sys.argv[3:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        "lock = Path(f'/tmp/.X{number}-lock')\n"
         "while True:\n"
         "    try:\n"
         "        if int(lock.read_text().strip()) == server.pid:\n"
@@ -1431,7 +1448,7 @@ def test_a_rung_killed_on_its_budget_leaves_no_display_lock_behind(tmp_path) -> 
             "headed",
             "https://example.com/",
             timeout_s=2.0,
-            argv=[sys.executable, "-c", child, str(marker), str(number), *headed.xvfb_command(number)],
+            argv=[sys.executable, "-c", child, str(marker), str(lock), *headed.xvfb_command(number)],
         )
         assert marker.exists(), "precondition: the display was up before the budget ran out"
         server_pid = int(marker.read_text())
@@ -1452,9 +1469,9 @@ def test_a_real_display_leaves_no_lock_behind_when_it_is_torn_down(monkeypatch) 
     seen: dict = {}
 
     def climb(url: str, options: dict, ctx=None) -> dict:
-        number = os.environ["DISPLAY"].lstrip(":")
-        seen["lock"] = Path(f"/tmp/.X{number}-lock")
-        seen["socket"] = Path(f"/tmp/.X11-unix/X{number}")
+        number = int(os.environ["DISPLAY"].lstrip(":"))
+        seen["lock"] = headed.lock_path(number)
+        seen["socket"] = headed.socket_path(number)
         seen["lock_while_up"] = seen["lock"].exists()
         return {"title": "", "text": "", "status": None}
 

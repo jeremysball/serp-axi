@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import getpass
 import os
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -18,6 +22,37 @@ from ladder_cli.protocol import LadderRequest  # noqa: E402
 @pytest.fixture(autouse=True)
 def isolated_state_home(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+
+def pytest_configure(config):
+    """Keep pytest's temporary tree short enough for the unix-socket tests.
+
+    A test's `tmp_path` holds a socket under `.X11-unix/`, and AF_UNIX caps the
+    whole path at 107 bytes. Pytest's default layout
+    (`$TMPDIR/pytest-of-<user>/pytest-N/<name30>`) spends most of that, so a
+    TMPDIR inherited from an XDG state directory leaves no room and the socket
+    tests fail with "AF_UNIX path too long" on clean code. An explicit
+    `--basetemp` (the mutation gate's) wins; otherwise fall back to /tmp only
+    when the default would not fit.
+
+    The estimate follows what pytest will build: it resolves the temporary
+    directory through symlinks, names the user `unknown` when the platform has
+    none, numbers its runs without bound (`pytest-7`, `pytest-1234`; six digits
+    are budgeted here), and truncates a test's directory to 30 characters plus
+    a numeric suffix (31 here).
+    """
+    if config.option.basetemp is not None:
+        return
+    try:
+        user = getpass.getuser()
+    except (ImportError, OSError, KeyError):
+        user = "unknown"
+    default = Path(tempfile.gettempdir()).resolve() / f"pytest-of-{user}" / ("pytest-" + "9" * 6) / ("x" * 31)
+    if len(os.fspath(default)) + len("/.X11-unix/X301") <= 107:
+        return
+    short = tempfile.mkdtemp(prefix="serp-axi-pytest-", dir="/tmp")
+    config.add_cleanup(lambda: shutil.rmtree(short, ignore_errors=True))
+    config.option.basetemp = short
 
 
 @pytest.fixture
@@ -84,6 +119,35 @@ def unreaped_child(*, own_group: bool = True) -> subprocess.Popen:
     child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=own_group)
     os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
     return child
+
+
+def sleeper_in_its_own_group() -> subprocess.Popen:
+    """A live process alone in a group of its own, for the group checks to find."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+
+def kill_group(group: int | subprocess.Popen | None) -> None:
+    """SIGKILL what is left of a group a test started, and reap its leader.
+
+    A test's cleanup runs in a `finally` after the assertion it was guarding, and
+    a group that has already gone raises from `killpg`: that error would replace
+    the assertion's failure with a cleanup failure. Both the sleeper tests and
+    the CLI tests stopped carrying their own copy to get that.
+    """
+    if group is None:
+        return
+    pid = group.pid if isinstance(group, subprocess.Popen) else group
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if isinstance(group, subprocess.Popen):
+        group.wait()
+    else:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
 
 
 def write_fake_stat(root: Path, pid: int, state: str, pgrp: int, comm: str = "name") -> None:

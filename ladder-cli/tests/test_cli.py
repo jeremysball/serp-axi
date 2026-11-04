@@ -17,7 +17,7 @@ import pytest
 from ladder_cli import cli, procfs, stopping
 from ladder_cli.rungs import RungResult, RungVerdict
 
-from conftest import unreaped_child
+from conftest import kill_group, unreaped_child
 
 
 # A rung that ignores SIGTERM and writes its pid to the file named in argv[1], so a
@@ -38,22 +38,55 @@ def _stubborn_rung(ready) -> list[str]:
 # A rung with a second process in its group. Both ignore SIGTERM. `_reap` kills the
 # leader after the grace period whatever happened before it, so a test that only
 # watches the leader cannot tell a group-wide SIGKILL from none at all; the member
-# is what only the group-wide SIGKILL reaches. argv: leader pid file, member pid
-# file, the member's program (the same one `_stubborn_rung` runs).
-STUBBORN_LEADER = (
-    "import os, signal, subprocess, sys, time\n"
-    "from pathlib import Path\n"
-    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-    "subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[2]])\n"
-    "while not Path(sys.argv[2]).exists():\n"
-    "    time.sleep(0.01)\n"
-    "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-    "time.sleep(15)\n"
+# is what only the group-wide SIGKILL reaches.
+def _rung_that_starts(
+    member_code: str,
+    *,
+    quiet: bool = False,
+    ignore_term: bool = False,
+    wait_for: str = "sys.argv[2]",
+    leader_pid_file: str | None = None,
+    member_argv: str = "sys.argv[1], sys.argv[2]",
+    end: str = "time.sleep(60)\n",
+) -> str:
+    """A stand-in rung: start `member_code` in the rung's own group, wait, then `end`.
+
+    `wait_for` is the file the leader waits for before it goes on. `quiet` sends
+    the member's stdio to /dev/null, as Xvfb's goes in the real rung, so the
+    pipes closing says nothing about it. `ignore_term` makes the leader ignore
+    SIGTERM like a browser that will not stop. `leader_pid_file` names the argv
+    that receives the leader's own pid once the member is up, and `member_argv`
+    is the argument list the member gets: it is explicit because a member that
+    takes only a pid file (as `STUBBORN_RUNG` does) must not be handed the
+    leader's path in its place.
+    """
+    stdio = ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL" if quiet else ""
+    ignoring = "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else ""
+    leader = f"Path({leader_pid_file}).write_text(str(os.getpid()))\n" if leader_pid_file else ""
+    return (
+        "import os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"{ignoring}"
+        f"subprocess.Popen([sys.executable, '-c', {member_code!r}, {member_argv}]{stdio})\n"
+        f"while not Path({wait_for}).exists():\n"
+        "    time.sleep(0.01)\n"
+        f"{leader}"
+        f"{end}"
+    )
+
+
+STUBBORN_LEADER = _rung_that_starts(
+    STUBBORN_RUNG,
+    ignore_term=True,
+    wait_for="sys.argv[2]",
+    leader_pid_file="sys.argv[1]",
+    member_argv="sys.argv[2]",
+    end="time.sleep(15)\n",
 )
 
 
 def _stubborn_family(leader_ready, member_ready) -> list[str]:
-    return [sys.executable, "-c", STUBBORN_LEADER, str(leader_ready), str(member_ready), STUBBORN_RUNG]
+    return [sys.executable, "-c", STUBBORN_LEADER, str(leader_ready), str(member_ready)]
 
 
 def _assert_member_was_killed(member_ready) -> None:
@@ -75,17 +108,6 @@ def _assert_member_was_killed(member_ready) -> None:
             os.kill(pid, signal.SIGKILL)  # the test's own cleanup, not the code's
             raise AssertionError("the group's second member is still running: the SIGKILL did not reach the group")
         time.sleep(0.02)
-
-
-def _kill_leftover_group(group: int | None) -> None:
-    """The test's own cleanup after a failure left the child running, not the code's."""
-    if group is None:
-        return
-    try:
-        os.killpg(group, signal.SIGKILL)
-        os.waitpid(group, 0)
-    except (ProcessLookupError, ChildProcessError):
-        pass
 
 
 def sequence(*results: RungResult):
@@ -231,34 +253,27 @@ def test_a_rung_that_blows_its_budget_is_killed() -> None:
     assert "budget" in result.reason
 
 
-def _rung_that_starts(member_code: str, *, quiet: bool = False) -> str:
-    """A stand-in rung: start `member_code` in the rung's own group, wait for argv[2] to exist, then hang.
+def _rung_that_stops_on_term(marker: str, *, delay: float = 0.0) -> str:
+    """A member that writes `marker` to argv[1] when SIGTERM arrives, then exits.
 
-    The member is given argv[1] and argv[2]. `quiet` sends its stdio to /dev/null, as
-    Xvfb's goes in the real rung, so the pipes closing says nothing about it.
+    `delay` is the time it takes to clean up before writing: a rung is not done
+    until what it started has finished stopping.
     """
-    stdio = ", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL" if quiet else ""
     return (
-        "import subprocess, sys, time\n"
+        "import signal, sys, time\n"
         "from pathlib import Path\n"
-        f"subprocess.Popen([sys.executable, '-c', {member_code!r}, sys.argv[1], sys.argv[2]]{stdio})\n"
-        "while not Path(sys.argv[2]).exists():\n"
-        "    time.sleep(0.01)\n"
+        "stopped, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
+        "def stop(signum, frame):\n"
+        f"    time.sleep({delay})\n"
+        f"    stopped.write_text({marker!r})\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "ready.write_text('ready')\n"
         "time.sleep(60)\n"
     )
 
 
-_STOPS_ON_TERM = (
-    "import signal, sys, time\n"
-    "from pathlib import Path\n"
-    "stopped, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
-    "def stop(signum, frame):\n"
-    "    stopped.write_text('asked')\n"
-    "    sys.exit(0)\n"
-    "signal.signal(signal.SIGTERM, stop)\n"
-    "ready.write_text('ready')\n"
-    "time.sleep(60)\n"
-)
+_STOPS_ON_TERM = _rung_that_stops_on_term("asked")
 
 
 def test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first(tmp_path) -> None:
@@ -283,18 +298,7 @@ def test_a_rung_killed_on_its_budget_has_its_group_asked_to_stop_first(tmp_path)
     assert stopped.exists(), "the group was killed outright, with no chance to stop itself"
 
 
-_SLOW_TO_STOP = (
-    "import signal, sys, time\n"
-    "from pathlib import Path\n"
-    "finished, ready = Path(sys.argv[1]), Path(sys.argv[2])\n"
-    "def stop(signum, frame):\n"
-    "    time.sleep(0.6)\n"
-    "    finished.write_text('cleaned up')\n"
-    "    sys.exit(0)\n"
-    "signal.signal(signal.SIGTERM, stop)\n"
-    "ready.write_text('ready')\n"
-    "time.sleep(60)\n"
-)
+_SLOW_TO_STOP = _rung_that_stops_on_term("cleaned up", delay=0.6)
 
 
 def test_a_rung_is_not_done_until_what_it_started_has_finished_stopping(tmp_path) -> None:
@@ -375,7 +379,7 @@ def test_a_second_sigterm_while_the_group_is_stopping_still_kills_what_ignored_t
         # went out, so the leader alone cannot show it did. The member can.
         _assert_member_was_killed(member)
     finally:
-        _kill_leftover_group(group)
+        kill_group(group)
 
 
 def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(tmp_path, monkeypatch) -> None:
@@ -413,7 +417,7 @@ def test_a_sigterm_that_lands_before_the_group_was_asked_to_stop_still_kills_it(
             os.kill(group, 0)
         _assert_member_was_killed(member)  # same reason as the test above
     finally:
-        _kill_leftover_group(group)
+        kill_group(group)
 
 
 def test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped(tmp_path, monkeypatch) -> None:
@@ -445,7 +449,7 @@ def test_a_member_the_scans_missed_is_killed_before_the_group_is_called_stopped(
             os.kill(int(ready.read_text()), 0)
         _assert_member_was_killed(member)
     finally:
-        _kill_leftover_group(int(ready.read_text()) if ready.exists() else None)
+        kill_group(int(ready.read_text()) if ready.exists() else None)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc and signals process groups, as the group check does")
@@ -647,16 +651,14 @@ def _rung_that_dies_on_a_signal_leaving_a_member(tmp_path):
         "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
         "time.sleep(30)\n"
     )
-    rung = (
-        "import os, signal, subprocess, sys, time\n"
-        "from pathlib import Path\n"
-        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]],\n"
-        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        "while not Path(sys.argv[2]).exists():\n"
-        "    time.sleep(0.01)\n"
-        "os.kill(os.getpid(), signal.SIGKILL)\n"
+    rung = _rung_that_starts(
+        member_code,
+        quiet=True,
+        wait_for="sys.argv[1]",
+        member_argv="sys.argv[1]",
+        end="os.kill(os.getpid(), signal.SIGKILL)\n",
     )
-    return [sys.executable, "-c", rung, member_code, str(member_file)], member_file
+    return [sys.executable, "-c", rung, str(member_file)], member_file
 
 
 def test_a_rung_that_dies_on_a_signal_has_what_it_started_stopped(tmp_path) -> None:

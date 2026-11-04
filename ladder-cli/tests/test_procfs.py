@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from conftest import reaped_pid, unreaped_child, write_fake_stat
+from conftest import kill_group, reaped_pid, sleeper_in_its_own_group, unreaped_child, write_fake_stat
 from ladder_cli import procfs
 
 
@@ -127,18 +126,9 @@ def _fake_proc(root: Path, entries: dict[int, tuple[str, int] | None]) -> None:
             write_fake_stat(root, pid, *entry)
 
 
-def _sleeper_in_its_own_group() -> subprocess.Popen:
-    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-
-
-def _stop_sleeper(child: subprocess.Popen) -> None:
-    os.killpg(child.pid, signal.SIGKILL)
-    child.wait()
-
-
 def test_a_running_process_in_the_group_keeps_it_running_and_a_zombie_does_not() -> None:
     """The pair that tells the two apart, on the real /proc: same call, one group each."""
-    runner = _sleeper_in_its_own_group()
+    runner = sleeper_in_its_own_group()
     zombie = unreaped_child()
     try:
         os.killpg(zombie.pid, 0)  # precondition: the kernel still lists the zombie's group
@@ -146,18 +136,32 @@ def test_a_running_process_in_the_group_keeps_it_running_and_a_zombie_does_not()
         assert procfs.has_running_member(runner.pid) is True
         assert procfs.has_running_member(zombie.pid) is False
     finally:
-        _stop_sleeper(runner)
+        kill_group(runner)
         zombie.wait()
 
 
 def test_a_group_is_running_while_it_has_a_member_and_not_once_it_is_gone() -> None:
-    child = _sleeper_in_its_own_group()
+    child = sleeper_in_its_own_group()
     try:
         assert procfs.group_is_running(child.pid) is True, "precondition: a running member"
     finally:
-        _stop_sleeper(child)
+        kill_group(child)
 
     assert procfs.group_is_running(child.pid) is False
+
+
+def test_the_group_cleanup_kills_a_live_group_and_tolerates_one_already_gone() -> None:
+    """A `finally` that raises because its group already exited hides the assertion it was guarding."""
+    killed = sleeper_in_its_own_group()
+    kill_group(killed)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(killed.pid, 0)
+
+    gone = sleeper_in_its_own_group()
+    os.killpg(gone.pid, signal.SIGKILL)
+    gone.wait()
+    kill_group(gone)  # the old `_stop_sleeper` raised ProcessLookupError here
+    assert gone.returncode is not None
 
 
 def test_a_group_holding_only_a_zombie_is_not_running_though_killpg_still_finds_it() -> None:
@@ -177,14 +181,14 @@ def test_a_group_is_taken_to_be_running_when_proc_cannot_be_listed(monkeypatch, 
     `killpg(group, 0)` has already said something is in the group; with no way
     to look closer that stays the answer, and the grace period then decides.
     """
-    child = _sleeper_in_its_own_group()
+    child = sleeper_in_its_own_group()
     try:
         monkeypatch.setattr(procfs, "PROC", tmp_path / "no-such-proc")
 
         assert procfs.group_is_running(child.pid) is True
         assert procfs.has_running_member(child.pid) is True
     finally:
-        _stop_sleeper(child)
+        kill_group(child)
 
 
 def test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone(monkeypatch, tmp_path) -> None:
@@ -194,14 +198,14 @@ def test_a_group_member_whose_state_cannot_be_read_is_not_taken_for_gone(monkeyp
     group is ours it counts as running. Its group comes from `getpgid`, which
     does not need the read to succeed.
     """
-    child = _sleeper_in_its_own_group()
+    child = sleeper_in_its_own_group()
     try:
         _fake_proc(tmp_path, {child.pid: None})
         monkeypatch.setattr(procfs, "PROC", tmp_path)
 
         assert procfs.has_running_member(child.pid) is True
     finally:
-        _stop_sleeper(child)
+        kill_group(child)
 
 
 def test_an_unreadable_process_in_another_group_does_not_keep_a_group_running(monkeypatch, tmp_path) -> None:

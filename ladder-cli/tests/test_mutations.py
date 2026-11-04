@@ -2,11 +2,14 @@
 
 from pathlib import Path
 import ast
+import contextlib
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -159,8 +162,9 @@ def test_a_unix_socket_under_a_tests_tmp_path_can_be_bound_inside_the_gate(gate,
 def test_killing_a_running_mutant_preserves_checkout_source(gate, tmp_path):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
+    # The gate puts its scratch project under TMPDIR only while that leaves room
+    # for a socket, so a TMPDIR under pytest's own long tree would be ignored.
+    scratch = Path(tempfile.mkdtemp(prefix="serp-axi-gate-", dir=gate._short_temp_root()))
     with socket.socket(socket.AF_UNIX) as listener:
         address = str(tmp_path / "ready.sock")
         listener.bind(address)
@@ -212,6 +216,7 @@ sys.exit(mutations.main())
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                 process.communicate(timeout=10)
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def test_sandbox_startup_failure_is_not_a_kill(gate, monkeypatch, tmp_path):
@@ -228,3 +233,143 @@ def test_sandbox_startup_failure_is_not_a_kill(gate, monkeypatch, tmp_path):
     monkeypatch.setattr(gate, "PYTEST", [sys.executable, "-m", "pytest", "-q"])
 
     assert gate.run_tests("test_case.py::test_value")[0] == "error"
+
+
+def _belief(gate, name="a belief", *, path=None, old="VALUE = 1", new="VALUE = 2", tests=("test_case.py::test_value",)):
+    return gate.Belief(
+        name=name,
+        path=Path("test_case.py") if path is None else path,
+        old=old,
+        new=new,
+        tests=tests,
+        why="A test of the table itself.",
+    )
+
+
+def test_the_table_refuses_a_belief_with_no_test(gate) -> None:
+    assert gate._table_problems([_belief(gate, tests=())]) == ["[a belief] lists no tests"]
+
+
+def test_the_table_refuses_a_name_used_twice(gate) -> None:
+    problems = gate._table_problems([
+        _belief(gate, tests=("test_case.py::test_one",)),
+        _belief(gate, old="VALUE = 3", tests=("test_case.py::test_two",)),
+    ])
+
+    assert any("is named twice" in problem for problem in problems)
+
+
+def test_the_table_refuses_the_same_edit_twice(gate) -> None:
+    dupes = [
+        _belief(gate, name="the first claim", tests=("test_case.py::test_one",)),
+        _belief(gate, name="the same claim again", tests=("test_case.py::test_two",)),
+    ]
+
+    problems = gate._table_problems(dupes)
+
+    assert problems == ["[the same claim again] is the same edit as [the first claim]; list its test there instead"]
+
+
+def test_the_table_refuses_the_same_test_twice_in_one_belief(gate) -> None:
+    """A repeated selector collapses to one `outcomes` entry, while the summary counts two."""
+    problems = gate._table_problems([_belief(gate, tests=("test_case.py::test_value", "test_case.py::test_value"))])
+
+    assert problems == ["[a belief] lists the same test twice"]
+
+
+def test_table_problems_abort_the_gate_before_a_test_runs(gate, monkeypatch, tmp_path, capsys) -> None:
+    target = tmp_path / "test_case.py"
+    target.write_text("VALUE = 1\n")
+    monkeypatch.setattr(gate, "LADDER", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mutations.py"])
+    calls = []
+
+    def record(selector, project=None):
+        calls.append(selector)
+        return ("pass", "1 passed") if project is None else ("fail", "1 failed")
+
+    monkeypatch.setattr(gate, "run_tests", record)
+    monkeypatch.setattr(gate, "BELIEFS", [_belief(gate, path=target)])
+    assert gate.main() == 0
+    assert calls == ["test_case.py::test_value", "test_case.py::test_value"], "precondition: a valid belief ran"
+
+    calls.clear()
+    monkeypatch.setattr(gate, "BELIEFS", [_belief(gate, path=target, tests=())])
+    assert gate.main() == 2
+    assert calls == [], "a belief with no test reached the runner"
+    assert "BAD TABLE" in capsys.readouterr().err
+
+
+def test_a_belief_is_hollow_if_any_of_its_tests_stays_green(gate, monkeypatch, tmp_path, capsys) -> None:
+    target = tmp_path / "test_case.py"
+    target.write_text("VALUE = 1\n")
+    monkeypatch.setattr(gate, "LADDER", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mutations.py"])
+    monkeypatch.setattr(gate, "_BASELINE", {})
+    monkeypatch.setattr(gate, "BELIEFS", [_belief(
+        gate,
+        path=target,
+        tests=("test_case.py::test_first", "test_case.py::test_second"),
+    )])
+    calls = []
+
+    def record(selector, project=None):
+        calls.append(selector)
+        if project is None:
+            return "pass", "1 passed"
+        return ("fail", "1 failed") if selector.endswith("test_first") else ("pass", "1 passed")
+
+    monkeypatch.setattr(gate, "run_tests", record)
+
+    assert gate.main() == 1
+    output = capsys.readouterr().out
+    assert calls == [
+        "test_case.py::test_first",
+        "test_case.py::test_second",
+        "test_case.py::test_first",
+        "test_case.py::test_second",
+    ], "both listed tests were run on clean code and against the mutant"
+    assert "SURVIVED" in output
+    assert "hollow test: test_case.py::test_second" in output
+    assert "1 of 2 tests stayed green" in output
+
+
+def test_one_scratch_checkout_serves_every_test_of_a_belief(gate, monkeypatch, tmp_path) -> None:
+    target = tmp_path / "test_case.py"
+    target.write_text("VALUE = 1\nOTHER = 1\n")
+    monkeypatch.setattr(gate, "LADDER", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["mutations.py"])
+    monkeypatch.setattr(gate, "_BASELINE", {})
+    scratch_calls = []
+    created = []
+
+    @contextlib.contextmanager
+    def counting_scratch():
+        scratch_calls.append(1)
+        project = tmp_path / f"scratch{len(created)}"
+        created.append(1)
+        project.mkdir()
+        yield project
+
+    monkeypatch.setattr(gate, "_scratch_project", counting_scratch)
+
+    def record(selector, project=None):
+        return ("pass", "1 passed") if project is None else ("fail", "1 failed")
+
+    monkeypatch.setattr(gate, "run_tests", record)
+
+    monkeypatch.setattr(gate, "BELIEFS", [
+        _belief(gate, name="first claim", path=target, tests=("test_case.py::test_one",)),
+        _belief(gate, name="second claim", path=target, old="OTHER = 1", new="OTHER = 2", tests=("test_case.py::test_two",)),
+    ])
+    assert gate.main() == 0
+    assert len(scratch_calls) == 2, "precondition: each belief gets a checkout"
+
+    scratch_calls.clear()
+    monkeypatch.setattr(gate, "BELIEFS", [_belief(
+        gate,
+        path=target,
+        tests=("test_case.py::test_one", "test_case.py::test_two"),
+    )])
+    assert gate.main() == 0
+    assert len(scratch_calls) == 1, "a second checkout was made for the second test of the same belief"

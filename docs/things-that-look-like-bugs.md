@@ -17,6 +17,29 @@ in the checkout. Normal completion removes the copy.
 browser profile into its copy, or synchronizes the shared environment from a
 temporary project.
 
+## Python tests move their temporary directory when TMPDIR is too long
+
+**What you see:** with `TMPDIR` set to a long path (for example under
+`$XDG_STATE_HOME`), `pytest`'s `tmp_path` and the mutation gate's scratch
+directory appear under `/tmp` instead.
+
+**Why:** the tests bind unix sockets under `tmp_path`, and AF_UNIX allows a
+whole socket path only 107 bytes. Pytest's own `pytest-of-<user>/pytest-N/
+<test-name>` layout, and the gate's scratch project, already spend most of that
+before `.X11-unix/X<n>` is added, so a long inherited `TMPDIR` makes those
+tests fail with "AF_UNIX path too long" on clean code. A short `TMPDIR` is still
+honored; only one that would not fit falls back to `/tmp`. "Would not fit" is
+counted the way pytest builds the path: through symlinks (a short link to a long
+directory is long), with the user named `unknown` when the platform has none,
+and with room for a six-digit run number, since pytest numbers its runs without
+bound. The pytest tree under `/tmp` is deleted when the run ends.
+`ladder-cli/tests/test_socket_budget.py` binds real sockets at the boundary.
+
+**When this becomes a real bug:** if a short `TMPDIR` is ignored, if the
+fallback lands anywhere other than `/tmp`, if the move happens when an explicit
+`--basetemp` was given (the gate passes one and it must win), or if a test
+depends on its `tmp_path` being under `TMPDIR` for isolation rather than length.
+
 ## `search --provider kagi` ignores `--region` and `--lang`
 
 **What you see:** `--region uk --lang de` changes nothing about Kagi results,
