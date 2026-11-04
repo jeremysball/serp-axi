@@ -3,7 +3,8 @@
 # `response.body` is the one property that hands over the raw stream, so every
 # route that skips readBodyText (a `for await` loop, `getReader()`, `pipeTo`,
 # `Readable.fromWeb`, a stream passed to another function) has to go through it.
-# Catching the property catches all of them, including the ones with no name
+# The rule catches the property however it is read: as a member, through a
+# subscript, or pulled out by destructuring. That covers the routes with no name
 # worth a rule of their own.
 #
 # It is noisier than unbounded-response-read for the same reason: any object with
@@ -29,3 +30,15 @@ rule:
   any:
     - pattern: $R.body
     - pattern: $R?.body
+    - pattern: $R["body"]
+    - pattern: $R['body']
+    - kind: object_pattern
+      has:
+        kind: shorthand_property_identifier_pattern
+        regex: '^body$'
+    - kind: object_pattern
+      has:
+        kind: pair_pattern
+        has:
+          field: key
+          regex: '^body$'

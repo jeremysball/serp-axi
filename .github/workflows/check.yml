@@ -56,7 +56,8 @@ jobs:
       - name: Run unit tests with the shell's settings poisoned
         # A clean runner has none of the variables serp-axi reads, so the leg above
         # cannot tell a test that sets its own env from one that reads the
-        # shell's. This one sets every such variable to a bad value first.
+        # shell's. This one sets every such variable to a bad value first, and
+        # runs only the test files that can reach the shell or the config file.
         run: npm run test:hostile-env
 
       - name: Install Bubblewrap for the mutation sandbox

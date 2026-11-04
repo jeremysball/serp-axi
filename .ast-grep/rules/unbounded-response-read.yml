@@ -28,17 +28,15 @@ files:
 ignores:
   - src/body.ts
   - src/**/*.test.ts
+utils:
+  response-read-method:
+    kind: property_identifier
+    regex: '^(text|json|arrayBuffer|blob|formData|bytes)$'
 rule:
-  any:
-    - pattern: $R.text()
-    - pattern: $R.json()
-    - pattern: $R.arrayBuffer()
-    - pattern: $R.blob()
-    - pattern: $R.formData()
-    - pattern: $R.bytes()
-    - pattern: $R?.text()
-    - pattern: $R?.json()
-    - pattern: $R?.arrayBuffer()
-    - pattern: $R?.blob()
-    - pattern: $R?.formData()
-    - pattern: $R?.bytes()
+  kind: call_expression
+  has:
+    field: function
+    kind: member_expression
+    has:
+      field: property
+      matches: response-read-method

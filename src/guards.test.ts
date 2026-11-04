@@ -11,10 +11,17 @@ import { fileURLToPath } from "node:url";
  * that sits beside them. A guard that cannot fire is decoration, so every rule is
  * run here against code it must catch, code it must leave alone, and the bypass.
  *
+ * These tests exercise the rules against a throwaway project. The real `src/`
+ * tree is scanned by `npm run guard` (and the pre-commit hook, which runs that
+ * script); doing the same scan here too would run it twice and report a broken
+ * rule twice. This file proves the rules can fire and stay silent; the guard
+ * script proves the tree passes them.
+ *
  * The scans run the command from package.json's `guard` script, not a copy of it,
  * so a change to the script (a dropped `--error=unused-suppression`) changes what
- * these tests see. The binary is the one `.mise.toml` pins; a missing one fails
- * the run instead of skipping it.
+ * these tests see. The binary is the version `.mise.toml` pins; the pin is
+ * asserted below, so a different ast-grep on PATH fails instead of silently
+ * changing what the rules match. A missing one fails the run instead of skipping it.
  */
 
 const REPO = fileURLToPath(new URL("../", import.meta.url));
@@ -52,6 +59,16 @@ function runGuard(cwd: string): { status: number | null; hits: Hit[] } {
   return { status: result.status, hits };
 }
 
+test("the ast-grep binary is the version .mise.toml pins", () => {
+  const pinned = /^ast-grep\s*=\s*"([^"]+)"/m.exec(readFileSync(path.join(REPO, ".mise.toml"), "utf8"))?.[1];
+  assert.ok(pinned !== undefined, ".mise.toml pins ast-grep");
+  const [bin] = guardCommand();
+  const result = spawnSync(bin, ["--version"], { encoding: "utf8" });
+  assert.equal(result.error, undefined, `could not run ${bin}: run \`mise install\``);
+  const reported = result.stdout.trim().split(/\s+/).at(-1);
+  assert.equal(reported, pinned, `${bin} --version reports "${result.stdout.trim()}", but .mise.toml pins ${pinned}`);
+});
+
 const scratch: string[] = [];
 after(() => {
   for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
@@ -86,7 +103,11 @@ const FIRES: Array<[string, string, number, string]> = [
   ["getReader on the body", "response-body-stream-access", 1, "export const f = (r: Response) => r.body?.getReader();\n"],
   ["the body passed to another function", "response-body-stream-access", 2, "declare function consume(s: unknown): void;\nexport const f = (r: Response) => consume(r.body);\n"],
   ["an optional-chained body", "response-body-stream-access", 1, "export const f = (r?: Response) => r?.body;\n"],
+  ["a destructured body", "response-body-stream-access", 2, "export function f(r: Response) {\n  const { body } = r;\n  return body;\n}\n"],
+  ["a renamed destructured body", "response-body-stream-access", 2, "export function f(r: Response) {\n  const { body: stream } = r;\n  return stream;\n}\n"],
+  ["a subscripted body", "response-body-stream-access", 1, 'export const f = (r: Response) => r["body"];\n'],
   ["a static import of node:https", "raw-transport-import", 1, 'import https from "node:https";\nexport default https;\n'],
+  ["a re-export from node:https", "raw-transport-import", 1, 'export { request as httpRequest } from "node:https";\n'],
   ["a static import of bare http", "raw-transport-import", 1, 'import http from "http";\nexport default http;\n'],
   ["a static import of node:http2", "raw-transport-import", 1, 'import { connect } from "node:http2";\nexport default connect;\n'],
   ["a static import of undici", "raw-transport-import", 1, 'import { request } from "undici";\nexport default request;\n'],
@@ -222,32 +243,56 @@ test("a bypass names its reason, so it states the belief it overrides", () => {
   assert.ok(seen >= 1, "src/brightdata.ts carries the envelope bypass; if it is gone, drop this floor");
 });
 
-test("the real src tree passes every guard", () => {
-  const { status, hits } = runGuard(REPO);
-  assert.deepEqual(hits, [], "no hits in the real tree");
-  assert.equal(status, 0);
+function testOnlyModules(sources: Record<string, string>): string[] {
+  const all = Object.keys(sources);
+  const importers = new Map<string, string[]>();
+  for (const importer of all) {
+    for (const match of sources[importer].matchAll(/(?:from|import)\s*\(?\s*["'](\.{1,2}\/[^"']+\.ts)["']/g)) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(importer), match[1]));
+      importers.set(target, [...(importers.get(target) ?? []), importer]);
+    }
+  }
+  const testOnly = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const name of all) {
+      if (name.endsWith(".test.ts") || testOnly.has(name)) continue;
+      const users = importers.get(name) ?? [];
+      if (users.length === 0) continue;
+      if (users.every((user) => user.endsWith(".test.ts") || testOnly.has(user))) {
+        testOnly.add(name);
+        changed = true;
+      }
+    }
+  }
+  return [...testOnly].sort();
+}
+
+test("a helper reached only through another test-only module is found too", () => {
+  const found = testOnlyModules({
+    "cli.ts": 'import { b } from "./shared.ts";\n',
+    "shared.ts": "export const b = 1;\n",
+    "fixtures-data.ts": "export const d = 1;\n",
+    "fixtures.ts": 'import { d } from "./fixtures-data.ts";\nexport const f = d;\n',
+    "x.test.ts": 'import { f } from "./fixtures.ts";\n',
+  });
+  assert.ok(found.includes("fixtures.ts"), `the finder sees the direct test helper; found ${found.join(", ")}`);
+  assert.ok(found.includes("fixtures-data.ts"), `the finder follows a test-only helper one hop further; found ${found.join(", ")}`);
+  assert.ok(!found.includes("shared.ts"), "a module a non-test entry point reaches is not test-only");
 });
 
 // Packaging. `files` ships dist/ minus test files, so a helper that only tests
 // import would ship unless it is excluded by name. live.ts did before this rule.
 test("a module that only tests import is left out of the package", () => {
   const srcDir = path.join(REPO, "src");
-  const all = readdirSync(srcDir, { recursive: true, encoding: "utf8" })
-    .filter((name) => name.endsWith(".ts"))
-    .map((name) => name.split(path.sep).join("/"));
-  const importers = new Map<string, string[]>();
-  for (const importer of all) {
-    const source = readFileSync(path.join(srcDir, importer), "utf8");
-    for (const match of source.matchAll(/(?:from|import)\s*\(?\s*["'](\.{1,2}\/[^"']+\.ts)["']/g)) {
-      const target = path.posix.normalize(path.posix.join(path.posix.dirname(importer), match[1]));
-      importers.set(target, [...(importers.get(target) ?? []), importer]);
-    }
+  const sources: Record<string, string> = {};
+  for (const name of readdirSync(srcDir, { recursive: true, encoding: "utf8" })) {
+    if (!name.endsWith(".ts")) continue;
+    const relative = name.split(path.sep).join("/");
+    sources[relative] = readFileSync(path.join(srcDir, name), "utf8");
   }
-  const testOnly = all.filter((name) => {
-    if (name.endsWith(".test.ts")) return false;
-    const users = importers.get(name) ?? [];
-    return users.length > 0 && users.every((user) => user.endsWith(".test.ts"));
-  });
+  const testOnly = testOnlyModules(sources);
   assert.ok(testOnly.includes("live.ts") && testOnly.includes("fixtures.ts"), `the finder sees the known helpers; found ${testOnly.join(", ")}`);
 
   const pkg = JSON.parse(readFileSync(path.join(REPO, "package.json"), "utf8")) as { files: string[] };

@@ -488,11 +488,12 @@ or if backing up removes more than one unit.
 
 **What you see:** `npm run guard` (and CI, and the pre-commit hook) fails on a
 bare `response.text()`, `.json()`, `.arrayBuffer()`, `.blob()`, `.formData()` or
-`.bytes()` anywhere in `src/`, on any `.body` property access, and on an import
-of `node:http`, `node:https`, `node:http2` or `undici`. `src/body.ts` and the
-`*.test.ts` files are exempt. One line in production code carries a bypass:
-`JSON.parse(envelope.body)` in `src/brightdata.ts`, where `body` is a string
-field of Bright Data's parsed reply and not a stream.
+`.bytes()` anywhere in `src/`, on any `.body` read (member access, subscript, or
+destructuring), and on an import or re-export of `node:http`, `node:https`,
+`node:http2` or `undici`. `src/body.ts` and the `*.test.ts` files are exempt. One
+line in production code carries a bypass: `JSON.parse(envelope.body)` in
+`src/brightdata.ts`, where `body` is a string field of Bright Data's parsed reply
+and not a stream.
 
 **Why:** the belief is that no network response is read into memory without a
 byte bound. A scan of the tree before the fix (commit `4606e31`) found nine
@@ -511,11 +512,13 @@ bypass with the reason written next to it (`// ast-grep-ignore: <rule-id>
 (<reason>)`, on the line above or at the end of the line). The reason sits in
 parentheses because the pre-commit dash gate rejects a double hyphen, the
 separator ast-grep's own examples use; ast-grep 0.44.1 reads the rule id and
-ignores the rest. They also miss shapes that never name the method at the call: `response["text"]()`,
-`const { text } = response`, and `const read = response.text; read.call(response)`
-all pass. That is a deliberate limit. The risk being guarded is a developer or an
-agent copying `response.text()` into a new provider, and a rule written to stop a
-deliberate evasion would flag ordinary code to do it.
+ignores the rest. They also miss method reads that never name the method at the
+call: `response["text"]()`, `const { text } = response`, and `const read =
+response.text; read.call(response)` all pass. That is a deliberate limit. The
+risk being guarded is a developer or an agent copying `response.text()` into a
+new provider, and a rule written to stop a deliberate evasion would flag ordinary
+code to do it. The `.body` stream is different: a subscript or a destructuring
+pattern is a plausible way to reach it, so those spellings are covered.
 
 The guard covers HTTP responses only. `src/ladder.ts` reads a local child's
 stdout, not a `Response`, and bounds it by its own check: the pending line may not
@@ -662,8 +665,9 @@ ships.
 
 **Why:** `files` takes `dist` minus `*.test.js`, and a helper that tests import is
 not named `*.test.ts`. `live.js` was shipping before this was noticed. A test in
-`src/guards.test.ts` finds every non-test module that only test files import and
-fails unless `files` excludes it, so the list cannot fall behind unnoticed.
+`src/guards.test.ts` finds every non-test module that only test files reach,
+following a helper through another test-only module, and fails unless `files`
+excludes it, so the list cannot fall behind unnoticed.
 
 **When this becomes a real bug:** if `npm pack --dry-run --json` lists a file
 that only tests use, or if the packaging test passes with a helper missing from
@@ -685,24 +689,31 @@ could not paste and run, so it now names the flag and leaves the command out
 **When this becomes a real bug:** if a record that does carry `url` or `input.url`
 gets the command-less wording, or if a `<url>` placeholder reaches any hint again.
 
-## The Node suite runs twice, the second time with poisoned settings
+## The shell-sensitive tests run again with poisoned settings
 
-**What you see:** `npm run check` and CI run the same tests twice, once as
-`npm test` and once as `npm run test:hostile-env`. The second run has
-`SERPER_API_KEY`, `SERP_AXI_MAX_RESPONSE_BYTES` and every other variable the source
-reads set to `/nonexistent/serp-axi-hostile-env`, and 10 live tests are skipped in
-both.
+**What you see:** `npm run check` and CI run the full suite once as `npm test`,
+then rerun only the test files that can see the shell as `npm run
+test:hostile-env`. The rerun has `SERPER_API_KEY`,
+`SERP_AXI_MAX_RESPONSE_BYTES`, the `SERP_AXI_LIVE_*` opt-ins and every other
+variable the source reads set to `/nonexistent/serp-axi-hostile-env`, and an
+empty `HOME` and `XDG_CONFIG_HOME`, so it cannot read the developer's real
+config file either. The 10 live tests are skipped in both runs.
 
-**Why:** the first run cannot see a test that reads the developer's shell. A clean
-runner has none of those variables, so a test that forgot to hand `runScrape` or
-`runSearch` its own env passes there and fails on a machine that exports a key.
-That happened twice before the second run existed: `searxng.test.ts` failed 24 of
-48 tests under an exported `SERP_AXI_MAX_RESPONSE_BYTES`, and two `scrape.test.ts`
-tests read the shell and the real config file. The variable names are scanned from
-`src/` by `scripts/hostile-env.mjs`, so a new setting is poisoned without an edit.
-The run takes about five seconds.
+**Why:** the first run cannot see a test that reads the developer's shell or
+config. A clean runner has none of those variables and no config file, so a test
+that forgot to hand `runScrape` or `runSearch` its own env passes there and fails
+on a machine that exports a key. That happened twice before the second run
+existed: `searxng.test.ts` failed 24 of 48 tests under an exported
+`SERP_AXI_MAX_RESPONSE_BYTES`, and two `scrape.test.ts` tests read the shell and
+the real config file. The variable names are scanned from `src/` by
+`scripts/hostile-env.mjs`, so a new setting is poisoned without an edit. The
+files are found from the import graph: a test that names `process.env` or reaches
+a module that does is run, and the real-socket and ast-grep suites that cannot
+see the environment are not run a second time.
 
 **When this becomes a real bug:** if the second run passes while a test still reads
 the shell (a variable under a prefix the script does not scan: add the prefix to
-`PREFIXES` there, and to `SHELL_SETTING_PREFIXES` in `src/searxng.test.ts`), or if
-the script reports a clean run after finding no names to poison (it exits 2 instead).
+the shared list in `scripts/env-prefixes.mjs`, which both the script and
+`src/searxng.test.ts` import), if a shell-sensitive test is not selected by the
+import graph, or if the script reports a clean run after finding no names or no
+test files to run (it exits 2 instead).

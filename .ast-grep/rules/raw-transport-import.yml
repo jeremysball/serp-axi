@@ -2,9 +2,9 @@
 #
 # A provider that imported node:http, node:https, node:http2 or undici would read
 # its response without going through the byte bound at all, and the two rules
-# above could not see it. The rule matches a static import, a dynamic `import()`
-# and `require()`. `node:net` is not banned: scrape.ts imports `isIP` from it, and
-# a bare socket is not how a provider call would be written.
+# above could not see it. The rule matches a static import, a re-export, a dynamic
+# `import()` and `require()`. `node:net` is not banned: scrape.ts imports `isIP`
+# from it, and a bare socket is not how a provider call would be written.
 #
 # Bypass: // ast-grep-ignore: raw-transport-import (<how this read is bounded>)
 id: raw-transport-import
@@ -28,6 +28,10 @@ utils:
 rule:
   any:
     - kind: import_statement
+      has:
+        field: source
+        matches: http-module-name
+    - kind: export_statement
       has:
         field: source
         matches: http-module-name

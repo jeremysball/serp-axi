@@ -396,17 +396,21 @@ Worth knowing about it:
 ## Tests
 
 Run `npm run check` for typechecking, the ast-grep guards, the Node suite, the
-Node suite again with the shell's settings poisoned, the Python suite, and the
-named mutation gate. Prepublish checks run the same gate. To run only the
-mutation gate, use `npm run test:mutations`.
+shell-sensitive Node tests again with the shell's settings poisoned, the Python
+suite, and the named mutation gate. Prepublish checks run the same gate. To run
+only the mutation gate, use `npm run test:mutations`.
 
 `npm run guard` runs the ast-grep rules in `.ast-grep/rules/`, which hold beliefs
 a passing suite cannot see, such as "no response body is read without a byte
-bound". It needs the `ast-grep` binary that `mise install` pins. `npm run
-test:hostile-env` runs the Node suite with every `SERP_AXI_*`, `SERPER_*`,
-`BRIGHTDATA_*` and `KAGI_*` variable the source mentions set to a bad value, so a
-test that reads your shell instead of setting its own env fails there. A clean
-CI runner has none of those variables set and cannot tell the two apart.
+bound". It needs the `ast-grep` binary that `mise install` pins; `src/guards.test.ts`
+fails if `ast-grep --version` does not match the pin. `npm run
+test:hostile-env` reruns the test files that can read the shell with every
+`SERP_AXI_*`, `SERPER_*`, `BRIGHTDATA_*` and `KAGI_*` variable the source mentions
+set to a bad value, and with an empty `HOME` and `XDG_CONFIG_HOME`, so a test that
+reads your shell or your real config file instead of setting its own fails there.
+A clean CI runner has none of those variables set and cannot tell the two apart.
+The script finds those files from the import graph, so a new test that reaches an
+env-reading module joins the poisoned run without an edit.
 
 The Python mutation-safety tests and the mutation gate require Linux, Bubblewrap
 (`bwrap` on `PATH`), and working unprivileged user namespaces. CI probes those

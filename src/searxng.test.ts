@@ -13,15 +13,15 @@ import { SerpAxiError } from "./errors.ts";
 import { kagiSearchHtml } from "./fixtures.ts";
 import { resolveSearxngOptions, searchSearxng, type SearxngOptionSources } from "./searxng.ts";
 import { decode } from "@toon-format/toon";
+import { PREFIXES as SHELL_SETTING_PREFIXES } from "../scripts/env-prefixes.mjs";
 
 const KAGI_FIXTURE = kagiSearchHtml();
 
 // Every variable the CLI reads from the shell starts with one of these. `isolated`
 // clears whatever the shell has under them rather than a list of names, because a
 // list went stale the day SERP_AXI_MAX_RESPONSE_BYTES was added: a shell that
-// exported it failed 24 of these 48 tests. `npm run test:hostile-env` runs the
-// suite with every such variable set, so a stale prefix list fails there.
-const SHELL_SETTING_PREFIXES = ["SERP_AXI_", "SERPER_", "BRIGHTDATA_", "KAGI_"];
+// exported it failed 24 of these 48 tests. The hostile-env gate imports the same
+// list, so a stale prefix is poisoned and cleared together.
 
 function shellSettings(): Array<[string, string | undefined]> {
   return Object.keys(process.env)

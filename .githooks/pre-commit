@@ -13,11 +13,13 @@
 #
 # tsc and the guards run against a checkout of the STAGED content, not the
 # working tree, so a partially-staged file is checked as it will actually be
-# committed.
+# committed. The guards run through package.json's `guard` script, so the hook
+# and CI cannot enforce different rule sets.
 #
 # A missing ast-grep fails the commit instead of skipping the guards: a gate that
 # quietly does not run on one machine is no gate. `mise install` provides the
-# version .mise.toml pins.
+# version .mise.toml pins. A missing tsc only skips the typecheck; it does not
+# skip the guards.
 #
 # Tests are deliberately NOT run here -- that's CI's job, and a slow hook is
 # a hook people bypass.
@@ -30,24 +32,26 @@ files=$(git diff --cached --name-only --diff-filter=ACM -- '*.ts' '.ast-grep' 's
 fail=0
 
 repo="$(git rev-parse --show-toplevel)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+git checkout-index --all --prefix="$tmp/"
+
 if [ -x "$repo/node_modules/.bin/tsc" ]; then
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  git checkout-index --all --prefix="$tmp/"
   ln -s "$repo/node_modules" "$tmp/node_modules"
   if ! (cd "$tmp" && ./node_modules/.bin/tsc --noEmit); then
     fail=1
   fi
-  if command -v ast-grep >/dev/null 2>&1; then
-    if ! (cd "$tmp" && ast-grep scan --error=unused-suppression src); then
-      fail=1
-    fi
-  else
-    echo "ast-grep is not installed — run 'mise install' (the guards cannot run without it)."
+else
+  echo "⚠ typescript is not installed — run 'npm install' to enable the typecheck."
+fi
+
+if command -v ast-grep >/dev/null 2>&1; then
+  if ! (cd "$tmp" && npm run --silent guard); then
     fail=1
   fi
 else
-  echo "⚠ typescript is not installed — run 'npm install' to enable quality checks."
+  echo "ast-grep is not installed — run 'mise install' (the guards cannot run without it)."
+  fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
