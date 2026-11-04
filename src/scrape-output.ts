@@ -1,4 +1,12 @@
 import { SerpAxiError, describeValue } from "./errors.ts";
+import {
+  nonEmpty,
+  requestIntegerSetting,
+  resolveIntegerSetting,
+  settingExamples,
+  type IntegerSettingShape,
+  type SettingNames,
+} from "./option-sources.ts";
 import { truncate, type AxiOutput } from "./output.ts";
 import type { StoredConfig } from "./config.ts";
 
@@ -43,8 +51,12 @@ export interface ShapeOptions {
    * flags. It carries every flag that changes what the record holds
    * (`--include-markup` for a provider it matters to), so a hint reruns the same
    * thing rather than a neighbour of it.
+   *
+   * Left undefined when the record does not say which url it came from. The hints
+   * then name the flag to add and print no command, because a command with a
+   * placeholder in it is not one the reader can run.
    */
-  rerun: string;
+  rerun?: string;
   /**
    * The cap flags this run was given, as text to append to `rerun` (`" --max-chars
    * 500"`, `" --full --full-max-chars 7000"`, or `""`). The `--include-markup`
@@ -161,14 +173,19 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
     if (options.full) {
       hints.push(`content is capped at ${limit} characters even with --full`);
     } else if (options.limits.fullMaxChars > limit) {
-      hints.push(`Run \`${options.rerun} --full\` to see up to ${options.limits.fullMaxChars} characters${total}`);
+      const command = options.rerun === undefined ? "Rerun this scrape with --full" : `Run \`${options.rerun} --full\``;
+      hints.push(`${command} to see up to ${options.limits.fullMaxChars} characters${total}`);
     } else {
       hints.push(`content is capped at ${limit} characters${total}`);
     }
   }
   if (omitted.length > 0) {
     out.markupOmitted = omitted;
-    hints.push(`Run \`${options.rerun}${options.capFlags} --include-markup\` to keep the omitted markup`);
+    const command =
+      options.rerun === undefined
+        ? `Rerun this scrape with --include-markup${options.capFlags}`
+        : `Run \`${options.rerun}${options.capFlags} --include-markup\``;
+    hints.push(`${command} to keep the omitted markup`);
   }
   if (hints.length > 0) {
     out.help = hints.join(" ");
@@ -176,58 +193,25 @@ export function shapeScrapeRecord(record: AxiOutput, options: ShapeOptions): Axi
   return out;
 }
 
-interface CharLimitNames {
-  flag: string;
-  env: string;
-  config: string;
+function charLimitShape(names: SettingNames): IntegerSettingShape {
+  return {
+    names,
+    examples: settingExamples(names, "5000"),
+    textShape: "a whole number of characters",
+    configShape: "a JSON integer number of characters",
+  };
 }
 
-const MAX_CHARS_NAMES: CharLimitNames = { flag: "--max-chars", env: MAX_CHARS_ENV, config: "maxChars" };
-const FULL_MAX_CHARS_NAMES: CharLimitNames = {
+const MAX_CHARS_SHAPE = charLimitShape({ flag: "--max-chars", env: MAX_CHARS_ENV, config: "maxChars" });
+const FULL_MAX_CHARS_SHAPE = charLimitShape({
   flag: "--full-max-chars",
   env: FULL_MAX_CHARS_ENV,
   config: "fullMaxChars",
-};
+});
 
 /**
- * One cap, from one source. Flag and env values arrive as strings and must be
- * all digits; a config value must already be a JSON integer. Either way the
- * error names the setting the bad value came from, so the reader fixes the right
- * place. The only upper bound is the largest integer a number holds exactly.
+ * The caps the flags and env vars set. A cap neither speaks for is left for the config file.
  */
-function validateCharLimit(raw: unknown, source: "flag" | "env" | "config", names: CharLimitNames): number {
-  const field = names[source];
-  const example = source === "flag" ? `${field} 5000` : source === "env" ? `${field}=5000` : `"${field}": 5000`;
-  let value: number;
-  if (source === "config") {
-    if (typeof raw !== "number" || !Number.isInteger(raw)) {
-      throw new SerpAxiError(
-        `${field} must be a JSON integer number of characters, got ${describeValue(raw)}`,
-        "usage",
-        `example: ${example}`,
-      );
-    }
-    value = raw;
-  } else {
-    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
-      throw new SerpAxiError(
-        `${field} must be a whole number of characters, got ${describeValue(raw)}`,
-        "usage",
-        `example: ${example}`,
-      );
-    }
-    value = Number(raw);
-  }
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new SerpAxiError(
-      `${field} must be a whole number of characters from 1 to ${Number.MAX_SAFE_INTEGER}, got ${String(raw)}`,
-      "usage",
-      `example: ${example}`,
-    );
-  }
-  return value;
-}
-
 export interface CharLimitSources {
   /** Whether `--full` was given. Decides which of the two flags may appear. */
   full: boolean;
@@ -279,28 +263,24 @@ export function requestCharLimits(sources: CharLimitSources): CharLimitRequest {
       "add --full, or use --max-chars <n> to change the default cap",
     );
   }
-  const pick = (flag: string | undefined, env: string | undefined, names: CharLimitNames): number | undefined => {
-    if (flag !== undefined) return validateCharLimit(flag, "flag", names);
-    if (env !== undefined) return validateCharLimit(env, "env", names);
-    return undefined;
-  };
-  const maxChars = sources.full ? undefined : pick(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_NAMES);
-  const fullMaxChars = pick(sources.flagFullMaxChars, sources.envFullMaxChars, FULL_MAX_CHARS_NAMES);
+  // The config is not open yet, so this picks between the flag and the env var only.
+  const maxChars = sources.full
+    ? undefined
+    : requestIntegerSetting(sources.flagMaxChars, sources.envMaxChars, MAX_CHARS_SHAPE);
+  const fullMaxChars = requestIntegerSetting(
+    sources.flagFullMaxChars,
+    sources.envFullMaxChars,
+    FULL_MAX_CHARS_SHAPE,
+  );
   // Built after the picks, so a flag value that reaches the rerun text has passed
   // validation and is all digits: nothing in it needs shell quoting.
   let capFlags = "";
   if (sources.full) {
-    capFlags = sources.flagFullMaxChars === undefined ? " --full" : ` --full ${FULL_MAX_CHARS_NAMES.flag} ${sources.flagFullMaxChars}`;
+    capFlags = sources.flagFullMaxChars === undefined ? " --full" : ` --full ${FULL_MAX_CHARS_SHAPE.names.flag} ${sources.flagFullMaxChars}`;
   } else if (sources.flagMaxChars !== undefined) {
-    capFlags = ` ${MAX_CHARS_NAMES.flag} ${sources.flagMaxChars}`;
+    capFlags = ` ${MAX_CHARS_SHAPE.names.flag} ${sources.flagMaxChars}`;
   }
   return { full: sources.full, maxChars, fullMaxChars, capFlags };
-}
-
-function charLimitFromConfig(raw: unknown, names: CharLimitNames): number | undefined {
-  // Null and absent both mean "not set", as they do for the other config keys.
-  if (raw === undefined || raw === null) return undefined;
-  return validateCharLimit(raw, "config", names);
 }
 
 /**
@@ -311,11 +291,15 @@ function charLimitFromConfig(raw: unknown, names: CharLimitNames): number | unde
 export function resolveCharLimits(request: CharLimitRequest, config: StoredConfig): CharLimits {
   const maxChars = request.full
     ? DEFAULT_MAX_CHARS
-    : (request.maxChars ?? charLimitFromConfig(config.maxChars, MAX_CHARS_NAMES) ?? DEFAULT_MAX_CHARS);
+    : resolveIntegerSetting(request.maxChars, config.maxChars, MAX_CHARS_SHAPE, DEFAULT_MAX_CHARS);
   return {
     maxChars,
-    fullMaxChars:
-      request.fullMaxChars ?? charLimitFromConfig(config.fullMaxChars, FULL_MAX_CHARS_NAMES) ?? DEFAULT_FULL_MAX_CHARS,
+    fullMaxChars: resolveIntegerSetting(
+      request.fullMaxChars,
+      config.fullMaxChars,
+      FULL_MAX_CHARS_SHAPE,
+      DEFAULT_FULL_MAX_CHARS,
+    ),
   };
 }
 
@@ -329,8 +313,9 @@ export interface IncludeMarkupSources {
 export function resolveIncludeMarkup(sources: IncludeMarkupSources): boolean {
   if (sources.flag === true) return true;
 
-  if (sources.env !== undefined && sources.env !== "") {
-    const normalized = sources.env.toLowerCase();
+  const fromEnv = nonEmpty(sources.env);
+  if (fromEnv !== undefined) {
+    const normalized = fromEnv.toLowerCase();
     if (normalized === "1" || normalized === "true") return true;
     if (normalized === "0" || normalized === "false") return false;
     throw new SerpAxiError(

@@ -169,7 +169,7 @@ test("a protocol mismatch fails at the handshake and names both sides", async ()
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
       assert.ok(error instanceof SerpAxiLadderError);
       assert.match(error.message, /protocol mismatch/);
-      assert.match(error.message, /speaks protocol 3/);
+      assert.match(error.message, /speaks protocol 4/);
       assert.match(error.message, /reported protocol 2/);
       return true;
     });
@@ -188,7 +188,7 @@ test("links survive the response parse", async () => {
   }
 });
 
-test("a protocol-3 response without links is a schema violation", async () => {
+test("a protocol-4 response without links is a schema violation", async () => {
   const ladder = client("missing-links");
   try {
     await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
@@ -232,6 +232,7 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
         "httpJarOut",
         "jarIn",
         "jarOut",
+        "maxResponseBytes",
         "profile",
         "protocol",
         "rungCeiling",
@@ -240,6 +241,7 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
       ],
     );
     assert.equal(sent.protocol, LADDER_PROTOCOL);
+    assert.equal(sent.maxResponseBytes, 64 * 1024 * 1024);
     assert.equal(sent.tabState, "fresh");
     assert.equal(sent.cookieState, "cold");
     assert.equal(sent.cacheState, "cold");
@@ -250,6 +252,17 @@ test("the request on the wire carries protocol and separate browser and HTTP jar
     assert.equal(sent.jarOut, null);
     assert.equal(sent.httpJarIn, null);
     assert.equal(sent.httpJarOut, null);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("the request carries the resolved byte cap so the child can bound its own read", async () => {
+  const ladder = client("echo-request", { maxLineBytes: 4096 });
+  try {
+    const res = await ladder.fetch("https://a.example/x", resolveLadderAxes({}));
+    const sent = JSON.parse(res.text) as Record<string, unknown>;
+    assert.equal(sent.maxResponseBytes, 4096);
   } finally {
     await ladder.close();
   }
@@ -546,6 +559,21 @@ test("the config file can set the profile, not only be overridden by one", () =>
   assert.equal(axes.cacheState, "warm");
 });
 
+test("a null config or profile value is unset: the axis falls to the next layer or the default", () => {
+  // scrape-output.ts says "Null and absent both mean 'not set', as they do for the ladder's config keys".
+  assert.deepEqual(
+    resolveLadderAxes({
+      config: { ladderTabState: null, ladderRungCeiling: null, ladderJarIn: null, ladderProfile: null },
+    }),
+    resolveLadderAxes({}),
+  );
+  const axes = resolveLadderAxes({
+    flag: { profile: "p" },
+    config: { ladderTabState: "same", ladderProfiles: { p: { tabState: null } } },
+  });
+  assert.equal(axes.tabState, "same", "a null in the profile bundle must not mask the config key under it");
+});
+
 test("an unknown profile-bundle key is a usage error, not a silent default", () => {
   assert.throws(
     () =>
@@ -579,5 +607,115 @@ test("every ladder axis flag is a flag the scrape command accepts", async () => 
   const { SCRAPE_FLAGS } = await import("./commands/scrape.ts");
   for (const name of LADDER_AXIS_FLAG_NAMES) {
     assert.ok(name in SCRAPE_FLAGS, `${name} is an axis flag the CLI does not accept`);
+  }
+});
+
+test("a reply that splits a multibyte character across two reads keeps the character", async () => {
+  const ladder = client("split-multibyte");
+  try {
+    const response = await ladder.fetch("https://a.example/x");
+    assert.equal(response.text, "price €5");
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a reply line at the cap resolves and one byte over fails", async () => {
+  // The stub's reply is one line of 200000 "y" plus JSON around it; find its size
+  // by letting an uncapped client read it, then cap exactly there and one under.
+  const probe = client("big-page");
+  let size: number;
+  try {
+    const page = await probe.fetch("https://a.example/x");
+    assert.equal(page.text.length, 200000);
+    size = Buffer.byteLength(
+      JSON.stringify({ verdict: "ok", rungReached: 1, title: "T", text: page.text, engines: [], elapsedMs: 1, links: [], warning: null }),
+    );
+  } finally {
+    await probe.close();
+  }
+
+  const exact = client("big-page", { maxLineBytes: size });
+  try {
+    assert.equal((await exact.fetch("https://a.example/x")).text.length, 200000);
+  } finally {
+    await exact.close();
+  }
+
+  const under = client("big-page", { maxLineBytes: size - 1 });
+  try {
+    await assert.rejects(() => under.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, new RegExp(`longer than ${size - 1} bytes`));
+      return true;
+    });
+  } finally {
+    await under.close();
+  }
+});
+
+test("a long reply after a blank line in the same read is still stopped at the cap", { timeout: 15000 }, async () => {
+  // The blank line makes firstNewline 0; measuring only that line would count
+  // zero bytes and let the 5000-byte reply through a 1000-byte cap.
+  const ladder = client("blank-then-long", { maxLineBytes: 1000 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1000 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a large reply is drained once, not rescanned on every chunk before its newline", { timeout: 15000 }, async () => {
+  const ladder = client("big-page", { maxLineBytes: 1_000_000 });
+  const internals = ladder as unknown as { drainLines: () => void };
+  try {
+    // Settle the ready line on the first fetch, so the count below covers only
+    // the 200 KB reply that follows.
+    await ladder.fetch("https://a.example/x");
+
+    const original = internals.drainLines.bind(ladder);
+    let drains = 0;
+    internals.drainLines = () => {
+      drains += 1;
+      original();
+    };
+
+    const response = await ladder.fetch("https://a.example/x");
+    assert.equal(response.text.length, 200000);
+    // The reply has no newline until its last chunk. Draining per chunk would
+    // rescan the whole accumulated line each time, which is quadratic.
+    assert.equal(drains, 1);
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a child that never ends its reply line is stopped at the cap, not buffered forever", { timeout: 15000 }, async () => {
+  const ladder = client("endless-line", { maxLineBytes: 1024 * 1024 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1048576 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
+  }
+});
+
+test("a child that prints an endless line instead of its ready line is stopped at the cap", { timeout: 15000 }, async () => {
+  const ladder = client("endless-banner", { maxLineBytes: 1024 * 1024 });
+  try {
+    await assert.rejects(() => ladder.fetch("https://a.example/x"), (error: unknown) => {
+      assert.ok(error instanceof SerpAxiLadderError);
+      assert.match(error.message, /longer than 1048576 bytes/);
+      return true;
+    });
+  } finally {
+    await ladder.close();
   }
 });

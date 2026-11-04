@@ -1,0 +1,42 @@
+# Belief: no network response is read into memory without a byte bound.
+#
+# src/body.ts is the only module that reads a Response body, through
+# readBodyText (counts decoded bytes, hangs up past the cap) and readErrorBody
+# (keeps a prefix). A bare `response.text()` or `.json()` reads until the server
+# stops, so a server that never stops fills memory. A scan of the tree before the
+# fix (commit 4606e31) found this shape at nine call sites across serper, kagi,
+# searxng and brightdata.
+#
+# The rule matches the method name, not the type: ast-grep cannot tell a Response
+# from any other object with a `.text()` method. A hit on something that is not a
+# response gets the bypass, with the reason written next to it:
+#   // ast-grep-ignore: unbounded-response-read (<why this is not a Response>)
+id: unbounded-response-read
+language: TypeScript
+severity: error
+message: >-
+  A response body is read here with no byte bound. Use readBodyText or
+  readErrorBody from src/body.ts.
+note: >-
+  Belief: no network response is read into memory without a byte bound. A server
+  that never stops sending fills memory. src/body.ts is the one place allowed to
+  read a body; see docs/things-that-look-like-bugs.md ("Every response read goes
+  through body.ts"). If this is not a Response, bypass with
+  `// ast-grep-ignore: unbounded-response-read (<reason>)` on the line above.
+files:
+  - src/**/*.ts
+ignores:
+  - src/body.ts
+  - src/**/*.test.ts
+utils:
+  response-read-method:
+    kind: property_identifier
+    regex: '^(text|json|arrayBuffer|blob|formData|bytes)$'
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: member_expression
+    has:
+      field: property
+      matches: response-read-method

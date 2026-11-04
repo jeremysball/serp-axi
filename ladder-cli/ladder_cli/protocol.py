@@ -13,7 +13,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-PROTOCOL = 3
+PROTOCOL = 4
 
 # A fourth verdict, "error", is not a property of the page: it means the climb
 # ran out of rungs because a rung malfunctioned, with no page ever judged. It
@@ -40,6 +40,7 @@ REQUEST_FIELDS = (
     "jarOut",
     "httpJarIn",
     "httpJarOut",
+    "maxResponseBytes",
 )
 
 
@@ -75,6 +76,7 @@ class LadderRequest:
     jarOut: str | None
     httpJarIn: str | None
     httpJarOut: str | None
+    maxResponseBytes: int
 
     @classmethod
     def parse(cls, payload: Any) -> "LadderRequest":
@@ -102,6 +104,10 @@ class LadderRequest:
         if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling not in RUNG_CEILINGS:
             raise ProtocolError(f"rungCeiling {ceiling!r} must be one of 1, 2, 3, 4, 5")
 
+        max_bytes = payload["maxResponseBytes"]
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+            raise ProtocolError(f"maxResponseBytes {max_bytes!r} must be a positive whole number")
+
         return cls(
             protocol=PROTOCOL,
             url=url,
@@ -115,6 +121,7 @@ class LadderRequest:
             jarOut=_optional_path("jarOut", payload["jarOut"]),
             httpJarIn=_optional_path("httpJarIn", payload["httpJarIn"]),
             httpJarOut=_optional_path("httpJarOut", payload["httpJarOut"]),
+            maxResponseBytes=max_bytes,
         )
 
 

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { usageError } from "./error-assertions.ts";
 import { SerpAxiError } from "./errors.ts";
+import { brightDataScrapeRecord } from "./fixtures.ts";
 import {
   DEFAULT_FULL_MAX_CHARS,
   DEFAULT_MAX_CHARS,
@@ -260,10 +261,7 @@ test("limitFor is the one place the character limit is chosen", () => {
 });
 
 test("shapeScrapeRecord strips the real Bright Data fixture records", () => {
-  const lines = readFileSync(new URL("./fixtures/brightdata-scrape.ndjson", import.meta.url), "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0);
-  const record = JSON.parse(lines[0]) as Record<string, unknown>;
+  const record = brightDataScrapeRecord();
 
   const out = shape(record);
 
@@ -341,15 +339,6 @@ test("resolveIncludeMarkup rejects a non-boolean config value by name", () => {
 
 function sources(overrides: Partial<CharLimitSources> = {}): CharLimitSources {
   return { full: false, ...overrides };
-}
-
-function usageError(pattern: RegExp) {
-  return (error: unknown) => {
-    assert.ok(error instanceof SerpAxiError);
-    assert.equal(error.kind, "usage");
-    assert.match(error.message, pattern);
-    return true;
-  };
 }
 
 test("shapeScrapeRecord's hint offers --full with the real --full cap, not a fixed 50000", () => {
@@ -446,6 +435,18 @@ test("requestCharLimits lets the flag beat the env, for each cap on its own", ()
     requestCharLimits(sources({ full: true, flagFullMaxChars: "7000", envFullMaxChars: "9000" })).fullMaxChars,
     7000,
   );
+});
+
+test("requestCharLimits treats an empty env var as unset, as the byte cap does", () => {
+  // Positive trigger first: the same fields with a value are read, so the
+  // assertions below are about emptiness rather than about the fields being ignored.
+  const set = requestCharLimits(sources({ envMaxChars: "300", envFullMaxChars: "9000" }));
+  assert.equal(set.maxChars, 300);
+  assert.equal(set.fullMaxChars, 9000);
+
+  const empty = requestCharLimits(sources({ envMaxChars: "", envFullMaxChars: "" }));
+  assert.equal(empty.maxChars, undefined);
+  assert.equal(empty.fullMaxChars, undefined);
 });
 
 test("requestCharLimits checks only the source that wins", () => {
@@ -570,7 +571,7 @@ test("resolveCharLimits lets a request beat the config, and the config beat the 
   });
 });
 
-test("resolveCharLimits treats a null config value as unset, like the other config keys", () => {
+test("resolveCharLimits treats a null config value as unset, like the ladder's config keys", () => {
   assert.deepEqual(resolveCharLimits(request(), { maxChars: null, fullMaxChars: null }), DEFAULT_LIMITS);
 });
 

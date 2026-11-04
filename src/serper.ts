@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_RESPONSE_BYTES, discardBody, readBodyText, readErrorBody } from "./body.ts";
 import { SerpAxiError, boundedDetail } from "./errors.ts";
 
 export interface SearchParams {
@@ -31,7 +32,13 @@ interface SerperErrorBody {
   statusCode?: number;
 }
 
-async function serperRequest(url: string, apiKey: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
+async function serperRequest(
+  url: string,
+  apiKey: string,
+  body: unknown,
+  fetchImpl: typeof fetch,
+  maxResponseBytes: number,
+): Promise<unknown> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -51,8 +58,10 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
   }
 
   if (response.ok) {
+    // Read outside the try below: a body over the cap is its own error, not "non-JSON".
+    const text = await readBodyText(response, { maxBytes: maxResponseBytes, source: "Serper" });
     try {
-      return await response.json();
+      return JSON.parse(text);
     } catch {
       throw new SerpAxiError(
         `Serper returned a non-JSON response (${response.status})`,
@@ -62,14 +71,8 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     }
   }
 
-  let parsed: SerperErrorBody = {};
-  try {
-    parsed = (await response.json()) as SerperErrorBody;
-  } catch {
-    // body wasn't JSON; fall through with an empty parsed body
-  }
-
   if (response.status === 403) {
+    await discardBody(response);
     throw new SerpAxiError(
       "Serper rejected the API key (403)",
       "runtime",
@@ -77,9 +80,11 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     );
   }
   if (response.status === 429) {
+    await discardBody(response);
     throw new SerpAxiError("Serper rate-limited this request (429)", "runtime", "wait and retry later");
   }
   if (response.status === 404) {
+    await discardBody(response);
     throw new SerpAxiError(
       "Serper could not find the requested page (404)",
       "runtime",
@@ -87,7 +92,16 @@ async function serperRequest(url: string, apiKey: string, body: unknown, fetchIm
     );
   }
   if (response.status >= 500) {
+    await discardBody(response);
     throw new SerpAxiError(`Serper had an upstream failure (${response.status})`, "runtime", "retry later");
+  }
+
+  // Only the unmapped status uses the body, so only this branch pays to read it.
+  let parsed: SerperErrorBody = {};
+  try {
+    parsed = JSON.parse(await readErrorBody(response)) as SerperErrorBody;
+  } catch {
+    // body wasn't JSON; fall through with an empty parsed body
   }
 
   throw new SerpAxiError(
@@ -101,12 +115,14 @@ export async function searchSerper(
   apiKey: string,
   params: SearchParams,
   fetchImpl: typeof fetch = fetch,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<SearchResponse> {
   const body = await serperRequest(
     "https://google.serper.dev/search",
     apiKey,
     { q: params.q, gl: params.gl, hl: params.hl, num: params.num },
     fetchImpl,
+    maxResponseBytes,
   );
   return body as SearchResponse;
 }
@@ -115,7 +131,8 @@ export async function scrapeSerper(
   apiKey: string,
   url: string,
   fetchImpl: typeof fetch = fetch,
+  maxResponseBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<ScrapeResponse> {
-  const body = await serperRequest("https://scrape.serper.dev", apiKey, { url }, fetchImpl);
+  const body = await serperRequest("https://scrape.serper.dev", apiKey, { url }, fetchImpl, maxResponseBytes);
   return body as ScrapeResponse;
 }

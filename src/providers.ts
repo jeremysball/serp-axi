@@ -17,6 +17,9 @@ export interface SearchStrategyContext {
   env: NodeJS.ProcessEnv;
   zone?: string;
   searxng?: SearxngOptions;
+  // The most bytes any one provider response may carry before the read stops. The
+  // command resolves it (flag > env > config > default); a strategy only passes it on.
+  maxResponseBytes: number;
 }
 
 export interface SearchStrategy {
@@ -36,6 +39,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         requireEnv(context.env, "SERPER_API_KEY", "export SERPER_API_KEY=<your key> and re-run"),
         context.params,
         context.fetchImpl,
+        context.maxResponseBytes,
       );
     },
   },
@@ -47,7 +51,13 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         "export BRIGHTDATA_API_KEY=<your key> and re-run",
       );
       const zone = context.zone || context.env.BRIGHTDATA_ZONE || BRIGHT_DATA_DEFAULT_ZONE;
-      return searchBrightData(apiKey, context.params, context.fetchImpl, zone);
+      return searchBrightData(
+        apiKey,
+        context.params,
+        context.fetchImpl,
+        zone,
+        context.maxResponseBytes,
+      );
     },
   },
   kagi: {
@@ -60,6 +70,7 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
         ),
         context.params,
         context.fetchImpl,
+        context.maxResponseBytes,
       );
     },
   },
@@ -68,7 +79,12 @@ export const searchStrategies: Record<Provider, SearchStrategy> = {
       if (context.searxng === undefined) {
         throw new SerpAxiError("internal error: searxng options were not resolved", "runtime", "report it if it persists");
       }
-      return searchSearxng(context.searxng, context.params, context.fetchImpl);
+      return searchSearxng(
+        context.searxng,
+        context.params,
+        context.fetchImpl,
+        context.maxResponseBytes,
+      );
     },
   },
 };

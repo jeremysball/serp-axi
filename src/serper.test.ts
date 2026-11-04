@@ -125,6 +125,47 @@ test("searchSerper bounds a verbose network error message", async () => {
   );
 });
 
+test("searchSerper does not read or parse an error body for a status it maps", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new TextEncoder().encode('{"message":"challenge page"}'));
+      controller.close();
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const fetchImpl = (async () => new Response(body, { status: 403 })) as typeof fetch;
+
+  await assert.rejects(
+    () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, fetchImpl),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.match(error.message, /403/);
+      return true;
+    },
+  );
+  assert.equal(cancelled, true, "the unread body should be hung up on");
+
+  // Control: an unmapped status still reads the body for its message.
+  const unmappedBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new TextEncoder().encode('{"message":"bad request"}'));
+      controller.close();
+    },
+  });
+  const unmappedFetch = (async () => new Response(unmappedBody, { status: 418 })) as typeof fetch;
+  await assert.rejects(
+    () => searchSerper("k", { q: "q", gl: "us", hl: "en", num: 1 }, unmappedFetch),
+    (error: unknown) => {
+      assert.ok(error instanceof SerpAxiError);
+      assert.match(error.message, /bad request/);
+      return true;
+    },
+  );
+});
+
 test("searchSerper on an unmapped status uses the parsed message and not the raw body", async () => {
   const rawBody = JSON.stringify({ message: "Bad request", statusCode: 400 });
   const fetchImpl = (async () => new Response(rawBody, { status: 400 })) as typeof fetch;

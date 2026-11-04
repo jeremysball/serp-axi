@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { SerpAxiError } from "./errors.ts";
+import { kagiSearchHtml } from "./fixtures.ts";
 import { parseKagiHtml, searchKagi } from "./kagi.ts";
 
-const FIXTURE = readFileSync(fileURLToPath(new URL("./fixtures/kagi-html-search.html", import.meta.url)), "utf8");
+const FIXTURE = kagiSearchHtml();
 
 const PARAMS = { q: "rust async runtime", gl: "us", hl: "en", num: 10 };
 

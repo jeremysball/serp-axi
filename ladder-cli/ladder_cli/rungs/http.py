@@ -10,6 +10,7 @@ dependency.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 import tempfile
@@ -51,6 +52,41 @@ DEAD_STATUS = {404, 410, 521, 522, 523, 525, 526, 530}
 THIN_CHARS = 800
 # ladder.py:59
 USER_AGENT = "serp-axi-research/0.1"
+# The same default as src/body.ts. The parent normally sends its resolved cap on
+# the request; this is the floor for a child invoked by hand or by an older test.
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+class ResponseTooLargeError(RuntimeError):
+    """The page crossed the byte cap before a single JSON line was written.
+
+    The parent's line cap would catch the same page after serialization, but the
+    child has already buffered it by then. Stopping at the read is what keeps a
+    runaway response out of the child's memory.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(f"ladder response is larger than the {max_bytes} bytes serp-axi will read")
+
+
+def _read_body(response: Any, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes`` of the body, or refuse it without a partial page."""
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        for chunk in response.iter_bytes(chunk_size=min(64 * 1024, max_bytes)):
+            total += len(chunk)
+            if total > max_bytes:
+                raise ResponseTooLargeError(max_bytes)
+            chunks.append(chunk)
+    finally:
+        response.close()
+    return b"".join(chunks)
+
+
+def _decode(response: Any, body: bytes) -> str:
+    """Decode like ``response.text`` did, without asking primp to buffer it first."""
+    return body.decode(getattr(response, "encoding", None) or "utf-8", errors="replace")
 
 
 class _AnchorParser(HTMLParser):
@@ -209,7 +245,7 @@ def _request(client: Any, url: str, jar: MozillaCookieJar, saved: MozillaCookieJ
     for redirect in range(21):
         request = Request(url, headers={"User-Agent": USER_AGENT} if api else {})
         jar.add_cookie_header(request)
-        response = client.get(url, headers=dict(request.header_items()), follow_redirects=False)
+        response = client.get(url, headers=dict(request.header_items()), follow_redirects=False, stream=True)
         headers = Message()
         for key, value in response.headers.items():
             for line in value.split("\n"):
@@ -224,6 +260,9 @@ def _request(client: Any, url: str, jar: MozillaCookieJar, saved: MozillaCookieJ
         location = headers.get("Location")
         if response.status_code not in (301, 302, 303, 307, 308) or not location:
             return response
+        # A streamed redirect body was never read, so close the connection here
+        # rather than leaving it to the next request.
+        response.close()
         if redirect == 20:
             raise RuntimeError("HTTP redirect limit exceeded")
         url = urllib.parse.urljoin(url, location)
@@ -257,6 +296,11 @@ def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
     api = api_url(url)
     jar_in = str(ctx.jar_in) if ctx is not None and ctx.jar_in is not None else None
     jar_out = str(ctx.jar_out) if ctx is not None and ctx.jar_out is not None else None
+    max_bytes = (
+        ctx.max_response_bytes
+        if ctx is not None and ctx.max_response_bytes is not None
+        else DEFAULT_MAX_RESPONSE_BYTES
+    )
     jar_cookies = _load_jar_cookies(jar_in)
     output_cookies = _load_jar_cookies(jar_out)
     for cookie in jar_cookies:
@@ -274,12 +318,18 @@ def fetch(url: str, ctx: RungContext | None = None) -> dict[str, Any]:
         status = response.status_code
 
         if api and status == 200:
-            page = {"title": "api", "text": flatten_api(url, response.json()), "status": status, "links": []}
+            body = _read_body(response, max_bytes)
+            page = {
+                "title": "api",
+                "text": flatten_api(url, json.loads(_decode(response, body))),
+                "status": status,
+                "links": [],
+            }
             final_url = str(getattr(response, "url", "") or url)
             break
 
         final_url = str(getattr(response, "url", "") or url)
-        page = extract_html(response.text, status, final_url)
+        page = extract_html(_decode(response, _read_body(response, max_bytes)), status, final_url)
         if attempt == 1 and status == 200 and _walled(page):
             continue
         break
