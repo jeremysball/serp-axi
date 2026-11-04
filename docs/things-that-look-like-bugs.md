@@ -297,7 +297,12 @@ a leftover lock and its socket), unless something is listening on the slot's
 socket. A dead lock beside a live listener is another server's slot: a real Xvfb
 started there exits 1 with "server already running" (checked 2026-11-03, with a
 stand-in listener on the abstract address), so `display_is_free` connects to
-the socket before it calls the slot free.
+the socket before it calls the slot free. A connect that cannot answer (a
+timeout on a full backlog, a permission error) is raised rather than read as a
+taken slot, so `free_display` reports the local cause instead of
+`no free Xvfb display between :200 and :699`. Both addresses are tried before
+that raise, so a file another user left cannot hide an abstract socket that
+answers.
 
 A lock naming a zombie is the one held lock that is reclaimed. A real Xvfb
 refuses to start over it (rc 1, "Server is already active for display ...
@@ -305,11 +310,16 @@ remove /tmp/.X<n>-lock", checked 2026-11-03), and a zombie nobody reaps stays
 one: this CLI runs under a PID 1 that may never wait, and an Xvfb that was
 SIGKILLed after its rung child was killed too is orphaned to that PID 1.
 Nothing else would ever remove its lock, and each one would take a slot for good,
-so `free_display` removes the lock first (`_reclaim_zombie_lock`), and only when
-the lock is ours and its pid is a zombie. A running server, another user's lock
-and anything unreadable are left alone. The read and the unlink are two steps; a
-lock that goes away between them is not an error (`missing_ok`).
+so `free_display` classifies each candidate's lock once (`_lock_state`) and, for a
+zombie it owns, removes the lock (`_reclaim_zombie_lock`). A running server,
+another user's lock and anything unreadable are left alone. The removal moves the
+lock aside first and re-classifies the moved file, so a lock another server wrote
+between the read and the removal is never the path that gets unlinked; one that
+turns out not to be the zombie is linked back. A lock that goes away while it is
+being moved is not an error (`missing_ok`). The owner is checked before `/proc`
+is read, so a foreign user's lock costs neither a stat read nor a signal.
 `test_only_a_zombies_lock_is_reclaimed`,
+`test_a_lock_that_is_replaced_while_it_is_being_reclaimed_is_put_back`,
 `test_the_slot_search_reclaims_a_zombies_lock_and_offers_the_slot` and the
 real-server `test_a_lock_naming_a_zombie_is_held_until_it_is_reclaimed_and_then_the_real_server_starts`
 cover it.
@@ -324,8 +334,11 @@ and the real-server `test_a_real_xvfb_starts_over_a_socket_file_left_by_a_killed
 When a server we start exits at once, `_await_display` decides whether another
 server won the slot by asking `display_is_free`, not by reading the words Xvfb
 printed: those change between versions and wrappers, and a miss turned a lost
-race for one slot into a failed rung with 499 free. A lost race moves to the
-next slot; any other early exit fails the rung.
+race for one slot into a failed rung with 499 free. A taken slot moves to the
+next slot. A slot that is free again is started once more on the same slot: the
+server that won the race may already have stopped, so one retry tells that from
+a broken Xvfb, while a second immediate exit on that free slot reports its
+stderr and fails the rung.
 
 **When this becomes a real bug:** if a lock we own that names a dead pid is
 skipped while nothing listens on its socket, since that is the leak this exists
@@ -344,8 +357,15 @@ for it after the kill, and without a limit that wait would hold the rung's
 result for as long as the mount stays stalled. It waits `KILL_WAIT_S` and then
 raises, so the failure is named and the rung is not left hanging. The raise
 comes out of the `with` block that held the page, so the page is dropped with
-it. Covered by
-`test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap`.
+it. If the page had already failed, that page error stays the one reported and
+the stop failure is added to it as a note (`add_note`), so the rung does not lose
+the reason the page failed and the error's own `__cause__` is left alone. Only an
+`Exception` from the stop is folded in that way: a KeyboardInterrupt or SystemExit
+during the stop still propagates. Covered by
+`test_the_kill_is_followed_by_a_bounded_wait_that_names_the_server_it_could_not_reap`,
+`test_a_failing_display_stop_does_not_replace_the_pages_error`,
+`test_a_failing_display_stop_is_the_error_when_the_page_succeeded` and
+`test_an_interrupt_during_the_display_stop_is_not_swallowed`.
 
 **When this becomes a real bug:** if the error is raised for a server that did
 exit, or if a rung that has nothing wrong with its display reports it.
@@ -367,7 +387,12 @@ of the same name, and where it cannot create the file (an unwritable
 one exists. The probe connects and closes without sending anything; the server
 drops a client that never sends its setup request. The lock still has to name
 our pid: a slot reclaimed from a dead server holds the old pid until the new
-one rewrites it.
+one rewrites it. After the first second the poll interval backs off from 50 ms
+to 250 ms, so a live server that never writes its lock costs tens of reads
+rather than ~170. A connect failure that is not "nothing there" is raised at
+once instead of being retried until the deadline and then blamed on the
+server, because it is a local fault (a full backlog, an unwritable socket
+directory) and the message must say so.
 
 **When this becomes a real bug:** if a headed fetch fails to connect to its
 display right after `_await_display` returned, or if the probe leaves a client
@@ -394,9 +419,28 @@ reading the code and the directory mode, not from a test that races it. This
 is test cleanup and not library code, which is why the pattern lives in the
 test file.
 
-**When this becomes a real bug:** if the same read-then-unlink appears in
-`ladder_cli`, where it would delete a lock that is not ours, or if a run of the
-suite is seen removing another process's lock.
+**When this becomes a real bug:** if a library function goes back to reading a
+lock and then unlinking that original path (the library's reclaim moves it
+aside and re-checks what it moved), or if a run of the suite is seen removing
+another process's lock.
+
+## A profile lock whose owner cannot be checked is kept
+
+**What you see:** `clear_locks` raises `profile lock owner cannot be checked` and
+leaves `SingletonLock`, `SingletonCookie` and `SingletonSocket` in place when
+`/proc/<pid>/stat` has no entry but signal 0 still finds the pid.
+
+**Why:** a missing `/proc` entry can mean the browser exited, or that this host's
+`/proc` does not cover the pid (a chroot, a minimal image, a mount elsewhere).
+Only signal 0 saying GONE proves the owner exited; anything else is unknown, and
+clearing the locks would start a second browser on a profile that is still in
+use. The stat line is read once and decides; signal 0 is asked only when the
+stat is missing, so a pid reused between two lookups cannot turn a stale lock
+into a running owner. A pid that is a zombie is still cleared, because the stat
+line says `Z`.
+
+**When this becomes a real bug:** if a launch is blocked for good by a lock
+whose owner is gone, or if the refusal is raised when the stat line was readable.
 
 ## Old working-directory profiles are not picked up automatically
 

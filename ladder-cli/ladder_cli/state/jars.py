@@ -247,22 +247,21 @@ def clear_locks(profile_dir: Path) -> int:
         raise RuntimeError(f"profile lock owner is unknown: {lock}") from error
     if host != socket.gethostname():
         raise RuntimeError(f"profile lock is not a verifiable local owner: {lock}")
-    liveness = procfs.probe(pid)
-    if liveness is procfs.Liveness.UNKNOWN:
-        # The pid is someone else's, does not fit a pid_t, or is not a pid at all
-        # (zero and below), so it cannot be asked about.
-        raise RuntimeError(f"profile lock owner cannot be checked: {lock}")
-    if liveness is procfs.Liveness.EXISTS:
-        # A zombie exists to `probe` but has exited, so its lock is stale: only a
-        # running owner (or one whose state cannot be read) keeps the lock.
-        try:
-            state = procfs.read_stat(pid).state
-        except (FileNotFoundError, ProcessLookupError):
-            state = "Z"  # it exited between the probe and the read: the proof the lock needs
-        except (OSError, ValueError) as error:
-            raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
-        if state != "Z":
-            raise RuntimeError(f"profile lock owner is still running: {lock}")
+    # One observation decides: the stat line carries both the state that tells a
+    # zombie from a running owner and the liveness of the pid. Signal 0 is asked
+    # only when /proc has no entry, which can mean the process exited or that
+    # this /proc does not cover it; treating every missing entry as an exit
+    # would clear the lock of a live browser on such a host.
+    try:
+        state = procfs.read_stat(pid).state
+    except (FileNotFoundError, ProcessLookupError):
+        if procfs.probe(pid) is not procfs.Liveness.GONE:
+            raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from None
+        state = "Z"  # signal 0 says it is gone: the proof the lock needs
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"profile lock owner cannot be checked: {lock}") from error
+    if state != "Z":
+        raise RuntimeError(f"profile lock owner is still running: {lock}")
     removed = 0
     for path in sorted(present, key=lambda path: path == lock):
         try:

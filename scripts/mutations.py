@@ -302,8 +302,22 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display lock that does not name a pid is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except (OSError, ValueError):\n        return True\n",
-        new="    except (OSError, ValueError):\n        return False\n",
+        old=(
+            "    try:\n"
+            "        owner, pid = _read_lock(lock)\n"
+            "    except FileNotFoundError:\n"
+            "        return _LockState.FREE\n"
+            "    except (OSError, ValueError):\n"
+            "        return _LockState.HELD\n"
+        ),
+        new=(
+            "    try:\n"
+            "        owner, pid = _read_lock(lock)\n"
+            "    except FileNotFoundError:\n"
+            "        return _LockState.FREE\n"
+            "    except (OSError, ValueError):\n"
+            "        return _LockState.FREE\n"
+        ),
         tests=("tests/test_rungs_headed.py::test_a_lock_that_does_not_name_a_pid_is_treated_as_held",),
         why="Claiming a slot needs proof its server is dead; a lock we cannot read could be a live server mid-write.",
     ),
@@ -332,10 +346,46 @@ BELIEFS: list[Belief] = [
     Belief(
         name="the display's stderr pipe is closed even when the stop raises",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="            try:\n                _stop_display(process)\n            finally:\n",
-        new="            if True:\n                _stop_display(process)\n            if True:\n",
+        old="                if process.stderr is not None:\n                    process.stderr.close()\n",
+        new="                if False:\n                    process.stderr.close()\n",
         tests=("tests/test_rungs_headed.py::test_the_stderr_pipe_is_closed_even_when_the_display_could_not_be_reaped",),
         why="`_stop_display` raises for a server that survives SIGKILL, and a close that comes after it leaks the pipe once per unkillable server in a resident CLI.",
+    ),
+    Belief(
+        name="a reclaim that puts a lock back does not replace one written since",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="    except FileExistsError:\n        # Another server wrote its own lock while this one was moved.",
+        new="    except FileNotFoundError:\n        # Another server wrote its own lock while this one was moved.",
+        tests=("tests/test_rungs_headed.py::test_a_lock_written_while_the_reclaim_holds_the_old_one_aside_is_not_replaced",),
+        why="Review finding F02: the lock written since is the live server's, and a put-back by rename would delete it.",
+    ),
+    Belief(
+        name="a display stop that fails is a note on the page's error, not its replacement",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old=(
+            "                    if in_flight is None:\n"
+            "                        raise\n"
+            '                    in_flight.add_note(f"the display stop also failed: {stop_failure}")\n'
+        ),
+        new="                    raise\n",
+        tests=("tests/test_rungs_headed.py::test_a_failing_display_stop_does_not_replace_the_pages_error",),
+        why="Review finding F05: the page's failure explains the rung; a stop that also failed is context on it.",
+    ),
+    Belief(
+        name="a display stop that fails with no page error is the error",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="                    if in_flight is None:\n                        raise\n",
+        new="                    if False:\n                        raise\n",
+        tests=("tests/test_rungs_headed.py::test_a_failing_display_stop_is_the_error_when_the_page_succeeded",),
+        why="Review finding F05: with no page failure there is nothing to attach a note to, and the unkillable server has to be reported.",
+    ),
+    Belief(
+        name="an interrupt during the display stop is not folded into the page's error",
+        path=LADDER / "ladder_cli/rungs/headed.py",
+        old="                except Exception as stop_failure:\n",
+        new="                except BaseException as stop_failure:\n",
+        tests=("tests/test_rungs_headed.py::test_an_interrupt_during_the_display_stop_is_not_swallowed",),
+        why="A KeyboardInterrupt or SystemExit during the stop is the operator's; folding it into a note would hand back the page error and swallow the interrupt.",
     ),
     Belief(
         name="the wait after SIGKILL is bounded, and reads its own named bound",
@@ -356,10 +406,20 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display lock whose owner cannot be asked about is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    return procfs.probe(pid) is not procfs.Liveness.GONE\n",
-        new="    return procfs.probe(pid) is procfs.Liveness.EXISTS\n",
+        old=(
+            "    try:\n"
+            "        state = procfs.read_stat(pid).state\n"
+            "    except (OSError, ValueError):\n"
+            "        return _LockState.HELD  # it exited mid-read, or /proc cannot say: not proof either way\n"
+        ),
+        new=(
+            "    try:\n"
+            "        state = procfs.read_stat(pid).state\n"
+            "    except (OSError, ValueError):\n"
+            "        return _LockState.FREE\n"
+        ),
         tests=("tests/test_rungs_headed.py::test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held",),
-        why="Only a pid that is shown to be gone frees a slot; one that cannot be asked about (too large for a pid_t, or someone else's) is not shown to be anything.",
+        why="Only a pid that is shown to be gone frees a slot; one whose stat cannot be read (too large for a pid_t, or a /proc that does not cover it) is not shown to be anything.",
     ),
     Belief(
         name="a display lock longer than Xvfb writes is not read as a pid",
@@ -372,29 +432,24 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display lock another user owns is treated as held",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    if owner != os.getuid():\n        return True\n",
-        new="    if False:\n        return True\n",
-        tests=("tests/test_rungs_headed.py::test_a_lock_we_could_not_remove_is_treated_as_held",),
-        why="/tmp is sticky, so a lock we do not own is one nothing of ours can clear; its slot is not ours to take.",
-    ),
-    Belief(
-        name="a display lock that vanishes mid-check falls back to the socket",
-        path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except FileNotFoundError:\n        pass\n    try:\n        return not _accepts_connections(number)\n",
-        new="    except FileNotFoundError:\n        return True\n    try:\n        return not _accepts_connections(number)\n",
-        tests=("tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",),
-        why="A lock removed between the check and the read says nothing about a socket that is still there.",
+        old="    if owner != os.getuid():\n        return _LockState.HELD\n",
+        new="    if False:\n        return _LockState.HELD\n",
+        tests=(
+            "tests/test_rungs_headed.py::test_a_lock_we_could_not_remove_is_treated_as_held",
+            "tests/test_rungs_headed.py::test_only_a_zombies_lock_is_reclaimed",
+        ),
+        why="/tmp is sticky, so a lock we do not own is one nothing of ours can clear; its slot is not ours to take, and it is never reclaimed.",
     ),
     Belief(
         name="an absent display lock is not a held one",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="    except FileNotFoundError:\n        raise\n    except (OSError, ValueError):\n        return True\n",
-        new="    except (OSError, ValueError):\n        return True\n",
+        old="    except FileNotFoundError:\n        return _LockState.FREE\n",
+        new="    except FileNotFoundError:\n        return _LockState.HELD\n",
         tests=(
             "tests/test_rungs_headed.py::test_a_socket_file_with_no_lock_holds_its_slot_only_while_something_listens_on_it",
             "tests/test_rungs_headed.py::test_a_lock_that_vanishes_mid_check_falls_back_to_the_socket",
         ),
-        why="`_lock_is_held` raises FileNotFoundError so the caller decides what no lock means; folding it into 'unreadable' would read every slot without a lock as taken.",
+        why="An absent lock says nothing about the socket; folding it into 'unreadable' would read every slot without a lock as taken.",
     ),
     Belief(
         name="a display is ready only when its lock names the server we started",
@@ -529,8 +584,8 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a display is not ready until a connect to its socket succeeds",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="                if _accepts_connections(number, timeout_s=max(0.0, min(1.0, deadline - time.monotonic()))):\n                    return\n",
-        new="                if True:\n                    return\n",
+        old="            if _accepts_connections(number, timeout_s=max(0.0, min(1.0, deadline - time.monotonic()))):\n                return\n",
+        new="            if True:\n                return\n",
         tests=("tests/test_rungs_headed.py::test_readiness_waits_for_a_socket_that_answers_not_just_the_lock",),
         why="Xvfb writes its lock before it binds its socket (39 of 200 real starts); a browser pointed at it in that gap cannot connect (review finding G4).",
     ),
@@ -546,24 +601,20 @@ BELIEFS: list[Belief] = [
     Belief(
         name="only a zombie's display lock is reclaimed",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old='    if owner == os.getuid() and state == "Z":\n',
-        new="    if owner == os.getuid():\n",
-        tests=("tests/test_rungs_headed.py::test_only_a_zombies_lock_is_reclaimed",),
-        why="Review finding F02: a running server's lock is a live server and a reaped owner's lock is `display_is_free`'s to call free; unlinking either takes a slot out from under a working Xvfb.",
-    ),
-    Belief(
-        name="a lock owned by another user is never reclaimed",
-        path=LADDER / "ladder_cli/rungs/headed.py",
-        old='    if owner == os.getuid() and state == "Z":\n',
-        new='    if state == "Z":\n',
-        tests=("tests/test_rungs_headed.py::test_only_a_zombies_lock_is_reclaimed",),
-        why="/tmp is sticky, so a lock another user wrote is not ours to remove; the unlink would fail or, with the sticky bit off, take someone else's slot.",
+        old=(
+            "    if _lock_state(aside) is _LockState.ZOMBIE:\n"
+            "        aside.unlink(missing_ok=True)\n"
+            "        return\n"
+        ),
+        new="    aside.unlink(missing_ok=True)\n    return\n",
+        tests=("tests/test_rungs_headed.py::test_a_lock_that_is_replaced_while_it_is_being_reclaimed_is_put_back",),
+        why="Review finding F02: a running server's lock is a live server and another user's is not ours; the re-check after the move is what decides, so deleting anything moved takes a slot out from under a working Xvfb.",
     ),
     Belief(
         name="the slot search reclaims a zombie's lock before it asks if the slot is free",
         path=LADDER / "ladder_cli/rungs/headed.py",
-        old="        _reclaim_zombie_lock(candidate)\n",
-        new="        pass\n",
+        old="            _reclaim_zombie_lock(candidate, state)\n",
+        new="            pass\n",
         tests=("tests/test_rungs_headed.py::test_the_slot_search_reclaims_a_zombies_lock_and_offers_the_slot",),
         why="Real Xvfb refuses a lock that names a zombie (rc 1, measured 2026-11-03), so without the call every such slot is lost for as long as the zombie is.",
     ),
@@ -767,16 +818,24 @@ BELIEFS: list[Belief] = [
     Belief(
         name="a profile lock whose owner cannot be asked about is refused with a reason",
         path=LADDER / "ladder_cli/state/jars.py",
-        old="    if liveness is procfs.Liveness.UNKNOWN:\n",
-        new="    if False:\n",
-        tests=("tests/test_jars.py::test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock",),
-        why="Without the refusal an owner that cannot be checked falls through and its lock is cleared.",
+        old=(
+            "    except (FileNotFoundError, ProcessLookupError):\n"
+            "        if procfs.probe(pid) is not procfs.Liveness.GONE:\n"
+            "            raise RuntimeError(f\"profile lock owner cannot be checked: {lock}\") from None\n"
+            "        state = \"Z\"  # signal 0 says it is gone: the proof the lock needs\n"
+        ),
+        new="    except (FileNotFoundError, ProcessLookupError):\n        state = \"Z\"\n",
+        tests=(
+            "tests/test_jars.py::test_cleanup_reports_an_owner_pid_too_large_to_probe_and_keeps_the_lock",
+            "tests/test_jars.py::test_a_missing_proc_entry_for_a_live_owner_is_refused_not_cleared",
+        ),
+        why="A missing stat entry can mean /proc does not cover a live owner as well as an exit; only signal 0 saying GONE is the proof that clears the lock.",
     ),
     Belief(
         name="a profile lock whose owner has exited but is not reaped is cleared",
         path=LADDER / "ladder_cli/state/jars.py",
-        old='        if state != "Z":\n',
-        new="        if True:\n",
+        old='    if state != "Z":\n',
+        new="    if True:\n",
         tests=("tests/test_jars.py::test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner",),
         why="A zombie exists to signal 0 but is gone; refusing its lock strands the profile until something reaps it.",
     ),

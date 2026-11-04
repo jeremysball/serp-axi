@@ -234,6 +234,62 @@ def test_cleanup_distinguishes_a_zombie_owner_from_a_running_owner(tmp_path: Pat
         child.wait(timeout=10)
 
 
+def test_a_missing_proc_entry_for_a_live_owner_is_refused_not_cleared(tmp_path: Path, monkeypatch) -> None:
+    """Review finding F03: a FileNotFoundError from `/proc/<pid>/stat` was read as proof of exit.
+
+    On a host without a `/proc` that covers the pid, the browser is alive but its
+    stat file cannot be read; clearing its locks would start a second browser on
+    the same profile. Signal 0 still says it exists, so the lock is kept.
+    """
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=10)
+    (stale / "SingletonLock").symlink_to(f"{socket.gethostname()}-{child.pid}")
+    assert jars.clear_locks(stale) == 1, "paired: a real exit is still cleared"
+
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    lock = protected / "SingletonLock"
+    lock.symlink_to(f"{socket.gethostname()}-1234")
+
+    def no_proc_entry(pid: int):
+        raise FileNotFoundError(2, "No such file or directory", f"/proc/{pid}/stat")
+
+    monkeypatch.setattr(jars.procfs, "read_stat", no_proc_entry)
+    monkeypatch.setattr(jars.procfs, "probe", lambda pid: jars.procfs.Liveness.EXISTS)
+
+    with pytest.raises(RuntimeError, match="cannot be checked"):
+        jars.clear_locks(protected)
+    assert lock.is_symlink(), "a live owner's lock was cleared because /proc could not show it"
+
+
+def test_cleanup_reads_one_state_instead_of_probing_and_then_reading(tmp_path: Path, monkeypatch) -> None:
+    """Review finding F04: probe and read_stat were two looks at a pid that can be reused between them.
+
+    The stat line is the single observation that decides; signal 0 is asked only
+    when `/proc` has no entry, so reuse between two syscalls cannot make a stale
+    lock look like a running owner.
+    """
+    lock = tmp_path / "SingletonLock"
+    lock.symlink_to(f"{socket.gethostname()}-1234")
+    probes: list[int] = []
+    monkeypatch.setattr(jars.procfs, "read_stat", lambda pid: jars.procfs.Stat("Z", 1))
+    monkeypatch.setattr(jars.procfs, "probe", lambda pid: probes.append(pid) or jars.procfs.Liveness.GONE)
+
+    assert jars.clear_locks(tmp_path) == 1
+    assert probes == [], "the stat line already answered, but the pid was probed too"
+
+    lock.symlink_to(f"{socket.gethostname()}-1234")
+
+    def no_entry(pid: int):
+        raise FileNotFoundError(2, "No such file or directory", f"/proc/{pid}/stat")
+
+    monkeypatch.setattr(jars.procfs, "read_stat", no_entry)
+    assert jars.clear_locks(tmp_path) == 1
+    assert probes == [1234], "a missing stat is the one case that asks signal 0"
+
+
 def test_corrupt_jar_is_not_silently_treated_as_a_cold_start(tmp_path: Path) -> None:
     path = tmp_path / "cookies.json"
     jars.save(path, [cookie("cf_clearance", ".example.com")], "https://example.com/")

@@ -115,20 +115,36 @@ def test_the_display_is_given_time_to_come_up_before_the_browser_starts() -> Non
     assert headed.XVFB_SETTLE_S == 1.5
 
 
-def test_a_taken_display_is_stepped_over_rather_than_stolen() -> None:
+def test_a_taken_display_is_stepped_over_rather_than_stolen(monkeypatch, tmp_path) -> None:
     """A dead display reads as a browser failure, which is nobody's fault but ours."""
     taken = {200, 201}
-    original = headed.display_is_free
+    _x11_files_under(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        headed, "_accepts_connections", lambda number, timeout_s=1.0: number in taken
+    )
 
-    def fake_free(number: int) -> bool:
-        return number not in taken
+    assert headed.free_display(":201") == 202
+    assert headed.free_display(":200") == 202
 
-    headed.display_is_free = fake_free
-    try:
-        assert headed.free_display(":201") == 202
-        assert headed.free_display(":200") == 202
-    finally:
-        headed.display_is_free = original
+
+def test_the_slot_search_classifies_each_candidate_once(monkeypatch, tmp_path) -> None:
+    """Review finding F16: the reclaim and the free check read and classified the same lock twice.
+
+    One primitive (`_lock_state`) decides what a slot's lock says; the search no
+    longer opens the same lock once to reclaim it and again to offer it.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    real_read = headed._read_lock
+    reads: list[Path] = []
+
+    def counting_read(lock: Path) -> tuple[int, int]:
+        reads.append(lock)
+        return real_read(lock)
+
+    monkeypatch.setattr(headed, "_read_lock", counting_read)
+
+    assert headed.free_display(":200") == 200
+    assert reads == [headed.lock_path(200)], "the candidate was read once"
 
 
 def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypatch) -> None:
@@ -148,13 +164,13 @@ def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypa
         monkeypatch.setattr(headed, "display_for_pid", lambda pid: f":{number}")
         # The first check lies, which is the race: it said free and a server got there
         # first. Every later question is answered by the slot itself.
-        real_free, asked = headed.display_is_free, []
+        real_free_display, asked = headed.free_display, []
 
-        def lie_once(candidate: int) -> bool:
+        def lie_once(candidate: str) -> int:
             asked.append(candidate)
-            return True if len(asked) == 1 else real_free(candidate)
+            return number if len(asked) == 1 else real_free_display(candidate)
 
-        monkeypatch.setattr(headed, "display_is_free", lie_once)
+        monkeypatch.setattr(headed, "free_display", lie_once)
         monkeypatch.setattr(zendriver, "climb", lambda *args: {"display": os.environ["DISPLAY"]})
 
         with headed.display("https://example.com/", headed.launch_options()) as page:
@@ -170,7 +186,7 @@ def test_an_xvfb_collision_after_the_free_check_retries_another_display(monkeypa
         owner.stderr.close()
 
 
-def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monkeypatch) -> None:
+def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monkeypatch, tmp_path) -> None:
     """`free_display` is only useful if the thing that spawns Xvfb calls it.
 
     Testing the helper alone leaves this open: a rung that hard-codes the pid's
@@ -185,8 +201,9 @@ def test_the_call_site_asks_for_a_free_slot_rather_than_taking_the_pids_own(monk
         return process
 
     monkeypatch.setattr(headed.subprocess, "Popen", fake_popen)
+    _x11_files_under(monkeypatch, tmp_path)
     # The pid's own slot is the one the spike would have used, and it is taken.
-    monkeypatch.setattr(headed, "display_is_free", lambda number: number != _own_slot())
+    monkeypatch.setattr(headed, "_accepts_connections", lambda number, timeout_s=1.0: number == _own_slot())
     monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"title": "", "text": "", "status": None})
@@ -202,14 +219,13 @@ def _own_slot() -> int:
     return int(headed.display_for_pid(__import__("os").getpid()).lstrip(":"))
 
 
-def test_the_search_wraps_once_rather_than_running_past_the_measurable_range() -> None:
+def test_the_search_wraps_once_rather_than_running_past_the_measurable_range(monkeypatch, tmp_path) -> None:
     assert headed.XVFB_DISPLAY_LOW <= 200 <= headed.XVFB_DISPLAY_HIGH
-    original = headed.display_is_free
-    headed.display_is_free = lambda number: number < 299
-    try:
-        assert headed.free_display(":299") == 200, "wraps to the bottom rather than exhausting"
-    finally:
-        headed.display_is_free = original
+    _x11_files_under(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        headed, "_accepts_connections", lambda number, timeout_s=1.0: number >= 299
+    )
+    assert headed.free_display(":299") == 200, "wraps to the bottom rather than exhausting"
 
 
 def test_a_rung_four_page_is_judged_by_the_browser_rules() -> None:
@@ -301,6 +317,95 @@ def test_the_display_is_torn_down_and_restored_even_when_the_climb_fails(monkeyp
     assert process.waited, "and reaped, so it is not left as an unreaped child"
     assert process.stderr.closed, "the Xvfb stderr pipe is closed when the climb fails"
     assert os.environ["DISPLAY"] == "kept-for-the-next-caller", "the caller's display is restored"
+
+
+def _display_that_cannot_be_stopped(monkeypatch) -> FakeProcess:
+    """A display that came up and then survives SIGKILL, so its stop raises."""
+    process = FakeProcess(ignores_terminate=True, ignores_kill=True)
+    monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
+    monkeypatch.setattr(headed, "free_display", lambda preferred: 350)
+    monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
+    return process
+
+
+def test_a_failing_display_stop_does_not_replace_the_pages_error(monkeypatch) -> None:
+    """Review finding F05: a stop that raises in `finally` hid the error the page produced.
+
+    The page's failure is the one that explains the rung; the stop failure is a
+    note on it. The page error keeps its own `__cause__`, and the stop failure is
+    not made its cause. Both ways the page can fail are covered: the climb raises
+    inside `display`, and the body of the `with` raises at the `yield`.
+    """
+    _display_that_cannot_be_stopped(monkeypatch)
+    root = KeyError("the page's own cause")
+
+    def page_failure(url: str, options: dict, ctx=None) -> dict:
+        try:
+            raise root
+        except KeyError as error:
+            raise LookupError("the page's real failure") from error
+
+    monkeypatch.setattr(zendriver, "climb", page_failure)
+    with pytest.raises(LookupError, match="the page's real failure") as from_climb:
+        with headed.display("https://example.com/", headed.launch_options()):
+            pass
+    assert from_climb.value.__cause__ is root, "the page error's own cause was overwritten"
+    assert any("did not exit within" in note for note in from_climb.value.__notes__)
+
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"ok": True})
+    with pytest.raises(LookupError, match="raised in the body") as from_body:
+        with headed.display("https://example.com/", headed.launch_options()):
+            raise LookupError("raised in the body")
+    assert any("did not exit within" in note for note in from_body.value.__notes__)
+
+
+def test_a_failing_display_stop_is_the_error_when_the_page_succeeded(monkeypatch) -> None:
+    """Review finding F05, the other half: with nothing else wrong, the stop failure is reported.
+
+    Paired with a caller that is already handling an unrelated error around the
+    `with`: that error is not the page's, and must not be raised in place of the
+    stop failure.
+    """
+    _display_that_cannot_be_stopped(monkeypatch)
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"ok": True})
+
+    with pytest.raises(RuntimeError, match="did not exit within"):
+        with headed.display("https://example.com/", headed.launch_options()):
+            pass
+
+    try:
+        raise ValueError("the caller's own error, which it is still handling")
+    except ValueError:
+        with pytest.raises(RuntimeError, match="did not exit within") as raised:
+            with headed.display("https://example.com/", headed.launch_options()):
+                pass
+    assert not hasattr(raised.value, "__notes__"), "the stop failure was reported as a note on a page error that does not exist"
+
+
+def test_an_interrupt_during_the_display_stop_is_not_swallowed(monkeypatch) -> None:
+    """Review finding F05: only a stop `Exception` is folded into the page's error.
+
+    A KeyboardInterrupt or SystemExit raised while the display stops is the
+    operator's, and is not turned into the page error that happened to be in flight.
+    """
+    process = FakeProcess()
+    monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: process)
+    monkeypatch.setattr(headed, "free_display", lambda preferred: 350)
+    monkeypatch.setattr(headed, "_await_display", lambda number, proc: None)
+
+    def page_failure(url: str, options: dict, ctx=None) -> dict:
+        raise LookupError("the page's real failure")
+
+    monkeypatch.setattr(zendriver, "climb", page_failure)
+
+    def interrupted(process: FakeProcess) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(headed, "_stop_display", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with headed.display("https://example.com/", headed.launch_options()):
+            pass
+    assert process.stderr.closed, "the pipe is closed even when the stop is interrupted"
 
 
 def test_the_display_is_reaped_on_success_too(monkeypatch) -> None:
@@ -426,6 +531,54 @@ def test_an_early_exit_is_a_collision_when_the_slot_is_taken_and_a_failure_when_
     with pytest.raises(RuntimeError, match="exited immediately") as raised:
         headed._await_display(317, FakeProcess(exit_code=1, stderr=b"(EE) no screens found\n"))
     assert not isinstance(raised.value, headed._DisplayCollision), "an exit on a free slot is still a failure"
+    assert isinstance(raised.value, headed._DisplayRetry), "a free slot may be a race whose winner has gone"
+
+
+def test_a_lost_race_whose_winner_left_is_retried_on_the_same_slot(monkeypatch) -> None:
+    """Review finding F06: re-asking the slot after a fast exit saw the winner gone.
+
+    That turned a lost race into "exited immediately" while 499 slots were free.
+    The slot is free now, so one more start on it tells a race from a broken Xvfb.
+    """
+    spawned = []
+
+    def fake_popen(argv: list[str], **kwargs: object) -> FakeProcess:
+        spawned.append(list(argv))
+        return FakeProcess()
+
+    monkeypatch.setattr(headed.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(headed, "free_display", lambda preferred: 350)
+    calls = []
+
+    def first_exits_free(number: int, process: FakeProcess) -> None:
+        calls.append(number)
+        if len(calls) == 1:
+            raise headed._DisplayRetry("Xvfb :350 exited immediately: 1")
+
+    monkeypatch.setattr(headed, "_await_display", first_exits_free)
+    monkeypatch.setattr(zendriver, "climb", lambda url, options, ctx=None: {"ok": True})
+
+    with headed.display("https://example.com/", headed.launch_options()):
+        pass
+
+    assert calls == [350, 350], "the free slot was not tried again"
+    assert [argv[1] for argv in spawned] == [":350", ":350"]
+
+
+def test_a_second_immediate_exit_on_the_same_free_slot_reports_the_real_failure(monkeypatch) -> None:
+    """The other half: a slot that is free and still fails is not a race, and is not retried forever."""
+    monkeypatch.setattr(headed.subprocess, "Popen", lambda argv, **kw: FakeProcess())
+    monkeypatch.setattr(headed, "free_display", lambda preferred: 350)
+
+    def exits_every_time(number: int, process: FakeProcess) -> None:
+        raise headed._DisplayRetry("Xvfb :350 exited immediately: (EE) no screens found")
+
+    monkeypatch.setattr(headed, "_await_display", exits_every_time)
+    monkeypatch.setattr(zendriver, "climb", _boom)
+
+    with pytest.raises(RuntimeError, match="no screens found"):
+        with headed.display("https://example.com/", headed.launch_options()):
+            pass
 
 
 def test_a_lock_that_does_not_name_a_pid_is_treated_as_held(monkeypatch, tmp_path) -> None:
@@ -453,8 +606,14 @@ def test_a_socket_file_with_no_lock_holds_its_slot_only_while_something_listens_
         assert headed.display_is_free(306) is False, "paired: the same layout with a listener on it is held"
 
 
-def test_a_slot_that_cannot_be_asked_is_not_offered(monkeypatch, tmp_path) -> None:
-    """Free needs proof; a connect that fails for a reason other than "nothing there" proves nothing."""
+def test_a_slot_that_cannot_be_asked_reports_the_local_failure(monkeypatch, tmp_path) -> None:
+    """Review finding F29: a connect that cannot say was reported as a taken slot.
+
+    That turned a local failure (descriptor exhaustion, an unwritable socket
+    directory, a full backlog) into "no free Xvfb display between :200 and
+    :699", which sends the operator to clear slots that are all free. The
+    OSError is the only answer that names the real cause, so it is raised.
+    """
     _x11_files_under(monkeypatch, tmp_path)
     assert headed.display_is_free(307) is True, "precondition: with nothing there, the slot is free"
 
@@ -463,7 +622,10 @@ def test_a_slot_that_cannot_be_asked_is_not_offered(monkeypatch, tmp_path) -> No
 
     monkeypatch.setattr(headed, "_accepts_connections", cannot_say)
 
-    assert headed.display_is_free(307) is False
+    with pytest.raises(TimeoutError, match="timed out"):
+        headed.display_is_free(307)
+    with pytest.raises(TimeoutError, match="timed out"):
+        headed.free_display(":307")
 
 
 class _ConnectRaises:
@@ -506,6 +668,24 @@ def test_only_nothing_there_reads_as_not_listening(monkeypatch, error, answer) -
             headed._accepts_connections(5)
     else:
         assert headed._accepts_connections(5) is answer
+
+
+def test_a_permission_error_on_the_socket_file_still_tries_the_abstract_address(monkeypatch, tmp_path) -> None:
+    """Review finding F44: a file another user left at the socket path denied connect,
+    and the abstract address the same display also listens on was never tried.
+
+    Built with real sockets: a mode-000 file socket denies connect with EACCES,
+    while an abstract listener under the same name answers (checked here, 2026-11-04).
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    path = _socket_in(tmp_path, 331)
+    with _listening(os.fspath(path)):
+        path.chmod(0)
+        try:
+            with _listening("\0" + os.fspath(path)):
+                assert headed._accepts_connections(331) is True
+        finally:
+            path.chmod(0o600)
 
 
 def test_a_lock_naming_a_pid_too_large_to_probe_is_treated_as_held(monkeypatch, tmp_path) -> None:
@@ -588,6 +768,30 @@ def test_a_lock_we_could_not_remove_is_treated_as_held(monkeypatch, tmp_path) ->
     monkeypatch.setattr(headed.os, "getuid", lambda: someone_else)
 
     assert headed.display_is_free(312) is False
+
+
+def test_a_foreign_locks_process_is_not_read(monkeypatch, tmp_path) -> None:
+    """Review finding F34: `/proc/<pid>/stat` was read before the lock was known to be ours.
+
+    A shared host's foreign Xvfb locks cost a stat read each on every scan.
+    Paired with our own zombie's lock, whose stat line does decide the reclaim.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    lock = tmp_path / ".X340-lock"
+    lock.write_text(f"{1234:>10}\n")
+    reads: list[int] = []
+    monkeypatch.setattr(headed.procfs, "read_stat", lambda pid: reads.append(pid) or procfs.Stat("Z", 1))
+    monkeypatch.setattr(headed.procfs, "probe", lambda pid: procfs.Liveness.EXISTS)
+
+    monkeypatch.setattr(headed, "_read_lock", lambda path: (os.getuid() + 1, 1234))
+    headed._reclaim_zombie_lock(340)
+    assert reads == [], "a foreign lock's pid was read"
+    assert lock.exists(), "a foreign lock is not ours to remove"
+
+    monkeypatch.setattr(headed, "_read_lock", lambda path: (os.getuid(), 1234))
+    headed._reclaim_zombie_lock(340)
+    assert reads == [1234, 1234], "our zombie was read, and re-read after it was moved aside"
+    assert not lock.exists()
 
 
 def _returns_within(seconds: float, call, unblock):
@@ -745,29 +949,53 @@ def test_the_readiness_connect_is_held_to_the_time_left_and_never_past_a_second(
     assert timeouts == [0.25, 1.0], "the time left when it was less than a second, a second when it was more"
 
 
-def test_a_probe_that_cannot_say_is_asked_again_until_the_deadline(monkeypatch, tmp_path) -> None:
-    """Review finding F30 on the wait: a connect that fails for a reason other than "nothing there" is not an answer.
+def test_a_probe_that_cannot_say_is_reported_rather_than_blamed_on_the_server(monkeypatch, tmp_path) -> None:
+    """Review finding F30: swallowing the connect error burned the deadline and then said Xvfb never answered.
 
-    The first ask raises, the second succeeds, and the wait returns instead of
-    failing on the first or giving up on the slot.
+    A local failure (descriptor exhaustion, an unwritable socket directory, a
+    full backlog) is not the display's fault; the OSError is raised at once so
+    the rung names the cause it actually has.
     """
     process = FakeProcess()
     _x11_files_under(monkeypatch, tmp_path)
     (tmp_path / ".X327-lock").write_text(f"{process.pid:>10}\n")
     monkeypatch.setattr(headed.time, "sleep", lambda seconds: None)
-    answers = iter([TimeoutError("timed out"), True])
 
-    def flaky(number: int, timeout_s: float = 1.0) -> bool:
-        answer = next(answers)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
+    def cannot_say(number: int, timeout_s: float = 1.0) -> bool:
+        raise TimeoutError("timed out")
 
-    monkeypatch.setattr(headed, "_accepts_connections", flaky)
+    monkeypatch.setattr(headed, "_accepts_connections", cannot_say)
 
-    headed._await_display(327, process)
+    with pytest.raises(TimeoutError, match="timed out"):
+        headed._await_display(327, process)
 
-    assert next(answers, "drained") == "drained", "both answers were asked for"
+
+def test_readiness_stops_polling_the_lock_twenty_times_a_second_after_the_first_second(monkeypatch, tmp_path) -> None:
+    """Review finding F35: the full 10-second window was polled at a fixed 50 ms.
+
+    A display answers within milliseconds; a live one that never writes its lock
+    spent ~170 opens of the lock path and two socket creations per pass. The
+    interval backs off after the first second, while the deadline is unchanged.
+    """
+    process = FakeProcess()
+    _x11_files_under(monkeypatch, tmp_path)
+    clock = [0.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(headed.time, "monotonic", lambda: clock[0])
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(headed.time, "sleep", fake_sleep)
+    monkeypatch.setattr(headed, "XVFB_READY_TIMEOUT_S", 3.0)
+
+    with pytest.raises(RuntimeError, match="never wrote its lock"):
+        headed._await_display(329, process)
+
+    assert sleeps[0] == headed.XVFB_SETTLE_S
+    assert max(sleeps[1:]) == 0.25, "the poll interval never backed off"
+    assert len(sleeps) < 40, f"still polling every 50 ms ({len(sleeps)} sleeps)"
 
 
 def test_a_lock_that_named_the_server_once_is_not_read_again(monkeypatch, tmp_path) -> None:
@@ -939,7 +1167,7 @@ def _real_servers(number: int):
 def test_a_slot_whose_real_xvfb_was_killed_can_be_started_over() -> None:
     """The finding itself: `display_is_free` said False with no Xvfb alive.
 
-    Run against a real Xvfb because the claim in `_lock_is_held` is about what
+    Run against a real Xvfb because the claim in `_lock_state` is about what
     Xvfb does: it starts over the lock a SIGKILL leaves, instead of failing on
     it. A fake cannot say that, and without it freeing the slot would be a
     guess that sends the next fetch to a display that never comes up.
@@ -1075,6 +1303,69 @@ def test_a_lock_that_goes_away_while_it_is_being_reclaimed_is_not_an_error(monke
     finally:
         zombie.wait()
     assert not (tmp_path / ".X325-lock").exists()
+
+
+def test_a_lock_that_is_replaced_while_it_is_being_reclaimed_is_put_back(monkeypatch, tmp_path) -> None:
+    """Review finding F02: the reclaim read the zombie's lock and then unlinked the path.
+
+    A server that wrote its own lock between those two syscalls lost it, and its
+    `_await_display` then failed with a display that was up. The reclaim moves
+    the lock aside and only unlinks the file it moved; anything else goes back.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    zombie = unreaped_child()
+    try:
+        reclaimed = tmp_path / ".X341-lock"
+        reclaimed.write_text(f"{zombie.pid:>10}\n")
+        headed._reclaim_zombie_lock(341)
+        assert not reclaimed.exists(), "paired: the zombie's own lock is still removed"
+
+        lock = tmp_path / ".X342-lock"
+        lock.write_text(f"{zombie.pid:>10}\n")
+        real_rename = os.rename
+        raced = [False]
+
+        def replace_before_the_move(src, dst) -> None:
+            if Path(src) == lock and not raced[0]:
+                raced[0] = True
+                lock.unlink()
+                lock.write_text(f"{os.getpid():>10}\n")
+            real_rename(src, dst)
+
+        monkeypatch.setattr(headed.os, "rename", replace_before_the_move)
+        headed._reclaim_zombie_lock(342)
+
+        assert lock.read_text().strip() == str(os.getpid()), "the replacement lock was deleted"
+        assert not list(tmp_path.glob(".X342-lock.*.reclaim")), "the moved lock was left aside"
+    finally:
+        zombie.wait()
+
+
+def test_a_lock_written_while_the_reclaim_holds_the_old_one_aside_is_not_replaced(monkeypatch, tmp_path) -> None:
+    """Review finding F02, the second race: a new lock appears while the old one is aside.
+
+    The moved file turned out not to be a zombie's, so the reclaim puts it back.
+    Another server may have written its own lock at the original path by then.
+    The put-back must not replace it: that lock is the live one.
+    """
+    _x11_files_under(monkeypatch, tmp_path)
+    lock = tmp_path / ".X343-lock"
+    lock.write_text(f"{os.getpid():>10}\n")
+    newcomer = f"{os.getpid() + 1:>10}\n"
+    real_rename = os.rename
+    moved = [False]
+
+    def write_a_new_lock_after_the_move(src, dst) -> None:
+        real_rename(src, dst)
+        if Path(src) == lock and not moved[0]:
+            moved[0] = True
+            lock.write_text(newcomer)
+
+    monkeypatch.setattr(headed.os, "rename", write_a_new_lock_after_the_move)
+    headed._reclaim_zombie_lock(343, state=headed._LockState.ZOMBIE)
+
+    assert moved[0], "paired: the lock was moved aside, so the race the test needs happened"
+    assert lock.read_text() == newcomer, "the put-back replaced the lock another server wrote"
 
 
 def test_a_real_xvfb_starts_over_a_socket_file_left_by_a_killed_server() -> None:
